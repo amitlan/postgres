@@ -269,3 +269,212 @@ DROP TABLE as_select1;
 -- check that the oid column is added before the primary key is checked
 CREATE TABLE oid_pk (f1 INT, PRIMARY KEY(oid)) WITH OIDS;
 DROP TABLE oid_pk;
+
+-- create partitioned table
+CREATE TABLE person_partitioned (
+	name text,
+	age int
+) PARTITION BY RANGE ON (age);
+
+CREATE TABLE city_partitioned (
+	name text
+) PARTITION BY LIST ON (name);
+
+DROP TABLE person_partitioned CASCADE;
+DROP TABLE city_partitioned CASCADE;
+
+-- cannot use system columns in partition key
+CREATE TABLE fail_oid_pk (
+	a int
+) PARTITION BY RANGE ON (oid) WITH OIDS;	-- fail
+
+-- cannot use more than 1 column as partition key for list partitioned table
+CREATE TABLE two_col_tab (
+	a1 int,
+	a2 int
+) PARTITION BY LIST ON (a1, a2);	-- fail
+
+-- cannot use more than 16 columns as partition key for range partitioned table
+CREATE TABLE wide_tab (
+	a1 int,
+	a2 int,
+	a3 int,
+	a4 int,
+	a5 int,
+	a6 int,
+	a7 int,
+	a8 int,
+	a9 int,
+	a10 int,
+	a11 int,
+	a12 int,
+	a13 int,
+	a14 int,
+	a15 int,
+	a16 int
+) PARTITION BY RANGE ON (a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16);	-- ok
+
+DROP TABLE wide_tab CASCADE;
+
+-- not ok
+CREATE TABLE extra_wide_tab (
+	a1 int,
+	a2 int,
+	a3 int,
+	a4 int,
+	a5 int,
+	a6 int,
+	a7 int,
+	a8 int,
+	a9 int,
+	a10 int,
+	a11 int,
+	a12 int,
+	a13 int,
+	a14 int,
+	a15 int,
+	a16 int,
+	a17 int
+) PARTITION BY RANGE ON (a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17);	-- fail
+
+-- At the moment, partitioning requires to use columns with data type having
+-- a suitable btree operator class
+CREATE TABLE point_tab (a point) PARTITION BY LIST ON (a);		-- fail
+CREATE TABLE point_tab (a point) PARTITION BY LIST ON (a USING point_ops);		-- fail
+CREATE TABLE point_tab (a point) PARTITION BY RANGE ON (a);		-- fail
+CREATE TABLE point_tab (a point) PARTITION BY RANGE ON (a USING point_ops);		-- fail
+
+-- fail to create a partitioned table with PRIMARY KEY constraint
+CREATE TABLE pk_fail (a int PRIMARY KEY) PARTITION BY RANGE ON (a);
+
+-- fail to create a partitioned table with foreign key constraint
+CREATE TABLE pk_rel(a int PRIMARY KEY);
+CREATE TABLE pk_fail (a int REFERENCES pk_rel(a)) PARTITION BY RANGE ON (a);
+DROP TABLE pk_rel;
+
+-- fail to let a partitioned table be referenced in a foreign key
+CREATE TABLE foo (a int) PARTITION BY RANGE ON (a);
+CREATE TABLE bar_ref_foo (a int REFERENCES foo(a));
+DROP TABLE foo CASCADE;
+
+-- fail to create a partitioned table with prohibited expressions in key
+CREATE TABLE fail_const_key (a int) PARTITION BY RANGE ON (('a'));
+CREATE TABLE fail_agg_in_key (a int) PARTITION BY RANGE ON ((avg(a)));
+CREATE TABLE fail_window_fun_in_key (a int, b int) PARTITION BY RANGE ON ((avg(a) OVER (PARTITION BY b)));
+
+-- create partitioned table and partitions with invalid FOR VALUES
+-- specification, for example, create a range partition with
+-- FOR VALUES IN (...) specification
+CREATE TABLE range_partitioned (
+	a int
+) PARTITION BY RANGE ON (a);
+
+CREATE TABLE fail_partition
+	PARTITION OF range_partitioned
+	FOR VALUES IN (1, 2);		-- fail
+DROP TABLE range_partitioned CASCADE;
+
+CREATE TABLE list_partitioned (
+	a int
+) PARTITION BY LIST ON (a);
+
+CREATE TABLE fail_partition
+	PARTITION OF list_partitioned
+	FOR VALUES LESS THAN (100);		-- fail
+DROP TABLE list_partitioned CASCADE;
+
+-- create range partitioned table and partitions
+CREATE TABLE sales (
+    tos timestamp NOT NULL,
+    item text
+) PARTITION BY RANGE ON (extract(year from tos), extract(month from tos));		-- ok
+
+CREATE TABLE sales_before_2015
+    PARTITION OF sales
+    FOR VALUES LESS THAN (2015, 1);		-- ok
+
+CREATE TABLE sales_2015_q1
+    PARTITION OF sales
+    FOR VALUES LESS THAN (2015, 4);		-- ok
+
+-- effective partition range empty or overlapping
+CREATE TABLE sales_2015_q2
+	PARTITION OF sales
+	FOR VALUES LESS THAN (2015, 4);	-- fail
+CREATE TABLE sales_2015_q2
+	PARTITION OF sales
+	FOR VALUES LESS THAN (2015, 3);	-- fail
+
+-- more bound values than key columns
+CREATE TABLE sales_2015_q2
+    PARTITION OF sales
+    FOR VALUES LESS THAN (2015, 3, 1);		-- fail
+
+-- partitions are dependent on parent
+DROP TABLE sales;		-- fail
+DROP TABLE sales CASCADE;	-- ok
+
+-- create list partitioned table and partitions
+CREATE TABLE store (
+    id int,
+    city text NOT NULL
+) PARTITION BY LIST ON (city);
+
+CREATE TABLE store_east
+    PARTITION OF store
+    FOR VALUES IN ('New York', 'Boston');	-- ok
+
+CREATE TABLE store_west
+    PARTITION OF store
+    FOR VALUES ('San Fransisco', 'Seattle');	-- ok
+
+-- overlap with some existing partition
+CREATE TABLE store_ca
+	PARTITION OF store
+	FOR VALUES ('Los Angeles', 'San Fransisco');	-- fail
+
+DROP TABLE store CASCADE;
+
+-- relpersistence of partitioned table and a partition
+CREATE TEMP TABLE foo (
+	a int
+) PARTITION BY RANGE ON (a);
+
+CREATE TEMP TABLE foo_1
+	PARTITION OF foo
+	FOR VALUES LESS THAN (100);		-- ok
+
+-- cannot be non-temp partition of temp table
+CREATE TABLE foo_2
+	PARTITION OF foo
+	FOR VALUES LESS THAN (100);		-- fail
+DROP TABLE foo CASCADE;
+
+CREATE UNLOGGED TABLE foo (
+	a int
+) PARTITION BY RANGE ON (a);
+
+CREATE UNLOGGED TABLE foo_1
+	PARTITION OF foo
+	FOR VALUES LESS THAN (100);
+
+-- cannot be logged/permanent partition of unlogged table
+CREATE TABLE foo_2
+	PARTITION OF foo
+	FOR VALUES LESS THAN (100);		-- fail
+DROP TABLE foo CASCADE;
+
+CREATE TABLE foo (
+	a int
+) PARTITION BY RANGE ON (a);
+
+-- cannot be temp partition of non-temp table
+CREATE TEMP TABLE foo_2
+	PARTITION OF foo
+	FOR VALUES LESS THAN (200);		-- fail
+
+-- cannot be unlogged partition of permanent table
+CREATE UNLOGGED TABLE foo_1
+	PARTITION OF foo
+	FOR VALUES LESS THAN (100);		-- fail
+DROP TABLE foo CASCADE;
