@@ -18,6 +18,7 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
+#include "catalog/pg_partitioned_rel.h"
 #include "fmgr.h"
 #include "nodes/bitmapset.h"
 #include "rewrite/prs2lock.h"
@@ -62,6 +63,16 @@ typedef struct RelationAmInfo
 	FmgrInfo	amrestrpos;
 	FmgrInfo	amcanreturn;
 } RelationAmInfo;
+
+/* Details of partitions of a partitioned table */
+typedef struct PartitionDesc
+{
+	int			numparts;
+	Oid		   *oids;
+	int		   *listnvalues;
+	Datum	  **listvalues;
+	Datum	   *rangemaxs[PARTITION_MAX_KEYS];
+} PartitionDesc;
 
 /*
  * Here are the contents of a relation cache entry.
@@ -116,6 +127,19 @@ typedef struct RelationData
 	Bitmapset  *rd_indexattr;	/* identifies columns used in indexes */
 	Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
 	Bitmapset  *rd_idattr;		/* included in replica identity index */
+
+	/* Partition key info */
+	Form_pg_partitioned_rel	rd_partkey;
+	struct HeapTupleData   *rd_partkeytuple;
+
+	MemoryContext	rd_partkeycxt;		/* memory context for the following */
+	Oid			   *rd_partopfamily;	/* OIDs of opfamily per col */
+	FmgrInfo	   *rd_partsupfunc;		/* lookup info for support funcs */
+	List	 	   *rd_partexprs;		/* partition key expressions, if any */
+
+	/* Cached information about partitions of this rel */
+	MemoryContext	rd_partdesccxt;	/* memory context for the following */
+	PartitionDesc  *rd_partdesc;	/* struct describing partitions */
 
 	/*
 	 * rd_options is set whenever rd_rel is loaded into the relcache entry.

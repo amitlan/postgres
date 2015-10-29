@@ -2607,6 +2607,8 @@ _copyColumnDef(const ColumnDef *from)
 	COPY_SCALAR_FIELD(is_local);
 	COPY_SCALAR_FIELD(is_not_null);
 	COPY_SCALAR_FIELD(is_from_type);
+	COPY_SCALAR_FIELD(is_for_partition);
+	COPY_SCALAR_FIELD(is_dropped_copy);
 	COPY_SCALAR_FIELD(storage);
 	COPY_NODE_FIELD(raw_default);
 	COPY_NODE_FIELD(cooked_default);
@@ -2615,6 +2617,56 @@ _copyColumnDef(const ColumnDef *from)
 	COPY_NODE_FIELD(constraints);
 	COPY_NODE_FIELD(fdwoptions);
 	COPY_LOCATION_FIELD(location);
+
+	return newnode;
+}
+
+static PartitionBy *
+_copyPartitionBy(const PartitionBy *from)
+{
+
+	PartitionBy *newnode = makeNode(PartitionBy);
+
+	COPY_SCALAR_FIELD(strategy);
+	COPY_NODE_FIELD(partParams);
+	COPY_LOCATION_FIELD(location);
+
+	return newnode;
+}
+
+static PartitionElem *
+_copyPartitionElem(const PartitionElem *from)
+{
+	PartitionElem *newnode = makeNode(PartitionElem);
+
+	COPY_STRING_FIELD(name);
+	COPY_NODE_FIELD(expr);
+	COPY_NODE_FIELD(opclass);
+	COPY_LOCATION_FIELD(location);
+
+	return newnode;
+}
+
+static PartitionValues *
+_copyPartitionValues(const PartitionValues *from)
+{
+	PartitionValues *newnode = makeNode(PartitionValues);
+
+	COPY_NODE_FIELD(listvalues);
+	COPY_NODE_FIELD(rangemaxs);
+	COPY_LOCATION_FIELD(location);
+
+	return newnode;
+}
+
+static PartitionDef *
+_copyPartitionDef(const PartitionDef *from)
+{
+	PartitionDef *newnode = makeNode(PartitionDef);
+
+	COPY_NODE_FIELD(name);
+	COPY_NODE_FIELD(parent);
+	COPY_NODE_FIELD(values);
 
 	return newnode;
 }
@@ -2854,6 +2906,7 @@ _copyAlterTableCmd(const AlterTableCmd *from)
 	COPY_STRING_FIELD(name);
 	COPY_NODE_FIELD(newowner);
 	COPY_NODE_FIELD(def);
+	COPY_NODE_FIELD(using_table);
 	COPY_SCALAR_FIELD(behavior);
 	COPY_SCALAR_FIELD(missing_ok);
 
@@ -3000,8 +3053,11 @@ static void
 CopyCreateStmtFields(const CreateStmt *from, CreateStmt *newnode)
 {
 	COPY_NODE_FIELD(relation);
+	COPY_NODE_FIELD(partitionOf);
 	COPY_NODE_FIELD(tableElts);
 	COPY_NODE_FIELD(inhRelations);
+	COPY_NODE_FIELD(partValues);
+	COPY_NODE_FIELD(partitionby);
 	COPY_NODE_FIELD(ofTypename);
 	COPY_NODE_FIELD(constraints);
 	COPY_NODE_FIELD(options);
@@ -4935,6 +4991,18 @@ copyObject(const void *from)
 			break;
 		case T_ColumnDef:
 			retval = _copyColumnDef(from);
+			break;
+		case T_PartitionBy:
+			retval = _copyPartitionBy(from);
+			break;
+		case T_PartitionElem:
+			retval = _copyPartitionElem(from);
+			break;
+		case T_PartitionValues:
+			retval = _copyPartitionValues(from);
+			break;
+		case T_PartitionDef:
+			retval = _copyPartitionDef(from);
 			break;
 		case T_Constraint:
 			retval = _copyConstraint(from);

@@ -20,6 +20,7 @@
 #include "optimizer/placeholder.h"
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
+#include "parser/parsetree.h"
 #include "utils/hsearch.h"
 
 
@@ -76,23 +77,14 @@ setup_simple_rel_arrays(PlannerInfo *root)
 }
 
 /*
- * build_simple_rel
- *	  Construct a new RelOptInfo for a base relation or 'other' relation.
+ * make_reloptinfo - factored out of build_simple_rel for places that don't
+ * want/need to put the result into the simple_rel_array
  */
 RelOptInfo *
-build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
+make_reloptinfo(PlannerInfo *root, int relid, RelOptKind reloptkind,
+					RangeTblEntry *rte)
 {
-	RelOptInfo *rel;
-	RangeTblEntry *rte;
-
-	/* Rel should not exist already */
-	Assert(relid > 0 && relid < root->simple_rel_array_size);
-	if (root->simple_rel_array[relid] != NULL)
-		elog(ERROR, "rel %d already exists", relid);
-
-	/* Fetch RTE for relation */
-	rte = root->simple_rte_array[relid];
-	Assert(rte != NULL);
+	RelOptInfo	*rel;
 
 	rel = makeNode(RelOptInfo);
 	rel->reloptkind = reloptkind;
@@ -125,6 +117,9 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 	rel->serverid = InvalidOid;
 	rel->fdwroutine = NULL;
 	rel->fdw_private = NULL;
+	rel->parent_relid = 0;
+	rel->partoptinfo = NULL;
+	rel->partrelids = NIL;
 	rel->baserestrictinfo = NIL;
 	rel->baserestrictcost.startup = 0;
 	rel->baserestrictcost.per_tuple = 0;
@@ -162,8 +157,61 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
 			break;
 	}
 
+	return rel;
+}
+
+/*
+ * build_simple_rel
+ *	  Construct a new RelOptInfo for a base relation or 'other' relation.
+ */
+RelOptInfo *
+build_simple_rel(PlannerInfo *root, int relid, RelOptKind reloptkind)
+{
+	RelOptInfo *rel;
+	RangeTblEntry *rte;
+
+	/* Rel should not exist already */
+	Assert(relid > 0);
+	if (relid < root->simple_rel_array_size &&
+						root->simple_rel_array[relid] != NULL)
+		elog(ERROR, "rel %d already exists", relid);
+
+	/* Fetch RTE for relation */
+	if (relid < root->simple_rel_array_size)
+		rte = root->simple_rte_array[relid];
+	else
+		rte = rt_fetch(relid, root->parse->rtable);
+
+	Assert(rte != NULL);
+
+	/* Generate the RelOptInfo */
+	rel = make_reloptinfo(root, relid, reloptkind, rte);
+
+	/* Add the finished struct to the simple_rel_array */
+	if (relid >= root->simple_rel_array_size)
+	{
+		int			oldsize = root->simple_rel_array_size;
+		int			newsize;
+
+		newsize = Max(oldsize * 2, relid + 1);
+		root->simple_rel_array = (RelOptInfo **)
+			repalloc(root->simple_rel_array, newsize * sizeof(RelOptInfo *));
+		root->simple_rte_array = (RangeTblEntry **)
+			repalloc(root->simple_rte_array, newsize * sizeof(RangeTblEntry *));
+		MemSet(root->simple_rel_array + oldsize, 0,
+			   (newsize - oldsize) * sizeof(RelOptInfo *));
+		MemSet(root->simple_rte_array + oldsize, 0,
+			   (newsize - oldsize) * sizeof(RelOptInfo *));
+
+		root->simple_rel_array_size = newsize;
+	}
+
 	/* Save the finished struct in the query's simple_rel_array */
 	root->simple_rel_array[relid] = rel;
+
+	/* Save the RTE, if not already there */
+	if (root->simple_rte_array[relid] == NULL)
+		root->simple_rte_array[relid] = rte;
 
 	/*
 	 * If this rel is an appendrel parent, recurse to build "other rel"

@@ -47,6 +47,8 @@
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
+#include "catalog/pg_partition.h"
+#include "catalog/pg_partitioned_rel.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_range.h"
 #include "catalog/pg_rewrite.h"
@@ -566,6 +568,28 @@ static const struct cachedesc cacheinfo[] = {
 			0
 		},
 		8
+	},
+	{PartitionRelationId,		/* PARTITIONID */
+		PartitionIdIndexId,
+		1,
+		{
+			Anum_pg_partition_partrelid,
+			0,
+			0,
+			0
+		},
+		64
+	},
+	{PartitionedRelRelationId,		/* PARTITIONEDRELID */
+		PartitionedRelrelidIndexId,
+		1,
+		{
+			Anum_pg_partitioned_rel_partrelid,
+			0,
+			0,
+			0
+		},
+		64
 	},
 	{ProcedureRelationId,		/* PROCNAMEARGSNSP */
 		ProcedureNameArgsNspIndexId,

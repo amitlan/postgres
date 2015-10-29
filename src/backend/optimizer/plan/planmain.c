@@ -224,6 +224,7 @@ query_planner(PlannerInfo *root, List *tlist,
 
 		Assert(brel->relid == rti);		/* sanity check on array */
 
+		/* Note that RELOPT_PARTITION won't happen yet */
 		if (brel->reloptkind == RELOPT_BASEREL ||
 			brel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 			total_pages += (double) brel->pages;

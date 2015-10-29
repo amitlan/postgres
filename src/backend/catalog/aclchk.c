@@ -751,6 +751,8 @@ objectsInSchemaToOids(GrantObjectType objtype, List *nspnames)
 			case ACL_OBJECT_RELATION:
 				objs = getRelationsInNamespace(namespaceId, RELKIND_RELATION);
 				objects = list_concat(objects, objs);
+				objs = getRelationsInNamespace(namespaceId, RELKIND_PARTITIONED_REL);
+				objects = list_concat(objects, objs);
 				objs = getRelationsInNamespace(namespaceId, RELKIND_VIEW);
 				objects = list_concat(objects, objs);
 				objs = getRelationsInNamespace(namespaceId, RELKIND_MATVIEW);

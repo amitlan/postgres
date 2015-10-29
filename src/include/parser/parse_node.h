@@ -64,7 +64,9 @@ typedef enum ParseExprKind
 	EXPR_KIND_ALTER_COL_TRANSFORM,		/* transform expr in ALTER COLUMN TYPE */
 	EXPR_KIND_EXECUTE_PARAMETER,	/* parameter value in EXECUTE */
 	EXPR_KIND_TRIGGER_WHEN,		/* WHEN condition in CREATE TRIGGER */
-	EXPR_KIND_POLICY			/* USING or WITH CHECK expr in policy */
+	EXPR_KIND_POLICY,			/* USING or WITH CHECK expr in policy */
+	EXPR_KIND_PARTKEY_EXPRESSION, /* partition key expression */
+	EXPR_KIND_PARTITION_VALUES	/* FOR VALUES in CREATE TABLE ... PARTITION OF */
 } ParseExprKind;
 
 

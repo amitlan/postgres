@@ -1009,6 +1009,12 @@ generate_join_implied_equalities(PlannerInfo *root,
 		/* ECs will be marked with the parent's relid, not the child's */
 		nominal_join_relids = bms_union(outer_relids, nominal_inner_relids);
 	}
+	else if (inner_rel->reloptkind == RELOPT_PARTITION_REL)
+	{
+		nominal_inner_relids = bms_make_singleton(inner_rel->parent_relid);
+		/* ECs will be marked with the parent's relid, not the partition's */
+		nominal_join_relids = bms_union(outer_relids, nominal_inner_relids);
+	}
 	else
 	{
 		nominal_inner_relids = inner_relids;
@@ -1271,6 +1277,12 @@ generate_join_implied_equalities_broken(PlannerInfo *root,
 		result = (List *) adjust_appendrel_attrs_multilevel(root,
 															(Node *) result,
 															inner_rel);
+
+	if (inner_rel->reloptkind == RELOPT_PARTITION_REL &&
+		result != NIL)
+		result = (List *) adjust_partition_attrs((Node *) result,
+												 inner_rel->parent_relid,
+												 inner_rel->relid);
 
 	return result;
 }
@@ -1905,6 +1917,84 @@ exprs_known_equal(PlannerInfo *root, Node *item1, Node *item2)
 	return false;
 }
 
+/*
+ * add_partition_equivalences
+ *	  Search for EC members that reference the parent_rel, and
+ *	  add transformed members referencing the partition_rel.
+ *
+ * Note that this function won't be called at all unless we have at least some
+ * reason to believe that the EC members it generates will be useful.
+ */
+void
+add_partition_equivalences(PlannerInfo *root,
+						   RelOptInfo *parent_rel,
+						   RelOptInfo *partition_rel)
+{
+	ListCell   *lc1;
+
+	foreach(lc1, root->eq_classes)
+	{
+		EquivalenceClass *cur_ec = (EquivalenceClass *) lfirst(lc1);
+		ListCell   *lc2;
+
+		/*
+		 * If this EC contains a volatile expression, then generating partition
+		 * EMs would be downright dangerous, so skip it.  We rely on a
+		 * volatile EC having only one EM.
+		 */
+		if (cur_ec->ec_has_volatile)
+			continue;
+
+		foreach(lc2, cur_ec->ec_members)
+		{
+			EquivalenceMember *cur_em = (EquivalenceMember *) lfirst(lc2);
+
+			if (cur_em->em_is_const)
+				continue;		/* ignore consts here */
+
+			/* Does it reference parent_rel? */
+			if (bms_overlap(cur_em->em_relids, parent_rel->relids))
+			{
+				/* Yes, generate transformed partition version */
+				Expr	   *partition_expr;
+				Relids		new_relids;
+				Relids		new_nullable_relids;
+
+				partition_expr = (Expr *)
+					adjust_partition_attrs((Node *) cur_em->em_expr,
+										   parent_rel->relid,
+										   partition_rel->relid);
+
+				/*
+				 * Transform em_relids to match.  Note we do *not* do
+				 * pull_varnos(partition_expr) here, as for example the
+				 * transformation might have substituted a constant, but we
+				 * don't want the partition member to be marked as constant.
+				 */
+				new_relids = bms_difference(cur_em->em_relids,
+											parent_rel->relids);
+				new_relids = bms_add_members(new_relids, partition_rel->relids);
+
+				/*
+				 * And likewise for nullable_relids.  Note this code assumes
+				 * parent and partition relids are singletons.
+				 */
+				new_nullable_relids = cur_em->em_nullable_relids;
+				if (bms_overlap(new_nullable_relids, parent_rel->relids))
+				{
+					new_nullable_relids = bms_difference(new_nullable_relids,
+														 parent_rel->relids);
+					new_nullable_relids = bms_add_members(new_nullable_relids,
+														  partition_rel->relids);
+				}
+
+				(void) add_eq_member(cur_ec, partition_expr,
+									 new_relids, new_nullable_relids,
+									 true, cur_em->em_datatype);
+			}
+		}
+	}
+}
 
 /*
  * add_child_rel_equivalences
@@ -2072,12 +2162,15 @@ generate_implied_equalities_for_column(PlannerInfo *root,
 {
 	List	   *result = NIL;
 	bool		is_child_rel = (rel->reloptkind == RELOPT_OTHER_MEMBER_REL);
+	bool		is_partition_rel = (rel->reloptkind == RELOPT_PARTITION_REL);
 	Relids		parent_relids;
 	ListCell   *lc1;
 
 	/* If it's a child rel, we'll need to know what its parent(s) are */
 	if (is_child_rel)
 		parent_relids = find_childrel_parents(root, rel);
+	else if (is_partition_rel)
+		parent_relids = bms_make_singleton(rel->parent_relid);
 	else
 		parent_relids = NULL;	/* not used, but keep compiler quiet */
 
@@ -2310,6 +2403,8 @@ eclass_useful_for_merging(PlannerInfo *root,
 	/* If specified rel is a child, we must consider the topmost parent rel */
 	if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 		relids = find_childrel_top_parent(root, rel)->relids;
+	else if (rel->reloptkind == RELOPT_PARTITION_REL)
+		relids = bms_make_singleton(rel->parent_relid);
 	else
 		relids = rel->relids;
 

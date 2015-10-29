@@ -4103,6 +4103,20 @@ set_foreign_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 	set_rel_width(root, rel);
 }
 
+/*
+ * set_partitioned_rel_size_estimates -
+ *		Set the size estimates for a partitioned relation.
+ *
+ * In fact, most of the work is done by set_partitioned_rel_size() by summing
+ * up the results of performing set_rel_size() on each of the qualifying
+ * partitions. Here we simply perform set_rel_width() on the partitioned rel
+ * itself.
+ */
+void
+set_partitioned_rel_size_estimates(PlannerInfo *root, RelOptInfo *rel)
+{
+	set_rel_width(root, rel);
+}
 
 /*
  * set_rel_width

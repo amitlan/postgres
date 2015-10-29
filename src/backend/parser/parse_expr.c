@@ -1700,8 +1700,14 @@ transformSubLink(ParseState *pstate, SubLink *sublink)
 		case EXPR_KIND_FUNCTION_DEFAULT:
 			err = _("cannot use subquery in DEFAULT expression");
 			break;
+		case EXPR_KIND_PARTITION_VALUES:
+			err = _("cannot use subquery in partition value expressions");
+			break;
 		case EXPR_KIND_INDEX_EXPRESSION:
 			err = _("cannot use subquery in index expression");
+			break;
+		case EXPR_KIND_PARTKEY_EXPRESSION:
+			err = _("cannot use subquery in partition key expressions");
 			break;
 		case EXPR_KIND_INDEX_PREDICATE:
 			err = _("cannot use subquery in index predicate");
@@ -3225,6 +3231,10 @@ ParseExprKindName(ParseExprKind exprKind)
 			return "EXECUTE";
 		case EXPR_KIND_TRIGGER_WHEN:
 			return "WHEN";
+		case EXPR_KIND_PARTKEY_EXPRESSION:
+			return "partition key expression";
+		case EXPR_KIND_PARTITION_VALUES:
+			return "PARTITION FOR VALUES";
 
 			/*
 			 * There is intentionally no default: case here, so that the

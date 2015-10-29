@@ -126,6 +126,11 @@ cluster(ClusterStmt *stmt, bool isTopLevel)
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			   errmsg("cannot cluster temporary tables of other sessions")));
 
+		if (rel->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+			ereport(ERROR,
+					(errmsg("cannot cluster partitioned table \"%s\"", RelationGetRelationName(rel)),
+					 errhint("Run CLUSTER on individual partitions one-by-one.")));
+
 		if (stmt->indexname == NULL)
 		{
 			ListCell   *index;

@@ -43,6 +43,12 @@ extern Oid	RelationGetReplicaIndex(Relation relation);
 extern List *RelationGetIndexExpressions(Relation relation);
 extern List *RelationGetIndexPredicate(Relation relation);
 
+/*
+ * Routines to compute/retrieve information related to partitioned tables
+ */
+extern List *RelationGetPartitionExpressions(Relation relation);
+extern struct PartitionDesc *RelationGetPartitionDesc(Relation relation);
+
 typedef enum IndexAttrBitmapKind
 {
 	INDEX_ATTR_BITMAP_ALL,

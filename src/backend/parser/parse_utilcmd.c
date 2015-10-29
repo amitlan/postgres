@@ -84,6 +84,8 @@ typedef struct
 	List	   *alist;			/* "after list" of things to do after creating
 								 * the table */
 	IndexStmt  *pkey;			/* PRIMARY KEY index, if any */
+	bool		ispartitioned;	/* true if CREATE TABLE ... PARTITION BY */
+	List	   *partitionElts;	/* CREATE TABLE ... PARTITION OF ... */
 } CreateStmtContext;
 
 /* State shared by transformCreateSchemaStmt and its subroutines */
@@ -124,6 +126,11 @@ static void transformConstraintAttrs(CreateStmtContext *cxt,
 						 List *constraintList);
 static void transformColumnType(CreateStmtContext *cxt, ColumnDef *column);
 static void setSchemaName(char *context_schema, char **stmt_schema_name);
+static void transformPartitionOf(CreateStmtContext *cxt,
+					 RangeVar *parent,
+					 PartitionValues *values);
+static PartitionValues* transformPartitionValues(CreateStmtContext *cxt,
+								PartitionValues *values);
 
 
 /*
@@ -224,6 +231,8 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	cxt.blist = NIL;
 	cxt.alist = NIL;
 	cxt.pkey = NULL;
+	cxt.ispartitioned = stmt->partitionby ? true : false;
+	cxt.partitionElts = NIL;
 
 	/*
 	 * Notice that we allow OIDs here only for plain tables, even though
@@ -238,9 +247,28 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	cxt.hasoids = interpretOidsOption(stmt->options, !cxt.isforeign);
 
 	Assert(!stmt->ofTypename || !stmt->inhRelations);	/* grammar enforces */
+	Assert(!stmt->ofTypename || !stmt->partitionOf);	/* grammar enforces */
+	Assert(!stmt->inhRelations || !stmt->partitionOf);	/* grammar enforces */
+	Assert(!stmt->partitionby || !stmt->partitionOf);	/* grammar enforces */
 
 	if (stmt->ofTypename)
 		transformOfType(&cxt, stmt->ofTypename);
+
+	/*
+	 * Transform "PARTITION OF parent FOR VALUES ..." clause:
+	 *
+	 * - Gin up ColumnDef list by reading off parent's TupleDesc,
+	 * - Gin up a AT command to attach this relation as partition of parent.
+	 */
+	if (stmt->partitionOf)
+	{
+		transformPartitionOf(&cxt, stmt->partitionOf, stmt->partValues);
+
+		stmt->tableElts = cxt.partitionElts;
+		stmt->relation->schemaname = cxt.relation->schemaname;
+		stmt->options = lcons(makeDefElem("oids",
+							  (Node *)makeInteger(cxt.hasoids)), stmt->options);
+	}
 
 	/*
 	 * Run through each primary element in the table creation clause. Separate
@@ -572,6 +600,12 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 							 errmsg("primary key constraints are not supported on foreign tables"),
 							 parser_errposition(cxt->pstate,
 												constraint->location)));
+				if (cxt->ispartitioned)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("primary key constraints are not supported on partitioned tables"),
+							 parser_errposition(cxt->pstate,
+												constraint->location)));
 				/* FALL THRU */
 
 			case CONSTR_UNIQUE:
@@ -579,6 +613,12 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("unique constraints are not supported on foreign tables"),
+							 parser_errposition(cxt->pstate,
+												constraint->location)));
+				if (cxt->ispartitioned)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("unique constraints are not supported on partitioned tables"),
 							 parser_errposition(cxt->pstate,
 												constraint->location)));
 				if (constraint->keys == NIL)
@@ -596,6 +636,16 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("foreign key constraints are not supported on foreign tables"),
+							 parser_errposition(cxt->pstate,
+												constraint->location)));
+				/*
+				 * Following limitation stems from the fact that row-level AFTER
+				 * triggers are yet disallowed. See CreateTrigger().
+				 */
+				if (cxt->ispartitioned)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("foreign key constraints are not supported on partitioned tables"),
 							 parser_errposition(cxt->pstate,
 												constraint->location)));
 
@@ -663,6 +713,12 @@ transformTableConstraint(CreateStmtContext *cxt, Constraint *constraint)
 						 errmsg("primary key constraints are not supported on foreign tables"),
 						 parser_errposition(cxt->pstate,
 											constraint->location)));
+			if (cxt->ispartitioned)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("primary key constraints are not supported on partitioned tables"),
+						 parser_errposition(cxt->pstate,
+											constraint->location)));
 			cxt->ixconstraints = lappend(cxt->ixconstraints, constraint);
 			break;
 
@@ -673,6 +729,12 @@ transformTableConstraint(CreateStmtContext *cxt, Constraint *constraint)
 						 errmsg("unique constraints are not supported on foreign tables"),
 						 parser_errposition(cxt->pstate,
 											constraint->location)));
+			if (cxt->ispartitioned)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("unique constraints are not supported on partitioned tables"),
+						 parser_errposition(cxt->pstate,
+											constraint->location)));
 			cxt->ixconstraints = lappend(cxt->ixconstraints, constraint);
 			break;
 
@@ -681,6 +743,12 @@ transformTableConstraint(CreateStmtContext *cxt, Constraint *constraint)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("exclusion constraints are not supported on foreign tables"),
+						 parser_errposition(cxt->pstate,
+											constraint->location)));
+			if (cxt->ispartitioned)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("exclusion constraints are not supported on partitioned tables"),
 						 parser_errposition(cxt->pstate,
 											constraint->location)));
 			cxt->ixconstraints = lappend(cxt->ixconstraints, constraint);
@@ -695,6 +763,17 @@ transformTableConstraint(CreateStmtContext *cxt, Constraint *constraint)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("foreign key constraints are not supported on foreign tables"),
+						 parser_errposition(cxt->pstate,
+											constraint->location)));
+			/*
+			 * Following limitation stems from the fact that there is no
+			 * comprehensive support for row-level AFTER triggers on
+			 * partitioned tables. See CreateTrigger().
+			 */
+			if (cxt->ispartitioned)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("foreign key constraints are not supported on partitioned tables"),
 						 parser_errposition(cxt->pstate,
 											constraint->location)));
 			cxt->fkconstraints = lappend(cxt->fkconstraints, constraint);
@@ -749,6 +828,7 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 	relation = relation_openrv(table_like_clause->relation, AccessShareLock);
 
 	if (relation->rd_rel->relkind != RELKIND_RELATION &&
+		relation->rd_rel->relkind != RELKIND_PARTITIONED_REL &&
 		relation->rd_rel->relkind != RELKIND_VIEW &&
 		relation->rd_rel->relkind != RELKIND_MATVIEW &&
 		relation->rd_rel->relkind != RELKIND_COMPOSITE_TYPE &&
@@ -2464,6 +2544,7 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 	cxt.inh_indexes = NIL;
 	cxt.blist = NIL;
 	cxt.alist = NIL;
+	cxt.ispartitioned = is_partitioned(relid) ? true : false;
 	cxt.pkey = NULL;
 
 	/*
@@ -2547,6 +2628,52 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 							ereport(ERROR,
 									(errcode(ERRCODE_DATATYPE_MISMATCH),
 									 errmsg("transform expression must not return a set")));
+					}
+
+					newcmds = lappend(newcmds, cmd);
+					break;
+				}
+
+			/*
+			 * Push a RenameStmt to rename the the table to specified name
+			 * once it's attached to become a partition. Rest of the
+			 * responsibilities belong to AlterTblStmt.
+			 *
+			 * XXX - This is currently not supported. Won't be until we teach
+			 * ATExecAttachPartition() to deal with existing tables passed in
+			 * to use as a partition. Remember to set cmd->def->parent:
+			 */
+			case AT_AttachPartition:
+				{
+					if (cmd->using_table)
+					{
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("ALTER TABLE ATTACH PARTITION (...) USING TABLE not implemented")));
+					}
+
+					newcmds = lappend(newcmds, cmd);
+					break;
+				}
+
+			/*
+			 * Push a RenameStmt to rename the partition to specified name
+			 * once it's detached to become a regular table.
+			 */
+			case AT_DetachPartition:
+				{
+					RenameStmt	*stmt;
+
+					if (cmd->using_table)
+					{
+						stmt = makeNode(RenameStmt);
+
+						stmt->renameType = OBJECT_TABLE;
+						stmt->relation = ((PartitionDef *) cmd->def)->name;
+						stmt->newname = cmd->using_table->relname;
+						stmt->missing_ok = false;
+
+						cxt.alist = lappend(cxt.alist, stmt);
 					}
 
 					newcmds = lappend(newcmds, cmd);
@@ -2916,4 +3043,136 @@ setSchemaName(char *context_schema, char **stmt_schema_name)
 				 errmsg("CREATE specifies a schema (%s) "
 						"different from the one being created (%s)",
 						*stmt_schema_name, context_schema)));
+}
+
+/*
+ * transformPartitionOf
+ *		Transform CREATE TABLE ... PARTITION OF <parent>
+ */
+static void
+transformPartitionOf(CreateStmtContext *cxt,
+					 RangeVar *parent,
+					 PartitionValues *values)
+{
+	Relation		parent_rel;
+	TupleDesc		parent_tupdesc;
+	TupleConstr	   *parent_constr;
+	PartitionDef   *partition;
+	AlterTableCmd  *attachcmd;
+	AlterTableStmt *alter;
+	int		attno;
+
+	/* Use the same schema as the parent if not specified. */
+	if (cxt->relation->schemaname == NULL)
+		cxt->relation->schemaname = parent->schemaname;
+
+	parent_rel = heap_openrv(parent, AccessShareLock);
+	parent_tupdesc = RelationGetDescr(parent_rel);
+	parent_constr = parent_tupdesc->constr;
+
+	/*
+	 * Gin up column definition list for the partition including
+	 * any constraints (defaults) by reading individual attributes
+	 * off parent's tuple descriptor. Do not miss dropped columns
+	 * to keep both in sync.
+	 */
+	for (attno = 0; attno < parent_tupdesc->natts; attno++)
+	{
+		Form_pg_attribute attr = parent_tupdesc->attrs[attno];
+		ColumnDef  *n;
+
+		n = makeNode(ColumnDef);
+		n->colname = pstrdup(NameStr(attr->attname));
+
+		/* A hack... */
+		if (attr->attisdropped)
+		{
+			/* ... is hack! This will have to go away eventually */
+			n->typeName = makeTypeNameFromNameList(list_make1(makeString("int2")));
+			n->is_dropped_copy = true;
+		}
+		else
+			n->typeName = makeTypeNameFromOid(attr->atttypid, attr->atttypmod);
+
+		n->inhcount = 0;
+		n->is_local = true;
+		n->is_not_null = attr->attnotnull;
+		n->is_from_type = false;
+		n->is_for_partition = true;
+		n->storage = attr->attstorage;
+		n->cooked_default = NULL;
+		n->raw_default = NULL;
+		n->collClause = NULL;
+		n->collOid = attr->attcollation;
+		n->constraints = NIL;
+		n->location = -1;
+		cxt->partitionElts = lappend(cxt->partitionElts, n);
+	}
+
+	/* Copy whether partition should have oids */
+	cxt->hasoids = parent_rel->rd_rel->relhasoids;
+
+	heap_close(parent_rel, AccessShareLock);
+
+	/*
+	 * Gin up a AlterTableStmt that would take care of creating the
+	 * pg_partition entry for this relation as a partition of parent.
+	 */
+	partition = makeNode(PartitionDef);
+	partition->name = cxt->relation;
+	partition->parent = parent;
+	partition->values = transformPartitionValues(cxt, values);
+
+	attachcmd = makeNode(AlterTableCmd);
+	attachcmd->subtype = AT_AttachPartition;
+	attachcmd->def = (Node *) partition;
+
+	alter = makeNode(AlterTableStmt);
+	alter->relation = parent;
+	alter->cmds = list_make1(attachcmd);
+	alter->relkind = OBJECT_TABLE;
+
+	cxt->alist = lappend(cxt->alist, alter);
+}
+
+/*
+ * transformPartitionValues
+ *
+ * Transform partition value as returned by the grammar into something
+ * we can evaluate to store into pg_partition.
+ */
+static PartitionValues *
+transformPartitionValues(CreateStmtContext *cxt, PartitionValues *values)
+{
+	ListCell		   *cell;
+	PartitionValues	   *result = (PartitionValues *)
+											makeNode(PartitionValues);
+
+	if (values->listvalues)
+	{
+		foreach(cell, values->listvalues)
+		{
+			Node *value = (Node *) lfirst(cell);
+
+			result->listvalues = lappend(result->listvalues,
+									transformExpr(cxt->pstate, value,
+										EXPR_KIND_PARTITION_VALUES));
+		}
+	}
+	else
+	{
+		foreach(cell, values->rangemaxs)
+		{
+			Node *value;
+
+			value = (Node *) lfirst(cell);
+			result->rangemaxs = lappend(result->rangemaxs,
+									transformExpr(cxt->pstate, value,
+											EXPR_KIND_PARTITION_VALUES));
+		}
+	}
+
+	result->location = values->location;
+
+	return result;
 }

@@ -450,12 +450,18 @@ check_agglevels_and_constraints(ParseState *pstate, Node *expr)
 				err = _("grouping operations are not allowed in DEFAULT expressions");
 
 			break;
+		case EXPR_KIND_PARTITION_VALUES:
+			err = _("aggregate functions are not allowed in partition value expressions");
+			break;
 		case EXPR_KIND_INDEX_EXPRESSION:
 			if (isAgg)
 				err = _("aggregate functions are not allowed in index expressions");
 			else
 				err = _("grouping operations are not allowed in index expressions");
 
+			break;
+		case EXPR_KIND_PARTKEY_EXPRESSION:
+			err = _("aggregate functions are not allowed in partition key expressions");
 			break;
 		case EXPR_KIND_INDEX_PREDICATE:
 			if (isAgg)
@@ -827,8 +833,14 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 		case EXPR_KIND_FUNCTION_DEFAULT:
 			err = _("window functions are not allowed in DEFAULT expressions");
 			break;
+		case EXPR_KIND_PARTITION_VALUES:
+			err = _("window functions are not allowed in partition value expressions");
+			break;
 		case EXPR_KIND_INDEX_EXPRESSION:
 			err = _("window functions are not allowed in index expressions");
+			break;
+		case EXPR_KIND_PARTKEY_EXPRESSION:
+			err = _("window functions are not allowed in partition key expressions");
 			break;
 		case EXPR_KIND_INDEX_PREDICATE:
 			err = _("window functions are not allowed in index predicates");

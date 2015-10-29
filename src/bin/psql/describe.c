@@ -764,6 +764,7 @@ permissionsList(const char *pattern)
 					  " WHEN 'm' THEN '%s'"
 					  " WHEN 'S' THEN '%s'"
 					  " WHEN 'f' THEN '%s'"
+					  " WHEN 'P' THEN '%s'"
 					  " END as \"%s\",\n"
 					  "  ",
 					  gettext_noop("Schema"),
@@ -773,6 +774,7 @@ permissionsList(const char *pattern)
 					  gettext_noop("materialized view"),
 					  gettext_noop("sequence"),
 					  gettext_noop("foreign table"),
+					  gettext_noop("partitioned table"),
 					  gettext_noop("Type"));
 
 	printACLColumn(&buf, "c.relacl");
@@ -819,7 +821,7 @@ permissionsList(const char *pattern)
 
 	appendPQExpBufferStr(&buf, "\nFROM pg_catalog.pg_class c\n"
 	   "     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace\n"
-						 "WHERE c.relkind IN ('r', 'v', 'm', 'S', 'f')\n");
+						 "WHERE c.relkind IN ('r', 'v', 'm', 'S', 'f', 'P')\n");
 
 	/*
 	 * Unless a schema pattern is specified, we suppress system and temp
@@ -1241,6 +1243,7 @@ describeOneTableDetails(const char *schemaname,
 		char	   *reloftype;
 		char		relpersistence;
 		char		relreplident;
+		bool		relispartition;
 	}			tableinfo;
 	bool		show_modifiers = false;
 	bool		retval;
@@ -1256,7 +1259,24 @@ describeOneTableDetails(const char *schemaname,
 	initPQExpBuffer(&tmpbuf);
 
 	/* Get general table info */
-	if (pset.sversion >= 90500)
+	if (pset.sversion >= 90600)
+	{
+		printfPQExpBuffer(&buf,
+			  "SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, "
+						  "c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, "
+						  "c.relhasoids, %s, c.reltablespace, "
+						  "CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, "
+						  "c.relpersistence, c.relreplident, c.relispartition\n"
+						  "FROM pg_catalog.pg_class c\n "
+		   "LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid)\n"
+						  "WHERE c.oid = '%s';",
+						  (verbose ?
+						   "pg_catalog.array_to_string(c.reloptions || "
+						   "array(select 'toast.' || x from pg_catalog.unnest(tc.reloptions) x), ', ')\n"
+						   : "''"),
+						  oid);
+	}
+	else if (pset.sversion >= 90500)
 	{
 		printfPQExpBuffer(&buf,
 			  "SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, "
@@ -1399,6 +1419,7 @@ describeOneTableDetails(const char *schemaname,
 		*(PQgetvalue(res, 0, 11)) : 0;
 	tableinfo.relreplident = (pset.sversion >= 90400) ?
 		*(PQgetvalue(res, 0, 12)) : 'd';
+	tableinfo.relispartition = strcmp(PQgetvalue(res, 0, 13), "t") == 0;
 	PQclear(res);
 	res = NULL;
 
@@ -1463,8 +1484,8 @@ describeOneTableDetails(const char *schemaname,
 		 * types, and foreign tables (c.f. CommentObject() in comment.c).
 		 */
 		if (tableinfo.relkind == 'r' || tableinfo.relkind == 'v' ||
-			tableinfo.relkind == 'm' ||
-			tableinfo.relkind == 'f' || tableinfo.relkind == 'c')
+			tableinfo.relkind == 'm' || tableinfo.relkind == 'f' ||
+			tableinfo.relkind == 'c' || tableinfo.relkind == 'P')
 			appendPQExpBufferStr(&buf, ", pg_catalog.col_description(a.attrelid, a.attnum)");
 	}
 
@@ -1529,6 +1550,14 @@ describeOneTableDetails(const char *schemaname,
 			printfPQExpBuffer(&title, _("Foreign table \"%s.%s\""),
 							  schemaname, relationname);
 			break;
+		case 'P':
+			if (tableinfo.relpersistence == 'u')
+				printfPQExpBuffer(&title, _("Unlogged partitioned table \"%s.%s\""),
+								  schemaname, relationname);
+			else
+				printfPQExpBuffer(&title, _("Partitioned table \"%s.%s\""),
+								  schemaname, relationname);
+			break;
 		default:
 			/* untranslated unknown relkind */
 			printfPQExpBuffer(&title, "?%c? \"%s.%s\"",
@@ -1542,8 +1571,8 @@ describeOneTableDetails(const char *schemaname,
 	cols = 2;
 
 	if (tableinfo.relkind == 'r' || tableinfo.relkind == 'v' ||
-		tableinfo.relkind == 'm' ||
-		tableinfo.relkind == 'f' || tableinfo.relkind == 'c')
+		tableinfo.relkind == 'm' || tableinfo.relkind == 'f' ||
+		tableinfo.relkind == 'c' || tableinfo.relkind == 'P')
 	{
 		show_modifiers = true;
 		headers[cols++] = gettext_noop("Modifiers");
@@ -1563,12 +1592,12 @@ describeOneTableDetails(const char *schemaname,
 	{
 		headers[cols++] = gettext_noop("Storage");
 		if (tableinfo.relkind == 'r' || tableinfo.relkind == 'm' ||
-			tableinfo.relkind == 'f')
+			tableinfo.relkind == 'f' || tableinfo.relkind == 'P')
 			headers[cols++] = gettext_noop("Stats target");
 		/* Column comments, if the relkind supports this feature. */
 		if (tableinfo.relkind == 'r' || tableinfo.relkind == 'v' ||
-			tableinfo.relkind == 'm' ||
-			tableinfo.relkind == 'c' || tableinfo.relkind == 'f')
+			tableinfo.relkind == 'm' || tableinfo.relkind == 'c' ||
+			tableinfo.relkind == 'f' || tableinfo.relkind == 'P')
 			headers[cols++] = gettext_noop("Description");
 	}
 
@@ -1668,7 +1697,7 @@ describeOneTableDetails(const char *schemaname,
 
 			/* Statistics target, if the relkind supports this feature */
 			if (tableinfo.relkind == 'r' || tableinfo.relkind == 'm' ||
-				tableinfo.relkind == 'f')
+				tableinfo.relkind == 'f' || tableinfo.relkind == 'P')
 			{
 				printTableAddCell(&cont, PQgetvalue(res, i, firstvcol + 1),
 								  false, false);
@@ -1676,8 +1705,8 @@ describeOneTableDetails(const char *schemaname,
 
 			/* Column comments, if the relkind supports this feature. */
 			if (tableinfo.relkind == 'r' || tableinfo.relkind == 'v' ||
-				tableinfo.relkind == 'm' ||
-				tableinfo.relkind == 'c' || tableinfo.relkind == 'f')
+				tableinfo.relkind == 'm' || tableinfo.relkind == 'c' ||
+				tableinfo.relkind == 'f' || tableinfo.relkind == 'P')
 				printTableAddCell(&cont, PQgetvalue(res, i, firstvcol + 2),
 								  false, false);
 		}
@@ -1822,7 +1851,7 @@ describeOneTableDetails(const char *schemaname,
 		PQclear(result);
 	}
 	else if (tableinfo.relkind == 'r' || tableinfo.relkind == 'm' ||
-			 tableinfo.relkind == 'f')
+			 tableinfo.relkind == 'f' || tableinfo.relkind == 'P')
 	{
 		/* Footer information about a table */
 		PGresult   *result = NULL;
@@ -2381,7 +2410,7 @@ describeOneTableDetails(const char *schemaname,
 	 * Finish printing the footer information about a table.
 	 */
 	if (tableinfo.relkind == 'r' || tableinfo.relkind == 'm' ||
-		tableinfo.relkind == 'f')
+		tableinfo.relkind == 'f' || tableinfo.relkind == 'P')
 	{
 		PGresult   *result;
 		int			tuples;
@@ -2593,7 +2622,7 @@ add_tablespace_footer(printTableContent *const cont, char relkind,
 					  Oid tablespace, const bool newline)
 {
 	/* relkinds for which we support tablespaces */
-	if (relkind == 'r' || relkind == 'm' || relkind == 'i')
+	if (relkind == 'r' || relkind == 'm' || relkind == 'i' || relkind == 'P')
 	{
 		/*
 		 * We ignore the database default tablespace so that users not using
@@ -2924,6 +2953,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 					  " WHEN 'S' THEN '%s'"
 					  " WHEN 's' THEN '%s'"
 					  " WHEN 'f' THEN '%s'"
+					  " WHEN 'P' THEN '%s'"
 					  " END as \"%s\",\n"
 					  "  pg_catalog.pg_get_userbyid(c.relowner) as \"%s\"",
 					  gettext_noop("Schema"),
@@ -2935,6 +2965,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 					  gettext_noop("sequence"),
 					  gettext_noop("special"),
 					  gettext_noop("foreign table"),
+					  gettext_noop("Partitioned table"),
 					  gettext_noop("Type"),
 					  gettext_noop("Owner"));
 
@@ -2973,7 +3004,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 
 	appendPQExpBufferStr(&buf, "\nWHERE c.relkind IN (");
 	if (showTables)
-		appendPQExpBufferStr(&buf, "'r',");
+		appendPQExpBufferStr(&buf, "'r', 'P',");
 	if (showViews)
 		appendPQExpBufferStr(&buf, "'v',");
 	if (showMatViews)

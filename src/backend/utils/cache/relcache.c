@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "access/nbtree.h"
 #include "access/htup_details.h"
 #include "access/multixact.h"
 #include "access/reloptions.h"
@@ -39,6 +40,7 @@
 #include "access/xlog.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
+#include "catalog/heap.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_amproc.h"
@@ -46,9 +48,13 @@
 #include "catalog/pg_authid.h"
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_constraint.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_opclass.h"
+#include "catalog/pg_partition.h"
+#include "catalog/pg_partition_fn.h"
+#include "catalog/pg_partitioned_rel.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_rewrite.h"
 #include "catalog/pg_tablespace.h"
@@ -59,6 +65,9 @@
 #include "commands/policy.h"
 #include "commands/trigger.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/execnodes.h"
+#include "nodes/parsenodes.h"
 #include "optimizer/clauses.h"
 #include "optimizer/planmain.h"
 #include "optimizer/prep.h"
@@ -69,10 +78,12 @@
 #include "storage/smgr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/partition.h"
 #include "utils/relmapper.h"
 #include "utils/resowner_private.h"
 #include "utils/snapmgr.h"
@@ -275,6 +286,10 @@ static OpClassCacheEnt *LookupOpclassInfo(Oid operatorClassOid,
 				  StrategyNumber numSupport);
 static void RelationCacheInitFileRemoveInDir(const char *tblspcpath);
 static void unlink_initfile(const char *initfilename);
+static void RelationBuildPartitionKey(Relation relation);
+static PartitionDesc *CopyPartitionDesc(PartitionDesc *src, int partnatts,
+						char strategy, PartitionKeyTypeInfo *typinfo);
+static int32 range_partition_cmp_max(const void *a, const void *b, void *arg);
 
 
 /*
@@ -1045,6 +1060,10 @@ RelationBuildDesc(Oid targetRelId, bool insertIt)
 		RelationBuildRowSecurity(relation);
 	else
 		relation->rd_rsdesc = NULL;
+
+	/* if a partitioned table - initialize the key info */
+	if (relation->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+		RelationBuildPartitionKey(relation);
 
 	/*
 	 * if it's an index, initialize index-related information
@@ -2005,6 +2024,12 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 	bms_free(relation->rd_keyattr);
 	bms_free(relation->rd_idattr);
 	FreeTriggerDesc(relation->trigdesc);
+	if (relation->rd_partkeytuple)
+		pfree(relation->rd_partkeytuple);
+	if (relation->rd_partkeycxt)
+		MemoryContextDelete(relation->rd_partkeycxt);
+	if (relation->rd_partdesccxt)
+		MemoryContextDelete(relation->rd_partdesccxt);
 	if (relation->rd_options)
 		pfree(relation->rd_options);
 	if (relation->rd_indextuple)
@@ -4472,6 +4497,441 @@ RelationGetExclusionInfo(Relation indexRelation,
 	MemoryContextSwitchTo(oldcxt);
 }
 
+/*
+ * RelationGetPartitionExpressions -- get the partition expressions for a
+ * partitioned table
+ *
+ * The returned node tree is copied into the caller's memory context. (We
+ * don't want to return a pointer to the relcache copy,since it could
+ * disappear due to relcache invalidation.)
+ */
+List *
+RelationGetPartitionExpressions(Relation relation)
+{
+	Relation	pg_partitioned_rel;
+	List	   *result;
+	Datum		exprsDatum;
+	bool		isnull;
+	char	   *exprsString;
+	MemoryContext oldcxt;
+
+	/* Quick copy if we already computed the result */
+	if (relation->rd_partexprs)
+		return (List *) copyObject(relation->rd_partexprs);
+
+	/* Quick exit if there is nothing to do */
+	if (relation->rd_partkeytuple == NULL ||
+		heap_attisnull(relation->rd_partkeytuple, Anum_pg_partitioned_rel_partexprs))
+		return NIL;
+
+	/*
+	 * We build the tree we intend to return in the caller's context. After
+	 * successfully completing the work, we copy it into the relcache entry.
+	 * This avoids problems if we get some sort of error partway through.
+	 */
+	pg_partitioned_rel = heap_open(PartitionedRelRelationId, AccessShareLock);
+	exprsDatum = heap_getattr(relation->rd_partkeytuple,
+							Anum_pg_partitioned_rel_partexprs,
+							RelationGetDescr(pg_partitioned_rel),
+							&isnull);
+
+	Assert(!isnull);
+	exprsString = TextDatumGetCString(exprsDatum);
+	result = (List *) stringToNode(exprsString);
+	pfree(exprsString);
+	heap_close(pg_partitioned_rel, AccessShareLock);
+
+	/*
+	 * Run the expressions through eval_const_expressions. This is not just an
+	 * optimization, but is necessary, because the planner will be comparing
+	 * them to similarly-processed qual clauses, and may fail to detect valid
+	 * matches without this.  We don't bother with canonicalize_qual, however.
+	 */
+	result = (List *) eval_const_expressions(NULL, (Node *) result);
+
+	/* May as well fix opfuncids too */
+	fix_opfuncids((Node *) result);
+
+	/* Now save a copy of the completed tree in the relcache entry. */
+	oldcxt = MemoryContextSwitchTo(relation->rd_partkeycxt);
+	relation->rd_partexprs = (List *) copyObject(result);
+	MemoryContextSwitchTo(oldcxt);
+
+	return result;
+}
+
+/*
+ * CopyPartitionDesc
+ *		Copy PartitionDesc of a partitioned relation into caller's context
+ */
+static PartitionDesc *
+CopyPartitionDesc(PartitionDesc *src, int partnatts, char strategy,
+								PartitionKeyTypeInfo *typinfo)
+{
+	PartitionDesc  *result;
+	int				i, j;
+
+	result = (PartitionDesc *) palloc0(sizeof(PartitionDesc));
+	result->numparts = src->numparts;
+
+	/* If there are partitions, prepare to copy bound arrays */
+	if (result->numparts > 0)
+	{
+		result->oids = (Oid *) palloc0(result->numparts * sizeof(Oid));
+		switch (strategy)
+		{
+			case PARTITION_STRAT_LIST:
+				result->listnvalues = (int *)
+								palloc0(result->numparts * sizeof(int));
+				result->listvalues = (Datum **)
+								palloc0(result->numparts * sizeof(Datum *));
+				break;
+			case PARTITION_STRAT_RANGE:
+				for (i = 0; i < partnatts; i++)
+					result->rangemaxs[i] = (Datum *)
+								palloc0(result->numparts * sizeof(Datum));
+				break;
+		}
+	}
+
+	for (i = 0; i < result->numparts; i++)
+	{
+		result->oids[i] = src->oids[i];
+
+		switch (strategy)
+		{
+			case PARTITION_STRAT_LIST:
+				result->listnvalues[i] = src->listnvalues[i];
+				result->listvalues[i] = (Datum *)
+							palloc0(result->listnvalues[i] * sizeof(Datum));
+
+				for (j = 0; j < result->listnvalues[i]; j++)
+				{
+					Datum   *from = &src->listvalues[i][j];
+					Datum   *into = &result->listvalues[i][j];
+
+					if (!typinfo->typbyval[0])
+					{
+						if (typinfo->typlen[0] == -1)
+							*into = PointerGetDatum(PG_DETOAST_DATUM_COPY(*from));
+						else
+							*into = datumCopy(*from, false, typinfo->typlen[0]);
+					}
+					else
+						*into = *from;
+				}
+				break;
+
+			case PARTITION_STRAT_RANGE:
+				for (j = 0; j < partnatts; j++)
+				{
+					Datum   *from = &src->rangemaxs[j][i];
+					Datum   *into = &result->rangemaxs[j][i];
+
+					if (!typinfo->typbyval[j])
+					{
+						if (typinfo->typlen[j] == -1)
+							*into = PointerGetDatum(PG_DETOAST_DATUM_COPY(*from));
+						else
+							*into = datumCopy(*from, false, typinfo->typlen[j]);
+					}
+					else
+						*into = *from;
+				}
+				break;
+		}
+	}
+
+	return result;
+}
+
+/*
+ * range_partition_cmp_max
+ *		Compare two PartitionBoundInfos based on rangemaxs
+ *
+ * Used as a callback to qsort_arg for sorting range partitions in
+ * ascending order of their rangemaxs values.
+ */
+static int32
+range_partition_cmp_max(const void *a, const void *b, void *arg)
+{
+	int         i;
+	int32       result;
+	FmgrInfo   *cmpfn = (FmgrInfo *) arg;
+	int         natts = (*(const PartitionBoundInfo **) a)->partnatts;
+	const PartitionBoundInfo *arg1 = *(const PartitionBoundInfo **) a;
+	const PartitionBoundInfo *arg2 = *(const PartitionBoundInfo **) b;
+
+	for (i = 0; i < natts; i++)
+	{
+		result = DatumGetInt32(FunctionCall2Coll(&cmpfn[i],
+						DEFAULT_COLLATION_OID,
+						arg1->rangemaxs[i], arg2->rangemaxs[i]));
+
+		/* consider multicolumn range partitions */
+		if (!result)
+			continue;
+		else
+			return result;
+	}
+
+	return 0;
+}
+
+/*
+ * RelationGetPartitionDesc
+ *		Get the PartitionDesc of a partitioned table
+ *
+ * The returned struct consists of array of OIDs of partitions, array of
+ * datums corresponding to the values of partition bounds and related info.
+ * Memory for the struct is allocated in the caller's memory context while
+ * a copy is cached in rd_partdesc so that we don't compute the result
+ * unnecessarily (We don't want to return a pointer to the relcache copy
+ * though, since it could disappear due to relcache invalidation.)
+ */
+PartitionDesc *
+RelationGetPartitionDesc(Relation relation)
+{
+	int		i,
+			j;
+	int		numparts = 0;
+	int		partnatts = relation->rd_partkey->partnatts;
+	char	strategy = relation->rd_partkey->partstrat;
+	MemoryContext		oldcxt;
+	PartitionDesc		 *result;
+	PartitionBoundInfo  **partitions;
+	PartitionKeyTypeInfo *typinfo;
+
+	/* Quick exit if nothing to do (probably should be an Assert) */
+	if (relation->rd_partkeytuple == NULL)
+		return NULL;
+
+	typinfo = get_key_type_info(relation);
+
+	/* Quick copy and exit if already computed the descriptor */
+	if (relation->rd_partdesc != NULL)
+		return CopyPartitionDesc(relation->rd_partdesc,
+								 relation->rd_partkey->partnatts,
+								 strategy,
+								 typinfo);
+
+	result = (PartitionDesc *) palloc0(sizeof(PartitionDesc));
+
+	partitions = GetPartitionBounds(relation, &numparts);
+	result->numparts = numparts;
+
+	/* If there are partitions, prepare to construct bound arrays */
+	if (partitions)
+	{
+		result->oids = (Oid *) palloc0(numparts * sizeof(Oid));
+		switch (strategy)
+		{
+			case PARTITION_STRAT_LIST:
+				result->listnvalues = (int *) palloc0(numparts * sizeof(int));
+				result->listvalues = (Datum **)
+										palloc0(numparts * sizeof(Datum *));
+				break;
+			case PARTITION_STRAT_RANGE:
+				/* Sort on rangemaxs before copying */
+				qsort_arg(partitions, numparts,	sizeof(PartitionBoundInfo *),
+												range_partition_cmp_max,
+												relation->rd_partsupfunc);
+				for (i = 0; i < partnatts; i++)
+					result->rangemaxs[i] = (Datum *)
+										palloc0(numparts * sizeof(Datum));
+				break;
+		}
+	}
+
+	for (i = 0; i < numparts; i++)
+	{
+		result->oids[i] = partitions[i]->oid;
+
+		switch (strategy)
+		{
+			case PARTITION_STRAT_LIST:
+				/* Simply copy list partitions. */
+				result->listnvalues[i] = partitions[i]->listnvalues;
+				result->listvalues[i] = (Datum *)
+							palloc0(partitions[i]->listnvalues * sizeof(Datum));
+				for (j = 0; j < result->listnvalues[i]; j++)
+				{
+					Datum   *from = &partitions[i]->listvalues[j];
+					Datum   *into = &result->listvalues[i][j];
+
+					if (!typinfo->typbyval[0])
+					{
+						if (typinfo->typlen[0] == -1)
+							*into = PointerGetDatum(PG_DETOAST_DATUM_COPY(*from));
+						else
+							*into = datumCopy(*from, false, typinfo->typlen[0]);
+					}
+					else
+						*into = *from;
+				}
+				break;
+
+			case PARTITION_STRAT_RANGE:
+				for (j = 0; j < partnatts; j++)
+				{
+					Datum   *from = &partitions[i]->rangemaxs[j];
+					Datum   *into = &result->rangemaxs[j][i];
+
+					if (!typinfo->typbyval[j])
+					{
+						if (typinfo->typlen[j] == -1)
+							*into = PointerGetDatum(PG_DETOAST_DATUM_COPY(*from));
+						else
+							*into = datumCopy(*from, false, typinfo->typlen[j]);
+					}
+					else
+						*into = *from;
+				}
+				break;
+		}
+	}
+
+	/* Clean up after yourself */
+	if (partitions)
+		free_partitions(partitions, numparts);
+
+	/* Save a copy in the relcache entry of relation.
+	 *
+	 * Create a memory context for caching the just created partition
+	 * descriptor.
+	 */
+	relation->rd_partdesccxt = AllocSetContextCreate(CacheMemoryContext,
+									RelationGetRelationName(relation),
+									ALLOCSET_DEFAULT_MINSIZE,
+									ALLOCSET_DEFAULT_INITSIZE,
+									ALLOCSET_DEFAULT_MAXSIZE);
+
+	oldcxt = MemoryContextSwitchTo(relation->rd_partdesccxt);
+	relation->rd_partdesc = CopyPartitionDesc(result,
+											  relation->rd_partkey->partnatts,
+											  strategy,
+											  typinfo);
+	MemoryContextSwitchTo(oldcxt);
+
+	free_key_type_info(typinfo);
+	return result;
+}
+
+/*
+ * RelationBuildPartitionKey
+ *		Initialize partition key related fields
+ *
+ * Sets the following fields of relation:
+ *	rd_partkey			The Form_pg_partitioned_rel entry
+ *	rd_partkeytuple		HeapTuple of the same
+ *	rd_partkeycxt		A long-lived context for the following items
+ *	rd_partopfamily		Operator family per key column
+ *	rd_partsupfuncs		Comparison functions per key column (support funcs)
+ *	rd_partexprs		Simply set to NIL. See RelationGetPartitionExpressions
+ */
+static void
+RelationBuildPartitionKey(Relation relation)
+{
+	Relation		pg_partitioned_rel;
+	HeapTuple		tuple;
+	oidvector	   *partclass;
+	char			strategy;
+	int				partnatts;
+	int				i;
+	Datum			datum;
+	bool			isnull;
+	MemoryContext	pkeycxt;
+	MemoryContext	oldcxt;
+
+	tuple = SearchSysCache1(PARTITIONEDRELID, RelationGetRelid(relation));
+
+	/* pg_partitioned_rel entry just got dropped (shouldn't be the case)*/
+	if (!HeapTupleIsValid(tuple))
+	{
+		/* Safety! */
+		relation->rd_partkeytuple = NULL;
+		return;
+	}
+
+	/* Keep a copy of pg_partitioned_rel entry in the relation descriptor. */
+	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
+	relation->rd_partkeytuple = heap_copytuple(tuple);
+	relation->rd_partkey = (Form_pg_partitioned_rel) GETSTRUCT(relation->rd_partkeytuple);
+	MemoryContextSwitchTo(oldcxt);
+
+	/* pg_partitioned_rel tuple */
+	ReleaseSysCache(tuple);
+
+	strategy = relation->rd_partkey->partstrat;
+	partnatts = relation->rd_partkey->partnatts;
+
+	/* Use partclass to figure out compare functions for each key column. */
+	pg_partitioned_rel = heap_open(PartitionedRelRelationId, AccessShareLock);
+
+	datum = fastgetattr(tuple,
+						Anum_pg_partitioned_rel_partclass,
+						RelationGetDescr(pg_partitioned_rel),
+						&isnull);
+
+	Assert(!isnull);
+	partclass = (oidvector *) DatumGetPointer(datum);
+
+	heap_close(pg_partitioned_rel, AccessShareLock);
+
+    /*
+	 * Make the private context to cache the items we compute below. The reason
+	 * we need a context, and not just a couple of pallocs, is so that we won't
+	 * leak any subsidiary info attached to fmgr lookup records.
+	 *
+	 * Context parameters are set on the assumption that it'll probably not
+	 * contain much data.
+	 */
+    pkeycxt = AllocSetContextCreate(CacheMemoryContext,
+									RelationGetRelationName(relation),
+									ALLOCSET_SMALL_MINSIZE,
+									ALLOCSET_SMALL_INITSIZE,
+									ALLOCSET_SMALL_MAXSIZE);
+	relation->rd_partkeycxt = pkeycxt;
+
+	relation->rd_partopfamily = (Oid *) MemoryContextAllocZero(pkeycxt,
+												partnatts * sizeof(Oid));
+	relation->rd_partsupfunc = (FmgrInfo *) MemoryContextAllocZero(pkeycxt,
+												partnatts * sizeof(FmgrInfo));
+
+	/* Determine the opfamily and support function */
+	for (i = 0; i < partnatts; i++)
+	{
+		HeapTuple			tuple;
+		Form_pg_opclass 	form;
+		Oid					funcid;
+
+		tuple = SearchSysCache(CLAOID,
+						ObjectIdGetDatum(partclass->values[i]),
+						0, 0, 0);
+		if (!HeapTupleIsValid(tuple))
+				elog(ERROR, "cache lookup failed for opclass %u",
+						partclass->values[i]);
+
+		form = (Form_pg_opclass) GETSTRUCT(tuple);
+
+		relation->rd_partopfamily[i] = form->opcfamily;
+
+		/*
+		 * A btree support function is good enough for now. It covers
+		 * list and range partitionig related needs.
+		 */
+		funcid = get_opfamily_proc(form->opcfamily,
+								form->opcintype, form->opcintype,
+								BTORDER_PROC);
+
+		fmgr_info(funcid, &relation->rd_partsupfunc[i]);
+
+		ReleaseSysCache(tuple);
+	}
+
+	/* RelationGetPartitionExpressions() caches its result here. */
+	relation->rd_partexprs = NIL;
+}
 
 /*
  * Routines to support ereport() reports of relation-related errors

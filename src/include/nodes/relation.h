@@ -19,6 +19,7 @@
 #include "nodes/params.h"
 #include "nodes/parsenodes.h"
 #include "storage/block.h"
+#include "utils/rel.h"
 
 
 /*
@@ -307,9 +308,11 @@ typedef struct PlannerInfo
  *
  * We also have "other rels", which are like base rels in that they refer to
  * single RT indexes; but they are not part of the join tree, and are given
- * a different RelOptKind to identify them.  Lastly, there is a RelOptKind
- * for "dead" relations, which are base rels that we have proven we don't
- * need to join after all.
+ * a different RelOptKind to identify them.  "partition rels" are almost like
+ * "other rel" but are distinguished by the fact that they have their
+ * parent_relid set to the RT index of the partitioned rel they are part of.
+ * Lastly, there is a RelOptKind for "dead" relations, which are base rels
+ * that we have proven we don't need to join after all.
  *
  * Currently the only kind of otherrels are those made for member relations
  * of an "append relation", that is an inheritance set or UNION ALL subquery.
@@ -433,6 +436,7 @@ typedef enum RelOptKind
 	RELOPT_BASEREL,
 	RELOPT_JOINREL,
 	RELOPT_OTHER_MEMBER_REL,
+	RELOPT_PARTITION_REL,
 	RELOPT_DEADREL
 } RelOptKind;
 
@@ -487,6 +491,13 @@ typedef struct RelOptInfo
 	/* use "struct FdwRoutine" to avoid including fdwapi.h here */
 	struct FdwRoutine *fdwroutine;
 	void	   *fdw_private;
+
+	/* Information for a partition (ie., RELOPT_PARTITION_REL) */
+	Index		parent_relid;		/* RT index of the parent */
+
+	/* Information for partitioned tables */
+	struct PartitionOptInfo   *partoptinfo;
+	List   *partrelids;		/* list of RT indexes of partition RTEs */
 
 	/* used by various scans and joins: */
 	List	   *baserestrictinfo;		/* RestrictInfo structures (if base
@@ -568,6 +579,22 @@ typedef struct IndexOptInfo
 	bool		amhasgetbitmap; /* does AM have amgetbitmap interface? */
 } IndexOptInfo;
 
+/*
+ * PartitionOptInfo
+ *		Optimization information for a partitioned table
+ */
+typedef struct PartitionOptInfo
+{
+	NodeTag		type;
+
+	RelOptInfo   *rel;			/* back-link to the table's RelOptInfo */
+
+	/* partition key information */
+	int			ncolumns;		/* number of columns in key */
+	int		   *partkeys;		/* column numbers of index's keys, or 0 */
+	Oid		   *opfamily;		/* OIDs of operator families for columns */
+	List	   *partexprs;		/* expressions for non-simple key columns */
+} PartitionOptInfo;
 
 /*
  * EquivalenceClasses

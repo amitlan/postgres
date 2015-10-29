@@ -196,6 +196,22 @@ analyze_rel(Oid relid, RangeVar *relation, int options,
 	}
 
 	/*
+	 * XXX - Analyzing a partitioned table not supported yet
+	 */
+	if (onerel->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+	{
+		if(!IsAutoVacuumWorkerProcess())
+			ereport(ERROR,
+					(errmsg("cannot analyze partitioned table \"%s\"", RelationGetRelationName(onerel)),
+					 errdetail("ANALYZE on partitioned tables is not implemented yet."),
+					 errhint("ANALYZE individual partitions separately.")));
+		else
+			ereport(WARNING,
+					(errmsg("skipping \"%s\" --- cannot analyze partitioned tables",
+							RelationGetRelationName(onerel))));
+	}
+
+	/*
 	 * Check that it's a plain table, materialized view, or foreign table; we
 	 * used to do this in get_rel_oids() but seems safer to check after we've
 	 * locked the relation.

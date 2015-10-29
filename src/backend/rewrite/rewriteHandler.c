@@ -1222,6 +1222,7 @@ rewriteTargetListUD(Query *parsetree, RangeTblEntry *target_rte,
 	TargetEntry *tle;
 
 	if (target_relation->rd_rel->relkind == RELKIND_RELATION ||
+		target_relation->rd_rel->relkind == RELKIND_PARTITIONED_REL ||
 		target_relation->rd_rel->relkind == RELKIND_MATVIEW)
 	{
 		/*
@@ -1286,6 +1287,30 @@ rewriteTargetListUD(Query *parsetree, RangeTblEntry *target_rte,
 
 	if (var != NULL)
 	{
+		tle = makeTargetEntry((Expr *) var,
+							  list_length(parsetree->targetList) + 1,
+							  pstrdup(attrname),
+							  true);
+
+		parsetree->targetList = lappend(parsetree->targetList, tle);
+	}
+
+	/*
+	 * Also emit tableoid so that ExecModifyTable knows which partition
+	 * a given row came from. ExecUpdate will use it to throw error if
+	 * the new row does not map to the same partition.
+	 */
+	if (target_relation->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+	{
+		var = makeVar(parsetree->resultRelation,
+					  TableOidAttributeNumber,
+					  OIDOID,
+					  -1,
+					  InvalidOid,
+					  0);
+
+		attrname = "tableoid";
+
 		tle = makeTargetEntry((Expr *) var,
 							  list_length(parsetree->targetList) + 1,
 							  pstrdup(attrname),

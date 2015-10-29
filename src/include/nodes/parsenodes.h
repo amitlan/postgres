@@ -586,6 +586,9 @@ typedef struct ColumnDef
 	bool		is_local;		/* column has local (non-inherited) def'n */
 	bool		is_not_null;	/* NOT NULL constraint specified? */
 	bool		is_from_type;	/* column definition came from table type */
+	bool		is_for_partition;	/* This ColumnDef was made for a partition */
+	bool		is_dropped_copy;	/* A dummyish ColumnDef for dropped source
+									 * columns in case of is_for_partition */
 	char		storage;		/* attstorage setting, or 0 for default */
 	Node	   *raw_default;	/* default value (untransformed parse tree) */
 	Node	   *cooked_default; /* default value (transformed expr tree) */
@@ -691,6 +694,74 @@ typedef struct XmlSerialize
 	int			location;		/* token location, or -1 if unknown */
 } XmlSerialize;
 
+/* Partitioning related definitions */
+
+/*
+ * PartitionElem - a partition key column
+ *
+ *		CREATE TABLE ... PARTITION BY ... ON (<here>)
+ *
+ *	'name'		Name of the table column included in the key
+ *	'expr'		Expression node tree of expressional key column
+ *	'opclass'	Operator class name associated with the column
+ */
+typedef struct PartitionElem
+{
+	NodeTag		type;
+	char	   *name;		/* name of column to partition on, or NULL */
+	Node	   *expr;		/* expression to partition on, or NULL */
+	List	   *opclass;	/* name of desired opclass; NIL = default */
+	int			location;	/* token location, or -1 if unknown */
+} PartitionElem;
+
+/*
+ * PartitionBy - partition key definition including the strategy
+ *
+ *	'strategy'		partition strategy to use (one of the below defined)
+ *	'partParams'	List of PartitionElems, one for each key column
+ */
+#define PARTITION_STRAT_LIST	'l'
+#define PARTITION_STRAT_RANGE	'r'
+
+typedef struct PartitionBy
+{
+	NodeTag		type;
+	char		strategy;
+	List	   *partParams;
+	int			location;	/* token location, or -1 if unknown */
+} PartitionBy;
+
+/*
+ * PartitionValues - partition values
+ *
+ *	CREATE TABLE ... PARTITION OF ... FOR VALUES (<this>) ...
+ *
+ *	'listvalues'	List of values when defining a list partition
+ *	'rangemaxs'		Max bound of a range partition, one value per column
+ */
+typedef struct PartitionValues
+{
+	NodeTag		type;
+	List	   *listvalues;
+	List	   *rangemaxs;
+	int			location;	/* token location, or -1 if unknown */
+} PartitionValues;
+
+/*
+ * PartitionDef - a single partition definition
+ *
+ *	'name'		Name of this partition
+ *	'parent'	Name of the parent of this partition
+ *	'values'	A PartitionValues struct describing FOR VALUES part of
+ *				the definition
+ */
+typedef struct PartitionDef
+{
+	NodeTag			 type;
+	RangeVar		*name;
+	RangeVar		*parent;
+	PartitionValues	*values;
+} PartitionDef;
 
 /****************************************************************************
  *	Nodes for a Query tree
@@ -1518,7 +1589,15 @@ typedef enum AlterTableType
 	AT_DisableRowSecurity,		/* DISABLE ROW SECURITY */
 	AT_ForceRowSecurity,		/* FORCE ROW SECURITY */
 	AT_NoForceRowSecurity,		/* NO FORCE ROW SECURITY */
-	AT_GenericOptions			/* OPTIONS (...) */
+	AT_GenericOptions,			/* OPTIONS (...) */
+	AT_AttachPartition,			/* CREATE TABLE name PARTITION OF parent
+								 *		FOR VALUES (...)
+								 *  or
+								 * ALTER TABLE parent ATTACH PARTITION name
+								 *		FOR VALUES (...)
+								 *		USING [ TABLE ] table_name */
+	AT_DetachPartition			/* ALTER TABLE parent DETACH PARTITION name
+								 *		[ USING table_name ] */
 } AlterTableType;
 
 typedef struct ReplicaIdentityStmt
@@ -1537,6 +1616,8 @@ typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
 	Node	   *newowner;		/* RoleSpec */
 	Node	   *def;			/* definition of new column, index,
 								 * constraint, or parent table */
+	RangeVar   *using_table;	/* table to use as source/target for
+								 * attach/detach partition sub-commands */
 	DropBehavior behavior;		/* RESTRICT or CASCADE for DROP cases */
 	bool		missing_ok;		/* skip error if missing? */
 } AlterTableCmd;
@@ -1740,9 +1821,13 @@ typedef struct CreateStmt
 {
 	NodeTag		type;
 	RangeVar   *relation;		/* relation to create */
+	RangeVar   *partitionOf;	/* if 'relation' is a partition,
+								 * this is the parent */
 	List	   *tableElts;		/* column definitions (list of ColumnDef) */
 	List	   *inhRelations;	/* relations to inherit from (list of
 								 * inhRelation) */
+	PartitionValues *partValues;	/* partition bounding values */
+	PartitionBy	*partitionby;	/* partition key definition */
 	TypeName   *ofTypename;		/* OF typename */
 	List	   *constraints;	/* constraints (list of Constraint nodes) */
 	List	   *options;		/* options from WITH clause */

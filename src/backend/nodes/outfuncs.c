@@ -1876,6 +1876,7 @@ _outRelOptInfo(StringInfo str, const RelOptInfo *node)
 	WRITE_NODE_FIELD(cheapest_unique_path);
 	WRITE_NODE_FIELD(cheapest_parameterized_paths);
 	WRITE_UINT_FIELD(relid);
+	WRITE_UINT_FIELD(parent_relid);
 	WRITE_OID_FIELD(reltablespace);
 	WRITE_ENUM_FIELD(rtekind, RTEKind);
 	WRITE_INT_FIELD(min_attr);
@@ -1892,6 +1893,9 @@ _outRelOptInfo(StringInfo str, const RelOptInfo *node)
 	WRITE_NODE_FIELD(subplan_params);
 	WRITE_OID_FIELD(serverid);
 	/* we don't try to print fdwroutine or fdw_private */
+	/* we don't bother to print partoptinfo */
+	WRITE_NODE_FIELD(partrelids);
+	/* we don't try to print partrels */
 	WRITE_NODE_FIELD(baserestrictinfo);
 	WRITE_NODE_FIELD(joininfo);
 	WRITE_BOOL_FIELD(has_eclass_joins);
@@ -2110,8 +2114,11 @@ static void
 _outCreateStmtInfo(StringInfo str, const CreateStmt *node)
 {
 	WRITE_NODE_FIELD(relation);
+	WRITE_NODE_FIELD(partitionOf);
 	WRITE_NODE_FIELD(tableElts);
 	WRITE_NODE_FIELD(inhRelations);
+	WRITE_NODE_FIELD(partValues);
+	WRITE_NODE_FIELD(partitionby);
 	WRITE_NODE_FIELD(ofTypename);
 	WRITE_NODE_FIELD(constraints);
 	WRITE_NODE_FIELD(options);
@@ -2291,6 +2298,8 @@ _outColumnDef(StringInfo str, const ColumnDef *node)
 	WRITE_BOOL_FIELD(is_local);
 	WRITE_BOOL_FIELD(is_not_null);
 	WRITE_BOOL_FIELD(is_from_type);
+	WRITE_BOOL_FIELD(is_for_partition);
+	WRITE_BOOL_FIELD(is_dropped_copy);
 	WRITE_CHAR_FIELD(storage);
 	WRITE_NODE_FIELD(raw_default);
 	WRITE_NODE_FIELD(cooked_default);
@@ -2348,6 +2357,47 @@ _outIndexElem(StringInfo str, const IndexElem *node)
 	WRITE_NODE_FIELD(opclass);
 	WRITE_ENUM_FIELD(ordering, SortByDir);
 	WRITE_ENUM_FIELD(nulls_ordering, SortByNulls);
+}
+
+static void
+_outPartitionBy(StringInfo str, const PartitionBy *node)
+{
+	WRITE_NODE_TYPE("PARTITIONBY");
+
+	WRITE_CHAR_FIELD(strategy);
+	WRITE_NODE_FIELD(partParams);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outPartitionElem(StringInfo str, const PartitionElem *node)
+{
+	WRITE_NODE_TYPE("PARTITIONELEM");
+
+	WRITE_STRING_FIELD(name);
+	WRITE_NODE_FIELD(expr);
+	WRITE_NODE_FIELD(opclass);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outPartitionValues(StringInfo str, const PartitionValues *node)
+{
+	WRITE_NODE_TYPE("PARTITIONVALUES");
+
+	WRITE_NODE_FIELD(listvalues);
+	WRITE_NODE_FIELD(rangemaxs);
+	WRITE_LOCATION_FIELD(location);
+}
+
+static void
+_outPartitionDef(StringInfo str, const PartitionDef *node)
+{
+	WRITE_NODE_TYPE("PARTITIONDEF");
+
+	WRITE_NODE_FIELD(name);
+	WRITE_NODE_FIELD(parent);
+	WRITE_NODE_FIELD(values);
 }
 
 static void
@@ -3386,6 +3436,18 @@ _outNode(StringInfo str, const void *obj)
 				break;
 			case T_IndexElem:
 				_outIndexElem(str, obj);
+				break;
+			case T_PartitionBy:
+				_outPartitionBy(str, obj);
+				break;
+			case T_PartitionElem:
+				_outPartitionElem(str, obj);
+				break;
+			case T_PartitionValues:
+				_outPartitionValues(str, obj);
+				break;
+			case T_PartitionDef:
+				_outPartitionDef(str, obj);
 				break;
 			case T_Query:
 				_outQuery(str, obj);

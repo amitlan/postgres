@@ -47,6 +47,9 @@
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_opclass.h"
+#include "catalog/pg_partition.h"
+#include "catalog/pg_partitioned_rel.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
@@ -55,7 +58,9 @@
 #include "catalog/storage_xlog.h"
 #include "commands/tablecmds.h"
 #include "commands/typecmds.h"
+#include "executor/executor.h"
 #include "miscadmin.h"
+#include "nodes/execnodes.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/var.h"
 #include "parser/parse_coerce.h"
@@ -293,6 +298,15 @@ heap_create(const char *relname,
 			 * storage.  This is mainly just for cleanliness' sake.
 			 */
 			reltablespace = InvalidOid;
+			break;
+		case RELKIND_PARTITIONED_REL:
+			/*
+			 * A partitioned relation does not itself have storage, but we
+			 * still need to have a valid tablespace to assign to its
+			 * individual partitions, although partitions can override one
+			 * inherited from the parent.
+			 */
+			create_storage = false;
 			break;
 		case RELKIND_SEQUENCE:
 			create_storage = true;
@@ -804,6 +818,7 @@ InsertPgClassTuple(Relation pg_class_desc,
 	values[Anum_pg_class_relrowsecurity - 1] = BoolGetDatum(rd_rel->relrowsecurity);
 	values[Anum_pg_class_relforcerowsecurity - 1] = BoolGetDatum(rd_rel->relforcerowsecurity);
 	values[Anum_pg_class_relhassubclass - 1] = BoolGetDatum(rd_rel->relhassubclass);
+	values[Anum_pg_class_relispartition - 1] = BoolGetDatum(rd_rel->relispartition);
 	values[Anum_pg_class_relispopulated - 1] = BoolGetDatum(rd_rel->relispopulated);
 	values[Anum_pg_class_relreplident - 1] = CharGetDatum(rd_rel->relreplident);
 	values[Anum_pg_class_relfrozenxid - 1] = TransactionIdGetDatum(rd_rel->relfrozenxid);
@@ -862,6 +877,7 @@ AddNewRelationTuple(Relation pg_class_desc,
 	switch (relkind)
 	{
 		case RELKIND_RELATION:
+		case RELKIND_PARTITIONED_REL:
 		case RELKIND_MATVIEW:
 		case RELKIND_INDEX:
 		case RELKIND_TOASTVALUE:
@@ -886,6 +902,7 @@ AddNewRelationTuple(Relation pg_class_desc,
 
 	/* Initialize relfrozenxid and relminmxid */
 	if (relkind == RELKIND_RELATION ||
+		relkind == RELKIND_PARTITIONED_REL ||
 		relkind == RELKIND_MATVIEW ||
 		relkind == RELKIND_TOASTVALUE)
 	{
@@ -1100,9 +1117,10 @@ heap_create_with_catalog(const char *relname,
 	{
 		/* Use binary-upgrade override for pg_class.oid/relfilenode? */
 		if (IsBinaryUpgrade &&
-			(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE ||
-			 relkind == RELKIND_VIEW || relkind == RELKIND_MATVIEW ||
-			 relkind == RELKIND_COMPOSITE_TYPE || relkind == RELKIND_FOREIGN_TABLE))
+			(relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_REL ||
+			 relkind == RELKIND_SEQUENCE || relkind == RELKIND_VIEW ||
+			 relkind == RELKIND_MATVIEW || relkind == RELKIND_COMPOSITE_TYPE ||
+			 relkind == RELKIND_FOREIGN_TABLE))
 		{
 			if (!OidIsValid(binary_upgrade_next_heap_pg_class_oid))
 				ereport(ERROR,
@@ -1133,6 +1151,7 @@ heap_create_with_catalog(const char *relname,
 		switch (relkind)
 		{
 			case RELKIND_RELATION:
+			case RELKIND_PARTITIONED_REL:
 			case RELKIND_VIEW:
 			case RELKIND_MATVIEW:
 			case RELKIND_FOREIGN_TABLE:
@@ -1177,6 +1196,7 @@ heap_create_with_catalog(const char *relname,
 	 * such is an implementation detail: toast tables, sequences and indexes.
 	 */
 	if (IsUnderPostmaster && (relkind == RELKIND_RELATION ||
+							  relkind == RELKIND_PARTITIONED_REL ||
 							  relkind == RELKIND_VIEW ||
 							  relkind == RELKIND_MATVIEW ||
 							  relkind == RELKIND_FOREIGN_TABLE ||
@@ -1349,7 +1369,11 @@ heap_create_with_catalog(const char *relname,
 	if (oncommit != ONCOMMIT_NOOP)
 		register_on_commit_action(relid, oncommit);
 
-	if (relpersistence == RELPERSISTENCE_UNLOGGED)
+	/*
+	 * Do not bother creating the init fork for a partitioned relation.
+	 */
+	if (relpersistence == RELPERSISTENCE_UNLOGGED
+				&& relkind != RELKIND_PARTITIONED_REL)
 	{
 		Assert(relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW ||
 			   relkind == RELKIND_TOASTVALUE);
@@ -1799,11 +1823,27 @@ heap_drop_with_catalog(Oid relid)
 	}
 
 	/*
+	 * If this is a partitioned table, delete the pg_partitioned_rel tuple.
+	 */
+	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+		RemovePartitionKeyByRelId(relid);
+
+	/*
+	 * If this is a partition, delete the pg_partition tuple.
+	 *
+	 * Note: pg_partition tuple is also removed when a partition is detached
+	 * from its parent.
+	 */
+	if (rel->rd_rel->relispartition)
+		RemovePartitionByRelId(relid);
+
+	/*
 	 * Schedule unlinking of the relation's physical files at commit.
 	 */
 	if (rel->rd_rel->relkind != RELKIND_VIEW &&
 		rel->rd_rel->relkind != RELKIND_COMPOSITE_TYPE &&
-		rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
+		rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
+		rel->rd_rel->relkind != RELKIND_PARTITIONED_REL)
 	{
 		RelationDropStorage(rel);
 	}
@@ -2990,4 +3030,466 @@ insert_ordered_unique_oid(List *list, Oid datum)
 	/* Insert datum into list after 'prev' */
 	lappend_cell_oid(list, prev, datum);
 	return list;
+}
+
+/*
+ * StorePartitionKey
+ *		Store the partition key of rel into pg_partitioned_rel catalog
+ */
+void
+StorePartitionKey(Relation rel,
+				  int partnatts,
+				  AttrNumber *partattrs,
+				  List *partexprs,
+				  Oid *partOpClassOids,
+				  char strategy)
+{
+	int			i;
+	int2vector *partkey;
+	oidvector  *partopclass;
+	Datum		partexprsDatum;
+	Relation	pg_partitioned_rel;
+	HeapTuple	tuple;
+	Datum		values[Natts_pg_partitioned_rel];
+	bool		nulls[Natts_pg_partitioned_rel];
+	ObjectAddress   myself;
+	ObjectAddress   referenced;
+
+	/* Cannot happen but might as well */
+	tuple = SearchSysCache(PARTITIONEDRELID,
+							ObjectIdGetDatum(RelationGetRelid(rel)), 0, 0, 0);
+	if (HeapTupleIsValid(tuple))
+	{
+		ereport(ERROR,
+					(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+					errmsg("cannot redefine partition key for table \"%s\"",
+					RelationGetRelationName(rel))));
+		ReleaseSysCache(tuple);
+	}
+
+	/*
+	 * Copy the partition key, opclass info into arrays (should we
+	 * make the caller pass them like this to start with?)
+	 */
+	partkey = buildint2vector(partattrs, partnatts);
+	partopclass = buildoidvector(partOpClassOids, partnatts);
+
+	/* Convert the partition key expressions (if any) to a text datum */
+	if (partexprs)
+	{
+		char       *exprsString;
+
+		exprsString = nodeToString(partexprs);
+		partexprsDatum = CStringGetTextDatum(exprsString);
+		pfree(exprsString);
+	}
+	else
+		partexprsDatum = (Datum) 0;
+
+	pg_partitioned_rel = heap_open(PartitionedRelRelationId, RowExclusiveLock);
+
+	MemSet(nulls, false, sizeof(nulls));
+
+	/* Only this can ever be NULL */
+	if (!partexprsDatum)
+		nulls[Anum_pg_partitioned_rel_partexprs - 1] = true;
+
+	values[Anum_pg_partitioned_rel_partrelid - 1] = ObjectIdGetDatum(RelationGetRelid(rel));
+	values[Anum_pg_partitioned_rel_partstrat - 1] = CharGetDatum(strategy);
+	values[Anum_pg_partitioned_rel_partnatts - 1] = Int16GetDatum(partnatts);
+	values[Anum_pg_partitioned_rel_partkey - 1] =  PointerGetDatum(partkey);
+	values[Anum_pg_partitioned_rel_partclass - 1] = PointerGetDatum(partopclass);
+	values[Anum_pg_partitioned_rel_partexprs - 1] = partexprsDatum;
+
+	tuple = heap_form_tuple(RelationGetDescr(pg_partitioned_rel), values, nulls);
+
+	simple_heap_insert(pg_partitioned_rel, tuple);
+
+	/* Update the indexes on pg_partitioned_rel */
+	CatalogUpdateIndexes(pg_partitioned_rel, tuple);
+
+	/* Make this relation dependent on a few things: */
+	myself.classId = RelationRelationId;
+	myself.objectId = RelationGetRelid(rel);;
+	myself.objectSubId = 0;
+
+	/* Operator class per key column */
+	for (i = 0; i < partnatts; i++)
+	{
+		referenced.classId = OperatorClassRelationId;
+		referenced.objectId = partOpClassOids[i];
+		referenced.objectSubId = 0;
+
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
+
+	/*
+	 * Things inside key expressions
+	 *
+	 * An ugliness: normal dependencies also created on attribute references
+	 * as part of the following.
+	 */
+	if (partexprs)
+		recordDependencyOnSingleRelExpr(&myself,
+										(Node *) partexprs,
+										RelationGetRelid(rel),
+										DEPENDENCY_NORMAL,
+										DEPENDENCY_NORMAL);
+
+	/* Tell world about the key */
+	CacheInvalidateRelcache(rel);
+
+	heap_close(pg_partitioned_rel, RowExclusiveLock);
+	heap_freetuple(tuple);
+}
+
+/*
+ *  RemovePartitionKeyByRelId
+ *		Remove a pg_partitioned_rel entry
+ */
+void
+RemovePartitionKeyByRelId(Oid relid)
+{
+	Relation		pkeyrel;
+	HeapTuple		tuple;
+
+	pkeyrel = heap_open(PartitionedRelRelationId, RowExclusiveLock);
+
+	tuple = SearchSysCache1(PARTITIONEDRELID, ObjectIdGetDatum(relid));
+
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for partition key of relation %u", relid);
+
+	simple_heap_delete(pkeyrel, &tuple->t_self);
+
+	ReleaseSysCache(tuple);
+	heap_close(pkeyrel, RowExclusiveLock);
+}
+
+/* ----------------
+ *	BuildPartitionKeyInfo
+ *		Construct a PartitionKeyInfo record for an open relation
+ *
+ * PartitionKeyInfo stores the information about the partition key that's
+ * needed when inserting tuples into a partitioned relations; especially
+ * partition expression state. Normally we build a PartitionKeyInfo for a
+ * partitioned relation just once per command, and then use it for
+ * (potentially) many tuples.
+ * ----------------
+ */
+PartitionKeyInfo *
+BuildPartitionKeyInfo(Relation rel)
+{
+	int							i;
+	int							numKeys;
+	Form_pg_partitioned_rel		pkeyStruct = rel->rd_partkey;
+	PartitionKeyInfo		   *pi = makeNode(PartitionKeyInfo);
+
+	numKeys = pkeyStruct->partnatts;
+	if (numKeys < 1 || numKeys > PARTITION_MAX_KEYS)
+		elog(ERROR, "invalid partnatts %d for partitioned relation %u",
+			 numKeys, RelationGetRelid(rel));
+
+	pi->pi_NumKeyAttrs = numKeys;
+	for (i = 0; i < numKeys; i++)
+		pi->pi_KeyAttrNumbers[i] = pkeyStruct->partkey.values[i];
+
+	/* Fetch any partition key expressions */
+	pi->pi_Expressions = RelationGetPartitionExpressions(rel);
+	pi->pi_ExpressionsState = NIL;
+
+	return pi;
+}
+
+/*
+ * StorePartition
+ *		Store information of new partition of rel into pg_partition
+ */
+void
+StorePartition(Relation rel, PartitionBoundInfo *partition)
+{
+	Relation		pg_partition;
+	HeapTuple		tuple;
+	ArrayType	   *listvalues = NULL;
+	ArrayType	   *rangemaxs = NULL;
+	char			strategy = rel->rd_partkey->partstrat;
+	int				partnatts = rel->rd_partkey->partnatts;
+	Datum			values[Natts_pg_partition];
+	bool			nulls[Natts_pg_partition];
+
+	PartitionKeyTypeInfo *typinfo = get_key_type_info(rel);
+
+	/* DefineRelation enforces */
+	Assert(strategy != PARTITION_STRAT_LIST || partnatts == 1);
+
+	/* Cannot happen but might as well */
+	tuple = SearchSysCache(PARTITIONID, partition->oid, 0, 0, 0);
+	if (HeapTupleIsValid(tuple))
+		ereport(ERROR, (errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+					errmsg("cannot redefine partition bounds for relation \"%s\"",
+								get_rel_name(partition->oid))));
+
+	pg_partition = heap_open(PartitionRelationId, RowExclusiveLock);
+
+	/* Build the tuple */
+	MemSet(nulls, false, sizeof(nulls));
+
+	switch (strategy)
+	{
+		case PARTITION_STRAT_LIST:
+			listvalues = construct_array(partition->listvalues,
+										 partition->listnvalues,
+										 typinfo->typid[0],
+										 typinfo->typlen[0],
+										 typinfo->typbyval[0],
+										 typinfo->typalign[0]);
+			/* No range bounds */
+			nulls[Anum_pg_partition_partrangemaxs - 1] = true;
+			break;
+
+		case PARTITION_STRAT_RANGE:
+			rangemaxs = construct_array(partition->rangemaxs,
+										 partnatts,
+										 ANYARRAYOID,
+										 -1,
+										 false,
+										 'd');
+
+			/* No list values */
+			nulls[Anum_pg_partition_partlistvals - 1] = true;
+			break;
+	}
+
+	values[Anum_pg_partition_partrelid - 1] = ObjectIdGetDatum(partition->oid);
+	values[Anum_pg_partition_partparent - 1] = ObjectIdGetDatum(RelationGetRelid(rel));
+	values[Anum_pg_partition_partlistvals - 1] = PointerGetDatum(listvalues);
+	values[Anum_pg_partition_partrangemaxs - 1] = PointerGetDatum(rangemaxs);
+
+	tuple = heap_form_tuple(RelationGetDescr(pg_partition), values, nulls);
+
+	simple_heap_insert(pg_partition, tuple);
+
+	/* Update the indexes on pg_partition */
+	CatalogUpdateIndexes(pg_partition, tuple);
+
+	free_key_type_info(typinfo);
+	heap_close(pg_partition, RowExclusiveLock);
+	heap_freetuple(tuple);
+}
+
+/*
+ *  RemovePartitionByRelId
+ *		Remove a pg_partition entry for a partition.
+ */
+void
+RemovePartitionByRelId(Oid relid)
+{
+	Relation		partrel;
+	HeapTuple		tuple;
+
+	partrel = heap_open(PartitionRelationId, RowExclusiveLock);
+	tuple = SearchSysCache1(PARTITIONID, ObjectIdGetDatum(relid));
+
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for partition %u", relid);
+
+	simple_heap_delete(partrel, &tuple->t_self);
+
+	ReleaseSysCache(tuple);
+	heap_close(partrel, RowExclusiveLock);
+}
+
+/*
+ * SetRelationIsPartition
+ *
+ * Update relation's pg_class.relispartition.
+ *
+ * Caller had better hold exclusive lock on the relation.
+ *
+ * An important side effect is that a SI update message will be sent out for
+ * the pg_class tuple, which will force other backends to rebuild their
+ * relcache entries for the rel.  Also, this backend will rebuild its
+ * own relcache entry at the next CommandCounterIncrement.
+ */
+void
+SetRelationIsPartition(Relation rel, bool ispartition)
+{
+	Relation	relrel;
+	HeapTuple	reltup;
+	Form_pg_class relStruct;
+
+	relrel = heap_open(RelationRelationId, RowExclusiveLock);
+	reltup = SearchSysCacheCopy1(RELOID,
+								 ObjectIdGetDatum(RelationGetRelid(rel)));
+	if (!HeapTupleIsValid(reltup))
+		elog(ERROR, "cache lookup failed for relation %u",
+			 RelationGetRelid(rel));
+
+	relStruct = (Form_pg_class) GETSTRUCT(reltup);
+
+	if (relStruct->relispartition != ispartition)
+	{
+		relStruct->relispartition = ispartition;
+
+		simple_heap_update(relrel, &reltup->t_self, reltup);
+
+		/* keep catalog indexes current */
+		CatalogUpdateIndexes(relrel, reltup);
+	}
+	else
+	{
+		/* Skip the disk update, but force relcache inval anyway */
+		CacheInvalidateRelcache(rel);
+	}
+
+	heap_freetuple(reltup);
+	heap_close(relrel, RowExclusiveLock);
+}
+
+/*
+ * FormPartitionKeyDatum
+ *		Construct values[] and isnull[] arrays for partition key columns
+ *		from the tuple contained in slot
+ */
+void
+FormPartitionKeyDatum(PartitionKeyInfo *pkinfo,
+					  TupleTableSlot *slot,
+					  EState *estate,
+					  Datum *values,
+					  bool *isnull)
+{
+	ListCell   *partexpr_item;
+	int			i;
+
+	if (pkinfo->pi_Expressions != NIL &&
+		pkinfo->pi_ExpressionsState == NIL)
+	{
+		/* First time through, set up expression evaluation state */
+		pkinfo->pi_ExpressionsState = (List *)
+			ExecPrepareExpr((Expr *) pkinfo->pi_Expressions,
+							estate);
+		/* Check caller has set up context correctly */
+		Assert(GetPerTupleExprContext(estate)->ecxt_scantuple == slot);
+	}
+	partexpr_item = list_head(pkinfo->pi_ExpressionsState);
+
+	for (i = 0; i < pkinfo->pi_NumKeyAttrs; i++)
+	{
+		AttrNumber	keycol = pkinfo->pi_KeyAttrNumbers[i];
+		Datum		pkDatum;
+		bool		isNull;
+
+		if (keycol != 0)
+		{
+			/* Plain column; get the value directly from the heap tuple */
+			pkDatum = slot_getattr(slot, keycol, &isNull);
+		}
+		else
+		{
+			/* Expression; need to evaluate it */
+			if (partexpr_item == NULL)
+				elog(ERROR, "wrong number of partition key expressions");
+			pkDatum = ExecEvalExprSwitchContext((ExprState *) lfirst(partexpr_item),
+											   GetPerTupleExprContext(estate),
+											   &isNull,
+											   NULL);
+			partexpr_item = lnext(partexpr_item);
+		}
+		values[i] = pkDatum;
+		isnull[i] = isNull;
+	}
+
+	if (partexpr_item != NULL)
+		elog(ERROR, "wrong number of partition key expressions");
+}
+
+/*
+ * get_partition_key_type_info
+ *
+ * Returns a PartitionKeyTypeInfo object that includes type info
+ * for individual partition key attributes.
+ *
+ * Separated out to avoid repeating the code.
+ */
+PartitionKeyTypeInfo *get_key_type_info(Relation rel)
+{
+	int			i;
+	int			partnatts;
+	AttrNumber *partattrs;
+	AttrNumber	attno;
+	List	   *partexprs;
+	ListCell   *partexprs_item;
+	PartitionKeyTypeInfo *result;
+
+	partnatts = rel->rd_partkey->partnatts;
+	partattrs = rel->rd_partkey->partkey.values;
+	partexprs = RelationGetPartitionExpressions(rel);
+
+	result = (PartitionKeyTypeInfo *) palloc0(sizeof(PartitionKeyTypeInfo));
+	result->typid = (Oid *) palloc0(partnatts * sizeof(Oid));
+	result->typmod = (int32 *) palloc0(partnatts * sizeof(int32));
+	result->typlen = (int16 *) palloc0(partnatts * sizeof(int16));
+	result->typbyval = (bool *) palloc0(partnatts * sizeof(bool));
+	result->typalign = (char *) palloc0(partnatts * sizeof(bool));
+
+	partexprs_item = list_head(partexprs);
+	for (i = 0; i < partnatts; i++)
+	{
+		attno = partattrs[i];
+
+		if (attno != InvalidAttrNumber)
+		{
+			result->typid[i] = rel->rd_att->attrs[attno - 1]->atttypid;
+			result->typmod[i] = rel->rd_att->attrs[attno - 1]->atttypmod;
+		}
+		else
+		{
+			result->typid[i] = exprType(lfirst(partexprs_item));
+			result->typmod[i] = exprTypmod(lfirst(partexprs_item));
+			partexprs_item = lnext(partexprs_item);
+		}
+		get_typlenbyvalalign(result->typid[i],
+								&result->typlen[i],
+								&result->typbyval[i],
+								&result->typalign[i]);
+	}
+
+	if (partexprs)
+		pfree(partexprs);
+
+	return result;
+}
+
+/*
+ * free_key_type_info
+ */
+void
+free_key_type_info(PartitionKeyTypeInfo *typinfo)
+{
+	pfree(typinfo->typid);
+	pfree(typinfo->typmod);
+	pfree(typinfo->typlen);
+	pfree(typinfo->typbyval);
+	pfree(typinfo->typalign);
+	pfree(typinfo);
+}
+
+/*
+ * is_partitioned
+ *		Returns whether relation with OID relid is partitioned
+ */
+bool
+is_partitioned(Oid relid)
+{
+	HeapTuple	tuple;
+	char		relkind;
+
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for relation %u", relid);
+
+	relkind = ((Form_pg_class) GETSTRUCT(tuple))->relkind;
+	ReleaseSysCache(tuple);
+
+	return relkind == RELKIND_PARTITIONED_REL;
 }

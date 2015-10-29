@@ -226,6 +226,8 @@ ExecInsert(ModifyTableState *mtstate,
 {
 	HeapTuple	tuple;
 	ResultRelInfo *resultRelInfo;
+	ResultRelInfo *saved_resultRelInfo = NULL;	/* for partitioned table case */
+	ExprContext   *econtext;
 	Relation	resultRelationDesc;
 	Oid			newId;
 	List	   *recheckIndexes = NIL;
@@ -333,6 +335,20 @@ ExecInsert(ModifyTableState *mtstate,
 		 */
 		if (resultRelationDesc->rd_att->constr)
 			ExecConstraints(resultRelInfo, slot, estate);
+
+		/*
+		 * Switch resultRelInfo to one corresponding to the partition
+		 * that this tuple maps to.
+		 */
+		if (resultRelInfo->ri_PartitionDesc)
+		{
+			saved_resultRelInfo = resultRelInfo;
+			/* for partition key expressions */
+			econtext = GetPerTupleExprContext(estate);
+			econtext->ecxt_scantuple = slot;
+			resultRelInfo = ExecFindPartition(resultRelInfo, slot, estate, true);
+			estate->es_result_relation_info = resultRelInfo;
+		}
 
 		if (onconflict != ONCONFLICT_NONE && resultRelInfo->ri_NumIndices > 0)
 		{
@@ -449,7 +465,7 @@ ExecInsert(ModifyTableState *mtstate,
 			 * Note: heap_insert returns the tid (location) of the new tuple
 			 * in the t_self field.
 			 */
-			newId = heap_insert(resultRelationDesc, tuple,
+			newId = heap_insert(resultRelInfo->ri_RelationDesc, tuple,
 								estate->es_output_cid,
 								0, NULL);
 
@@ -470,6 +486,17 @@ ExecInsert(ModifyTableState *mtstate,
 
 	/* AFTER ROW INSERT Triggers */
 	ExecARInsertTriggers(estate, resultRelInfo, tuple, recheckIndexes);
+
+	/* Restore the resultRelInfo, if had been switched. */
+	if (saved_resultRelInfo)
+	{
+		heap_close(resultRelInfo->ri_RelationDesc, RowExclusiveLock);
+		ExecCloseIndices(resultRelInfo);
+		pfree(resultRelInfo);
+		resultRelInfo = saved_resultRelInfo;
+		estate->es_result_relation_info = resultRelInfo;
+		saved_resultRelInfo = NULL; /* aka, paranoia! */
+	}
 
 	list_free(recheckIndexes);
 
@@ -496,6 +523,29 @@ ExecInsert(ModifyTableState *mtstate,
 	return NULL;
 }
 
+/*
+ * find_partition_in_es_rt
+ *		A temporary band-aid solution to get partition's RT index in executor
+ */
+static int
+find_partition_in_es_rt(EState *estate, Oid oid)
+{
+	ListCell   *lc;
+	int			index = 1;
+
+	foreach(lc, estate->es_range_table)
+	{
+		RangeTblEntry   *rte = (RangeTblEntry *) lfirst(lc);
+
+		if (rte->relid == oid)
+			return index;
+
+		index++;
+	}
+
+	return 0;
+}
+
 /* ----------------------------------------------------------------
  *		ExecDelete
  *
@@ -516,6 +566,7 @@ ExecInsert(ModifyTableState *mtstate,
  */
 static TupleTableSlot *
 ExecDelete(ItemPointer tupleid,
+		   Oid partitionOid,
 		   HeapTuple oldtuple,
 		   TupleTableSlot *planSlot,
 		   EPQState *epqstate,
@@ -527,12 +578,14 @@ ExecDelete(ItemPointer tupleid,
 	HTSU_Result result;
 	HeapUpdateFailureData hufd;
 	TupleTableSlot *slot = NULL;
+	Index		resultRelationRTindex;
 
 	/*
 	 * get information on the (current) result relation
 	 */
 	resultRelInfo = estate->es_result_relation_info;
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
+	resultRelationRTindex = resultRelInfo->ri_RangeTableIndex;
 
 	/* BEFORE ROW DELETE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -582,6 +635,13 @@ ExecDelete(ItemPointer tupleid,
 	}
 	else
 	{
+		if (partitionOid != InvalidOid)
+		{
+			resultRelationRTindex = find_partition_in_es_rt(estate,
+															partitionOid);
+			resultRelationDesc = heap_open(partitionOid, RowExclusiveLock);
+		}
+
 		/*
 		 * delete the tuple
 		 *
@@ -632,7 +692,7 @@ ldelete:;
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
 				/* Else, already deleted by self; nothing to do */
-				return NULL;
+				goto cleanup;
 
 			case HeapTupleMayBeUpdated:
 				break;
@@ -649,7 +709,7 @@ ldelete:;
 					epqslot = EvalPlanQual(estate,
 										   epqstate,
 										   resultRelationDesc,
-										   resultRelInfo->ri_RangeTableIndex,
+										   resultRelationRTindex,
 										   LockTupleExclusive,
 										   &hufd.ctid,
 										   hufd.xmax);
@@ -660,11 +720,11 @@ ldelete:;
 					}
 				}
 				/* tuple already deleted; nothing to do */
-				return NULL;
+				goto cleanup;
 
 			default:
 				elog(ERROR, "unrecognized heap_delete status: %u", result);
-				return NULL;
+				goto cleanup;
 		}
 
 		/*
@@ -734,10 +794,17 @@ ldelete:;
 		if (BufferIsValid(delbuffer))
 			ReleaseBuffer(delbuffer);
 
-		return rslot;
+		slot = rslot;
 	}
 
-	return NULL;
+cleanup:
+	if (resultRelationDesc != resultRelInfo->ri_RelationDesc)
+	{
+		heap_close(resultRelationDesc, RowExclusiveLock);
+		resultRelationDesc = resultRelInfo->ri_RelationDesc;
+	}
+
+	return slot;
 }
 
 /* ----------------------------------------------------------------
@@ -764,6 +831,7 @@ ldelete:;
  */
 static TupleTableSlot *
 ExecUpdate(ItemPointer tupleid,
+		   Oid partitionOid,
 		   HeapTuple oldtuple,
 		   TupleTableSlot *slot,
 		   TupleTableSlot *planSlot,
@@ -773,10 +841,13 @@ ExecUpdate(ItemPointer tupleid,
 {
 	HeapTuple	tuple;
 	ResultRelInfo *resultRelInfo;
+	ResultRelInfo *saved_resultRelInfo = NULL;	/* for partitioned table case */
+	ExprContext   *econtext;
 	Relation	resultRelationDesc;
 	HTSU_Result result;
 	HeapUpdateFailureData hufd;
 	List	   *recheckIndexes = NIL;
+	Index		resultRelationRTindex;
 
 	/*
 	 * abort the operation if not running transactions
@@ -795,6 +866,7 @@ ExecUpdate(ItemPointer tupleid,
 	 */
 	resultRelInfo = estate->es_result_relation_info;
 	resultRelationDesc = resultRelInfo->ri_RelationDesc;
+	resultRelationRTindex = resultRelInfo->ri_RangeTableIndex;
 
 	/* BEFORE ROW UPDATE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -873,6 +945,29 @@ lreplace:;
 			ExecConstraints(resultRelInfo, slot, estate);
 
 		/*
+		 * Check whether the new row changes partition
+		 */
+		if (resultRelInfo->ri_PartitionDesc)
+		{
+			saved_resultRelInfo = resultRelInfo;
+			/* for partition key expressions */
+			econtext = GetPerTupleExprContext(estate);
+			econtext->ecxt_scantuple = slot;
+			resultRelInfo = ExecFindPartition(resultRelInfo, slot, estate, false);
+
+			Assert(partitionOid != InvalidOid);
+
+			if (!resultRelInfo ||
+				RelationGetRelid(resultRelInfo->ri_RelationDesc) != partitionOid)
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("cannot perform update that causes a row to change partition")));
+
+			resultRelationRTindex = find_partition_in_es_rt(estate, partitionOid);
+			estate->es_result_relation_info = resultRelInfo;
+		}
+
+		/*
 		 * replace the heap tuple
 		 *
 		 * Note: if es_crosscheck_snapshot isn't InvalidSnapshot, we check
@@ -881,7 +976,7 @@ lreplace:;
 		 * needed for referential integrity updates in transaction-snapshot
 		 * mode transactions.
 		 */
-		result = heap_update(resultRelationDesc, tupleid, tuple,
+		result = heap_update(resultRelInfo->ri_RelationDesc, tupleid, tuple,
 							 estate->es_output_cid,
 							 estate->es_crosscheck_snapshot,
 							 true /* wait for commit */ ,
@@ -920,7 +1015,7 @@ lreplace:;
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
 				/* Else, already updated by self; nothing to do */
-				return NULL;
+				goto cleanup;
 
 			case HeapTupleMayBeUpdated:
 				break;
@@ -936,8 +1031,8 @@ lreplace:;
 
 					epqslot = EvalPlanQual(estate,
 										   epqstate,
-										   resultRelationDesc,
-										   resultRelInfo->ri_RangeTableIndex,
+										   resultRelInfo->ri_RelationDesc,
+										   resultRelationRTindex,
 										   lockmode,
 										   &hufd.ctid,
 										   hufd.xmax);
@@ -950,11 +1045,11 @@ lreplace:;
 					}
 				}
 				/* tuple already deleted; nothing to do */
-				return NULL;
+				goto cleanup;
 
 			default:
 				elog(ERROR, "unrecognized heap_update status: %u", result);
-				return NULL;
+				goto cleanup;
 		}
 
 		/*
@@ -985,6 +1080,17 @@ lreplace:;
 	ExecARUpdateTriggers(estate, resultRelInfo, tupleid, oldtuple, tuple,
 						 recheckIndexes);
 
+	/* Restore the resultRelInfo, if had been switched. */
+	if (saved_resultRelInfo)
+	{
+		heap_close(resultRelInfo->ri_RelationDesc, RowExclusiveLock);
+		ExecCloseIndices(resultRelInfo);
+		pfree(resultRelInfo);
+		resultRelInfo = saved_resultRelInfo;
+		estate->es_result_relation_info = resultRelInfo;
+		saved_resultRelInfo = NULL; /* aka, paranoia! */
+	}
+
 	list_free(recheckIndexes);
 
 	/*
@@ -1003,6 +1109,15 @@ lreplace:;
 	if (resultRelInfo->ri_projectReturning)
 		return ExecProcessReturning(resultRelInfo->ri_projectReturning,
 									slot, planSlot);
+
+cleanup:
+	if (saved_resultRelInfo)
+	{
+		heap_close(resultRelInfo->ri_RelationDesc, RowExclusiveLock);
+		ExecCloseIndices(resultRelInfo);
+		pfree(resultRelInfo);
+		estate->es_result_relation_info = saved_resultRelInfo;
+	}
 
 	return NULL;
 }
@@ -1182,7 +1297,7 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 	ExecProject(resultRelInfo->ri_onConflictSetProj, NULL);
 
 	/* Execute UPDATE with projection */
-	*returning = ExecUpdate(&tuple.t_data->t_ctid, NULL,
+	*returning = ExecUpdate(&tuple.t_data->t_ctid, InvalidOid, NULL,
 							mtstate->mt_conflproj, planSlot,
 							&mtstate->mt_epqstate, mtstate->ps.state,
 							canSetTag);
@@ -1267,6 +1382,7 @@ ExecModifyTable(ModifyTableState *node)
 	ItemPointerData tuple_ctid;
 	HeapTupleData oldtupdata;
 	HeapTuple	oldtuple;
+	Oid			partitionOid = InvalidOid;
 
 	/*
 	 * This should NOT get called during EvalPlanQual; we should have passed a
@@ -1364,7 +1480,9 @@ ExecModifyTable(ModifyTableState *node)
 				bool		isNull;
 
 				relkind = resultRelInfo->ri_RelationDesc->rd_rel->relkind;
-				if (relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW)
+				if (relkind == RELKIND_RELATION ||
+					relkind == RELKIND_PARTITIONED_REL ||
+					relkind == RELKIND_MATVIEW)
 				{
 					datum = ExecGetJunkAttribute(slot,
 												 junkfilter->jf_junkAttNo,
@@ -1415,6 +1533,20 @@ ExecModifyTable(ModifyTableState *node)
 				}
 				else
 					Assert(relkind == RELKIND_FOREIGN_TABLE);
+
+				if (relkind == RELKIND_PARTITIONED_REL)
+				{
+					int	junkTableOidAttNo = ExecFindJunkAttribute(junkfilter,
+																	"tableoid");
+					datum = ExecGetJunkAttribute(slot,
+												 junkTableOidAttNo,
+												 &isNull);
+					/* shouldn't ever get a null result... */
+					if (isNull)
+						elog(ERROR, "tableoid is NULL");
+
+					partitionOid = DatumGetObjectId(datum);
+				}
 			}
 
 			/*
@@ -1432,11 +1564,11 @@ ExecModifyTable(ModifyTableState *node)
 								  estate, node->canSetTag);
 				break;
 			case CMD_UPDATE:
-				slot = ExecUpdate(tupleid, oldtuple, slot, planSlot,
+				slot = ExecUpdate(tupleid, partitionOid, oldtuple, slot, planSlot,
 								&node->mt_epqstate, estate, node->canSetTag);
 				break;
 			case CMD_DELETE:
-				slot = ExecDelete(tupleid, oldtuple, planSlot,
+				slot = ExecDelete(tupleid, partitionOid, oldtuple, planSlot,
 								&node->mt_epqstate, estate, node->canSetTag);
 				break;
 			default:
@@ -1800,6 +1932,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 
 					relkind = resultRelInfo->ri_RelationDesc->rd_rel->relkind;
 					if (relkind == RELKIND_RELATION ||
+						relkind == RELKIND_PARTITIONED_REL ||
 						relkind == RELKIND_MATVIEW)
 					{
 						j->jf_junkAttNo = ExecFindJunkAttribute(j, "ctid");

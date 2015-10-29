@@ -648,6 +648,12 @@ BuildDescForRelation(List *schema)
 		has_not_null |= entry->is_not_null;
 		desc->attrs[attnum - 1]->attislocal = entry->is_local;
 		desc->attrs[attnum - 1]->attinhcount = entry->inhcount;
+
+		if (entry->is_dropped_copy)
+		{
+			Assert(entry->is_for_partition);
+			desc->attrs[attnum - 1]->attisdropped = true;
+		}
 	}
 
 	if (has_not_null)

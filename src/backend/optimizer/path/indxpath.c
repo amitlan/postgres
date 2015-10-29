@@ -2728,6 +2728,9 @@ check_partial_indexes(PlannerInfo *root, RelOptInfo *rel)
 	if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 		otherrels = bms_difference(root->all_baserels,
 								   find_childrel_parents(root, rel));
+	else if (rel->reloptkind == RELOPT_PARTITION_REL)
+		otherrels = bms_difference(root->all_baserels,
+									bms_make_singleton(rel->parent_relid));
 	else
 		otherrels = bms_difference(root->all_baserels, rel->relids);
 

@@ -343,7 +343,7 @@ static const SchemaQuery Query_for_list_of_tables = {
 	/* catname */
 	"pg_catalog.pg_class c",
 	/* selcondition */
-	"c.relkind IN ('r')",
+	"c.relkind IN ('r', 'P')",
 	/* viscondition */
 	"pg_catalog.pg_table_is_visible(c.oid)",
 	/* namespace */
@@ -374,7 +374,7 @@ static const SchemaQuery Query_for_list_of_updatables = {
 	/* catname */
 	"pg_catalog.pg_class c",
 	/* selcondition */
-	"c.relkind IN ('r', 'f', 'v')",
+	"c.relkind IN ('r', 'f', 'v', 'P')",
 	/* viscondition */
 	"pg_catalog.pg_table_is_visible(c.oid)",
 	/* namespace */
@@ -404,7 +404,7 @@ static const SchemaQuery Query_for_list_of_tsvmf = {
 	/* catname */
 	"pg_catalog.pg_class c",
 	/* selcondition */
-	"c.relkind IN ('r', 'S', 'v', 'm', 'f')",
+	"c.relkind IN ('r', 'S', 'v', 'm', 'f', 'P')",
 	/* viscondition */
 	"pg_catalog.pg_table_is_visible(c.oid)",
 	/* namespace */

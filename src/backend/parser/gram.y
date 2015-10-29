@@ -226,6 +226,9 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	struct ImportQual	*importqual;
 	InsertStmt			*istmt;
 	VariableSetStmt		*vsetstmt;
+	PartitionElem		*pelem;
+	PartitionValues		*pvalues;
+	PartitionBy			*partby;
 }
 
 %type <node>	stmt schema_stmt
@@ -321,6 +324,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				opt_collate
 
 %type <range>	qualified_name insert_target OptConstrFromTable
+				using_table opt_using_table
 
 %type <str>		all_Op MathOp
 
@@ -346,7 +350,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				OptTableElementList TableElementList OptInherit definition
 				OptTypedTableElementList TypedTableElementList
 				reloptions opt_reloptions
-				OptWith distinct_clause opt_all_clause opt_definition func_args func_args_list
+				OptWith OptWithOption distinct_clause opt_all_clause opt_definition func_args func_args_list
 				func_args_with_defaults func_args_with_defaults_list
 				aggr_args aggr_args_list
 				func_as createfunc_opt_list alterfunc_opt_list
@@ -537,6 +541,13 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				opt_frame_clause frame_extent frame_bound
 %type <str>		opt_existing_window_name
 %type <boolean> opt_if_not_exists
+%type <partby>	OptPartitionBy PartitionBy
+%type <list>	part_params
+%type <pelem> 	part_elem
+%type <pvalues>	PartitionValues
+%type <pvalues>	ListValues
+%type <pvalues>	RangeValues
+%type <list>	ValuesList
 
 /*
  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
@@ -562,7 +573,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 /* ordinary key words in alphabetical order */
 %token <keyword> ABORT_P ABSOLUTE_P ACCESS ACTION ADD_P ADMIN AFTER
 	AGGREGATE ALL ALSO ALTER ALWAYS ANALYSE ANALYZE AND ANY ARRAY AS ASC
-	ASSERTION ASSIGNMENT ASYMMETRIC AT ATTRIBUTE AUTHORIZATION
+	ASSERTION ASSIGNMENT ASYMMETRIC AT ATTACH ATTRIBUTE AUTHORIZATION
 
 	BACKWARD BEFORE BEGIN_P BETWEEN BIGINT BINARY BIT
 	BOOLEAN_P BOTH BY
@@ -577,7 +588,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURSOR CYCLE
 
 	DATA_P DATABASE DAY_P DEALLOCATE DEC DECIMAL_P DECLARE DEFAULT DEFAULTS
-	DEFERRABLE DEFERRED DEFINER DELETE_P DELIMITER DELIMITERS DESC
+	DEFERRABLE DEFERRED DEFINER DELETE_P DELIMITER DELIMITERS DESC DETACH
 	DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P DOUBLE_P DROP
 
 	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EVENT EXCEPT
@@ -601,7 +612,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	KEY
 
 	LABEL LANGUAGE LARGE_P LAST_P LATERAL_P
-	LEADING LEAKPROOF LEAST LEFT LEVEL LIKE LIMIT LISTEN LOAD LOCAL
+	LEADING LEAKPROOF LEAST LEFT LESS LEVEL LIKE LIMIT LIST LISTEN LOAD LOCAL
 	LOCALTIME LOCALTIMESTAMP LOCATION LOCK_P LOCKED LOGGED
 
 	MAPPING MATCH MATERIALIZED MAXVALUE MINUTE_P MINVALUE MODE MONTH_P MOVE
@@ -630,9 +641,9 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	STATEMENT STATISTICS STDIN STDOUT STORAGE STRICT_P STRIP_P SUBSTRING
 	SYMMETRIC SYSID SYSTEM_P
 
-	TABLE TABLES TABLESAMPLE TABLESPACE TEMP TEMPLATE TEMPORARY TEXT_P THEN
-	TIME TIMESTAMP TO TRAILING TRANSACTION TRANSFORM TREAT TRIGGER TRIM TRUE_P
-	TRUNCATE TRUSTED TYPE_P TYPES_P
+	TABLE TABLES TABLESAMPLE TABLESPACE TEMP TEMPLATE TEMPORARY TEXT_P THAN
+	THEN TIME TIMESTAMP TO TRAILING TRANSACTION TRANSFORM TREAT TRIGGER TRIM
+	TRUE_P 	TRUNCATE TRUSTED TYPE_P TYPES_P
 
 	UNBOUNDED UNCOMMITTED UNENCRYPTED UNION UNIQUE UNKNOWN UNLISTEN UNLOGGED
 	UNTIL UPDATE USER USING
@@ -2364,6 +2375,44 @@ alter_table_cmd:
 					n->def = (Node *)$1;
 					$$ = (Node *) n;
 				}
+			/*
+			 * ALTER TABLE <parent> ATTACH PARTITION <name>
+			 *		FOR VALUES (...) USING [TABLE] <table_name>
+			 */
+			| ATTACH PARTITION qualified_name PartitionValues using_table
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					PartitionDef *def = makeNode(PartitionDef);
+					n->subtype = AT_AttachPartition;
+					def->name = $3;
+					def->values = $4;
+					n->def = (Node *) def;
+					n->using_table = $5;
+					$$ = (Node *) n;
+				}
+			/*
+			 * ALTER TABLE <parent> DETACH PARTITION <name>
+			 *		[ USING [ TABLE ] <table_name> ]
+			 */
+			| DETACH PARTITION qualified_name opt_using_table
+				{
+					AlterTableCmd *n = makeNode(AlterTableCmd);
+					PartitionDef *def = makeNode(PartitionDef);
+					n->subtype = AT_DetachPartition;
+					def->name = $3;
+					n->def = (Node *) def;
+					n->using_table = $4;
+					$$ = (Node *) n;
+				}
+		;
+
+opt_using_table:
+			using_table							{ $$ = $1; }
+			| /* EMPTY */						{ $$ = NULL; }
+		;
+using_table:
+			/* USING [ TABLE ] qualified_name */
+			USING opt_table qualified_name		{ $$ = $3; }
 		;
 
 alter_column_default:
@@ -2801,7 +2850,7 @@ copy_generic_opt_arg_list_item:
  *****************************************************************************/
 
 CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
-			OptInherit OptWith OnCommitOption OptTableSpace
+			OptInherit OptPartitionBy OptWith OnCommitOption OptTableSpace
 				{
 					CreateStmt *n = makeNode(CreateStmt);
 					$4->relpersistence = $2;
@@ -2809,15 +2858,17 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->tableElts = $6;
 					n->inhRelations = $8;
 					n->ofTypename = NULL;
+					n->partValues = NULL;
+					n->partitionby = $9;
 					n->constraints = NIL;
-					n->options = $9;
-					n->oncommit = $10;
-					n->tablespacename = $11;
+					n->options = $10;
+					n->oncommit = $11;
+					n->tablespacename = $12;
 					n->if_not_exists = false;
 					$$ = (Node *)n;
 				}
 		| CREATE OptTemp TABLE IF_P NOT EXISTS qualified_name '('
-			OptTableElementList ')' OptInherit OptWith OnCommitOption
+			OptTableElementList ')' OptInherit OptPartitionBy OptWith OnCommitOption
 			OptTableSpace
 				{
 					CreateStmt *n = makeNode(CreateStmt);
@@ -2826,10 +2877,12 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->tableElts = $9;
 					n->inhRelations = $11;
 					n->ofTypename = NULL;
+					n->partValues = NULL;
+					n->partitionby = $12;
 					n->constraints = NIL;
-					n->options = $12;
-					n->oncommit = $13;
-					n->tablespacename = $14;
+					n->options = $13;
+					n->oncommit = $14;
+					n->tablespacename = $15;
 					n->if_not_exists = true;
 					$$ = (Node *)n;
 				}
@@ -2843,6 +2896,8 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->inhRelations = NIL;
 					n->ofTypename = makeTypeNameFromNameList($6);
 					n->ofTypename->location = @6;
+					n->partValues = NULL;
+					n->partitionby = NULL;
 					n->constraints = NIL;
 					n->options = $8;
 					n->oncommit = $9;
@@ -2860,10 +2915,44 @@ CreateStmt:	CREATE OptTemp TABLE qualified_name '(' OptTableElementList ')'
 					n->inhRelations = NIL;
 					n->ofTypename = makeTypeNameFromNameList($9);
 					n->ofTypename->location = @9;
+					n->partValues = NULL;
+					n->partitionby = NULL;
 					n->constraints = NIL;
 					n->options = $11;
 					n->oncommit = $12;
 					n->tablespacename = $13;
+					n->if_not_exists = true;
+					$$ = (Node *)n;
+				}
+		| CREATE OptTemp TABLE qualified_name PARTITION OF qualified_name
+			PartitionValues OptWithOption OnCommitOption OptTableSpace
+				{
+					CreateStmt *n = makeNode(CreateStmt);
+					$4->relpersistence = $2;
+					n->relation = $4;
+					n->partitionOf = $7;
+					n->partValues = $8;
+					n->partitionby = NULL;
+					n->constraints = NIL;
+					n->options = $9;
+					n->oncommit = $10;
+					n->tablespacename = $11;
+					n->if_not_exists = false;
+					$$ = (Node *)n;
+				}
+		| CREATE OptTemp TABLE IF_P NOT EXISTS qualified_name PARTITION OF qualified_name
+			PartitionValues OptWithOption OnCommitOption OptTableSpace
+				{
+					CreateStmt *n = makeNode(CreateStmt);
+					$7->relpersistence = $2;
+					n->relation = $7;
+					n->partitionOf = $10;
+					n->partValues = $11;
+					n->partitionby = NULL;
+					n->constraints = NIL;
+					n->options = $12;
+					n->oncommit = $13;
+					n->tablespacename = $14;
 					n->if_not_exists = true;
 					$$ = (Node *)n;
 				}
@@ -3406,11 +3495,119 @@ OptInherit: INHERITS '(' qualified_name_list ')'	{ $$ = $3; }
 			| /*EMPTY*/								{ $$ = NIL; }
 		;
 
+/* Optional partition key definition */
+OptPartitionBy: PartitionBy	{ $$ = $1; }
+			| /*EMPTY*/			{ $$ = NULL; }
+		;
+
+PartitionBy: PARTITION BY RANGE ON '(' part_params ')'
+				{
+					PartitionBy *n = makeNode(PartitionBy);
+
+					n->strategy = PARTITION_STRAT_RANGE;
+					n->partParams = $6;
+					n->location = @1;
+
+					$$ = n;
+				}
+			| PARTITION BY LIST ON '(' part_params ')'
+				{
+					PartitionBy *n = makeNode(PartitionBy);
+
+					n->strategy = PARTITION_STRAT_LIST;
+					n->partParams = $6;
+					n->location = @1;
+
+					$$ = n;
+				}
+		;
+
+part_params:	part_elem						{ $$ = list_make1($1); }
+			| part_params ',' part_elem			{ $$ = lappend($1, $3); }
+		;
+
+part_elem: ColId opt_class
+				{
+					PartitionElem *n = makeNode(PartitionElem);
+
+					n->name = $1;
+					n->expr = NULL;
+					n->opclass = $2;
+					n->location = @1;
+					$$ = n;
+				}
+			| func_expr_windowless opt_class
+				{
+					PartitionElem *n = makeNode(PartitionElem);
+
+					n->name = NULL;
+					n->expr = $1;
+					n->opclass = $2;
+					n->location = @1;
+					$$ = n;
+				}
+			| '(' a_expr ')' opt_class
+				{
+					PartitionElem *n = makeNode(PartitionElem);
+
+					n->name = NULL;
+					n->expr = $2;
+					n->opclass = $4;
+					n->location = @1;
+					$$ = n;
+				}
+		;
+
+/* Definition of a partition */
+PartitionValues:
+				FOR VALUES ListValues		{ $$ = $3; }
+			|	FOR VALUES RangeValues		{ $$ = $3; }
+		;
+
+ListValues:
+			opt_in '(' ValuesList ')'
+				{
+					PartitionValues *n = makeNode(PartitionValues);
+
+					n->listvalues = $3;
+					n->rangemaxs = NIL;
+					n->location = @1;
+					$$ = n;
+				}
+		;
+
+RangeValues:
+			LESS THAN '(' ValuesList ')'
+				{
+					PartitionValues *n = makeNode(PartitionValues);
+
+					n->listvalues = NIL;
+					n->rangemaxs = $4;
+					n->location = @1;
+					$$ = n;
+				}
+		;
+
+opt_in:		IN_P						{}
+			|	/* EMPTY */				{}
+		;
+
+ValuesList:
+			a_expr						{ $$ = list_make1($1); }
+			| ValuesList ',' a_expr		{ $$ = lappend($1, $3); }
+		;
+
 /* WITH (options) is preferred, WITH OIDS and WITHOUT OIDS are legacy forms */
 OptWith:
 			WITH reloptions				{ $$ = $2; }
 			| WITH OIDS					{ $$ = list_make1(defWithOids(true)); }
 			| WITHOUT OIDS				{ $$ = list_make1(defWithOids(false)); }
+			| /*EMPTY*/					{ $$ = NIL; }
+		;
+
+/* WITH (options) only for partitions */
+OptWithOption:
+			WITH reloptions				{ $$ = $2; }
 			| /*EMPTY*/					{ $$ = NIL; }
 		;
 
@@ -13649,6 +13846,7 @@ unreserved_keyword:
 			| ASSERTION
 			| ASSIGNMENT
 			| AT
+			| ATTACH
 			| ATTRIBUTE
 			| BACKWARD
 			| BEFORE
@@ -13694,6 +13892,7 @@ unreserved_keyword:
 			| DELETE_P
 			| DELIMITER
 			| DELIMITERS
+			| DETACH
 			| DICTIONARY
 			| DISABLE_P
 			| DISCARD
@@ -13754,7 +13953,9 @@ unreserved_keyword:
 			| LARGE_P
 			| LAST_P
 			| LEAKPROOF
+			| LESS
 			| LEVEL
+			| LIST
 			| LISTEN
 			| LOAD
 			| LOCAL
@@ -13869,6 +14070,7 @@ unreserved_keyword:
 			| TEMPLATE
 			| TEMPORARY
 			| TEXT_P
+			| THAN
 			| TRANSACTION
 			| TRANSFORM
 			| TRIGGER

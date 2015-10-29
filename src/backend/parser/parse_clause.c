@@ -2880,6 +2880,14 @@ transformOnConflictArbiter(ParseState *pstate,
 				 parser_errposition(pstate,
 								  exprLocation((Node *) onConflictClause))));
 
+	/* ON CONFLICT on partitioned tables currently disallowed */
+	if (pstate->p_target_relation->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			  errmsg("ON CONFLICT not supported with partitioned tables"),
+				 parser_errposition(pstate,
+								  exprLocation((Node *) onConflictClause))));
+
 	/* ON CONFLICT DO NOTHING does not require an inference clause */
 	if (infer)
 	{

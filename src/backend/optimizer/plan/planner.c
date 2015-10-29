@@ -21,6 +21,7 @@
 #include "access/htup_details.h"
 #include "access/parallel.h"
 #include "access/xact.h"
+#include "catalog/heap.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "foreign/fdwapi.h"
@@ -2811,7 +2812,7 @@ preprocess_rowmarks(PlannerInfo *root)
 		newrc->allMarkTypes = (1 << newrc->markType);
 		newrc->strength = rc->strength;
 		newrc->waitPolicy = rc->waitPolicy;
-		newrc->isParent = false;
+		newrc->isParent = is_partitioned(rte->relid) ? true: false;
 
 		prowmarks = lappend(prowmarks, newrc);
 	}
@@ -2836,7 +2837,8 @@ preprocess_rowmarks(PlannerInfo *root)
 		newrc->allMarkTypes = (1 << newrc->markType);
 		newrc->strength = LCS_NONE;
 		newrc->waitPolicy = LockWaitBlock;		/* doesn't matter */
-		newrc->isParent = false;
+		newrc->isParent = rte->relid && is_partitioned(rte->relid)
+														? true: false;
 
 		prowmarks = lappend(prowmarks, newrc);
 	}

@@ -961,37 +961,48 @@ ProcessUtilitySlow(Node *parsetree,
 						{
 							Datum		toast_options;
 							static char *validnsps[] = HEAP_RELOPT_NAMESPACES;
+							char		relkind = ((CreateStmt *) stmt)->partitionby
+													? RELKIND_PARTITIONED_REL
+													: RELKIND_RELATION;
 
 							/* Create the table itself */
 							address = DefineRelation((CreateStmt *) stmt,
-													 RELKIND_RELATION,
+													 relkind,
 													 InvalidOid, NULL);
 							EventTriggerCollectSimpleCommand(address,
 															 secondaryObject,
 															 stmt);
 
 							/*
-							 * Let NewRelationCreateToastTable decide if this
-							 * one needs a secondary relation too.
+							 * It's not clear whether this is the right place
+							 * for using relkind to determine whether or not
+							 * TOAST relation is to be created.
 							 */
-							CommandCounterIncrement();
+							if (relkind != RELKIND_PARTITIONED_REL)
+							{
+								/*
+								 * Let NewRelationCreateToastTable decide if this
+								 * one needs a secondary relation too.
+								 */
+								CommandCounterIncrement();
 
-							/*
-							 * parse and validate reloptions for the toast
-							 * table
-							 */
-							toast_options = transformRelOptions((Datum) 0,
-											  ((CreateStmt *) stmt)->options,
-																"toast",
-																validnsps,
-																true,
-																false);
-							(void) heap_reloptions(RELKIND_TOASTVALUE,
-												   toast_options,
-												   true);
+								/*
+								 * parse and validate reloptions for the toast
+								 * table
+								 */
+								toast_options = transformRelOptions((Datum) 0,
+												  ((CreateStmt *) stmt)->options,
+																	"toast",
+																	validnsps,
+																	true,
+																	false);
+								(void) heap_reloptions(RELKIND_TOASTVALUE,
+													   toast_options,
+													   true);
 
-							NewRelationCreateToastTable(address.objectId,
-														toast_options);
+								NewRelationCreateToastTable(address.objectId,
+															toast_options);
+							}
 						}
 						else if (IsA(stmt, CreateForeignTableStmt))
 						{

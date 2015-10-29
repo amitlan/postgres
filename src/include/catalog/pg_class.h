@@ -65,6 +65,7 @@ CATALOG(pg_class,1259) BKI_BOOTSTRAP BKI_ROWTYPE_OID(83) BKI_SCHEMA_MACRO
 	bool		relhasrules;	/* has (or has had) any rules */
 	bool		relhastriggers; /* has (or has had) any TRIGGERs */
 	bool		relhassubclass; /* has (or has had) derived classes */
+	bool		relispartition; /* is a RELKIND_RELATION relation a partition */
 	bool		relrowsecurity; /* row security is enabled or not */
 	bool		relforcerowsecurity; /* row security forced for owners or not */
 	bool		relispopulated; /* matview currently holds query results */
@@ -96,7 +97,7 @@ typedef FormData_pg_class *Form_pg_class;
  * ----------------
  */
 
-#define Natts_pg_class						31
+#define Natts_pg_class						32
 #define Anum_pg_class_relname				1
 #define Anum_pg_class_relnamespace			2
 #define Anum_pg_class_reltype				3
@@ -120,14 +121,15 @@ typedef FormData_pg_class *Form_pg_class;
 #define Anum_pg_class_relhasrules			21
 #define Anum_pg_class_relhastriggers		22
 #define Anum_pg_class_relhassubclass		23
-#define Anum_pg_class_relrowsecurity		24
-#define Anum_pg_class_relforcerowsecurity	25
-#define Anum_pg_class_relispopulated		26
-#define Anum_pg_class_relreplident			27
-#define Anum_pg_class_relfrozenxid			28
-#define Anum_pg_class_relminmxid			29
-#define Anum_pg_class_relacl				30
-#define Anum_pg_class_reloptions			31
+#define Anum_pg_class_relispartition		24
+#define Anum_pg_class_relrowsecurity		25
+#define Anum_pg_class_relforcerowsecurity	26
+#define Anum_pg_class_relispopulated		27
+#define Anum_pg_class_relreplident			28
+#define Anum_pg_class_relfrozenxid			29
+#define Anum_pg_class_relminmxid			30
+#define Anum_pg_class_relacl				31
+#define Anum_pg_class_reloptions			32
 
 /* ----------------
  *		initial contents of pg_class
@@ -142,13 +144,13 @@ typedef FormData_pg_class *Form_pg_class;
  * Note: "3" in the relfrozenxid column stands for FirstNormalTransactionId;
  * similarly, "1" in relminmxid stands for FirstMultiXactId
  */
-DATA(insert OID = 1247 (  pg_type		PGNSP 71 0 PGUID 0 0 0 0 0 0 0 f f p r 30 0 t f f f f f f t n 3 1 _null_ _null_ ));
+DATA(insert OID = 1247 (  pg_type		PGNSP 71 0 PGUID 0 0 0 0 0 0 0 f f p r 30 0 t f f f f f f f t n 3 1 _null_ _null_ ));
 DESCR("");
-DATA(insert OID = 1249 (  pg_attribute	PGNSP 75 0 PGUID 0 0 0 0 0 0 0 f f p r 21 0 f f f f f f f t n 3 1 _null_ _null_ ));
+DATA(insert OID = 1249 (  pg_attribute	PGNSP 75 0 PGUID 0 0 0 0 0 0 0 f f p r 21 0 f f f f f f f f t n 3 1 _null_ _null_ ));
 DESCR("");
-DATA(insert OID = 1255 (  pg_proc		PGNSP 81 0 PGUID 0 0 0 0 0 0 0 f f p r 29 0 t f f f f f f t n 3 1 _null_ _null_ ));
+DATA(insert OID = 1255 (  pg_proc		PGNSP 81 0 PGUID 0 0 0 0 0 0 0 f f p r 29 0 t f f f f f f f t n 3 1 _null_ _null_ ));
 DESCR("");
-DATA(insert OID = 1259 (  pg_class		PGNSP 83 0 PGUID 0 0 0 0 0 0 0 f f p r 31 0 t f f f f f f t n 3 1 _null_ _null_ ));
+DATA(insert OID = 1259 (  pg_class		PGNSP 83 0 PGUID 0 0 0 0 0 0 0 f f p r 32 0 t f f f f f f f t n 3 1 _null_ _null_ ));
 DESCR("");
 
 
@@ -160,6 +162,7 @@ DESCR("");
 #define		  RELKIND_COMPOSITE_TYPE  'c'		/* composite type */
 #define		  RELKIND_FOREIGN_TABLE   'f'		/* foreign table */
 #define		  RELKIND_MATVIEW		  'm'		/* materialized view */
+#define		  RELKIND_PARTITIONED_REL 'P'		/* partitioned table */
 
 #define		  RELPERSISTENCE_PERMANENT	'p'		/* regular table */
 #define		  RELPERSISTENCE_UNLOGGED	'u'		/* unlogged permanent table */

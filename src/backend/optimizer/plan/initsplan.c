@@ -284,7 +284,7 @@ find_lateral_references(PlannerInfo *root)
 		 * it's sufficient to look at the parent relation.
 		 */
 
-		/* ignore RTEs that are "other rels" */
+		/* ignore RTEs that are "other rels" (no "partition rels" yet) */
 		if (brel->reloptkind != RELOPT_BASEREL)
 			continue;
 
@@ -415,7 +415,7 @@ create_lateral_join_info(PlannerInfo *root)
 
 		Assert(brel->relid == rti);		/* sanity check on array */
 
-		/* ignore RTEs that are "other rels" */
+		/* ignore RTEs that are "other rels" (no "partition rels" yet) */
 		if (brel->reloptkind != RELOPT_BASEREL)
 			continue;
 

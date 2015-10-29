@@ -16,7 +16,9 @@
 
 #include "catalog/indexing.h"
 #include "catalog/objectaddress.h"
+#include "catalog/pg_partition_fn.h"
 #include "parser/parse_node.h"
+#include "nodes/execnodes.h"
 
 
 typedef struct RawColumnDefault
@@ -38,6 +40,16 @@ typedef struct CookedConstraint
 	bool		is_no_inherit;	/* constraint has local def and cannot be
 								 * inherited */
 } CookedConstraint;
+
+/* Type information for partition key columns */
+typedef struct PartitionKeyTypeInfo
+{
+	Oid		*typid;
+	int32	*typmod;
+	int16	*typlen;
+	bool	*typbyval;
+	char	*typalign;
+} PartitionKeyTypeInfo;
 
 extern Relation heap_create(const char *relname,
 			Oid relnamespace,
@@ -133,5 +145,24 @@ extern void CheckAttributeType(const char *attname,
 				   Oid atttypid, Oid attcollation,
 				   List *containing_rowtypes,
 				   bool allow_system_table_mods);
+extern void StorePartitionKey(Relation rel,
+					int partnatts,
+					AttrNumber *partattrs,
+					List *partexprs,
+					Oid *partOpClassOids,
+					char strategy);
+extern void RemovePartitionKeyByRelId(Oid relid);
+extern PartitionKeyInfo *BuildPartitionKeyInfo(Relation rel);
+extern void RemovePartitionByRelId(Oid relid);
+extern void StorePartition(Relation rel, PartitionBoundInfo *partition);
+extern void SetRelationIsPartition(Relation rel, bool ispartition);
+extern void	FormPartitionKeyDatum(PartitionKeyInfo *pkinfo,
+					TupleTableSlot *slot,
+					EState *estate,
+					Datum *values,
+					bool *isnull);
+extern PartitionKeyTypeInfo *get_key_type_info(Relation rel);
+extern void free_key_type_info(PartitionKeyTypeInfo *typinfo);
+extern bool is_partitioned(Oid relid);
 
 #endif   /* HEAP_H */

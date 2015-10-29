@@ -236,8 +236,17 @@ index_check_primary_key(Relation heapRel,
 
 		if (!attform->attnotnull)
 		{
+			 AlterTableCmd *cmd;
+
+			if (heapRel->rd_rel->relispartition)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+						 errmsg("cannot define primary key using nullable column of partition \"%s\"",
+								 RelationGetRelationName(heapRel)),
+						 errhint("Define NOT NULL constraint on the column by altering the parent.")));
+
 			/* Add a subcommand to make this one NOT NULL */
-			AlterTableCmd *cmd = makeNode(AlterTableCmd);
+			cmd = makeNode(AlterTableCmd);
 
 			cmd->subtype = AT_SetNotNull;
 			cmd->name = pstrdup(NameStr(attform->attname));
@@ -3444,6 +3453,14 @@ reindex_relation(Oid relid, int flags, int options)
 	 * should match ReindexTable().
 	 */
 	rel = heap_open(relid, ShareLock);
+
+	/*
+	 * XXX - Reindexing a partitioned table not supported yet
+	 */
+	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+		ereport(ERROR,
+					(errmsg("cannot reindex partitioned table \"%s\"", RelationGetRelationName(rel)),
+					 errhint("Run REINDEX on individual partitions one-by-one.")));
 
 	toast_relid = rel->rd_rel->reltoastrelid;
 

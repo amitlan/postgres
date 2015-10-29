@@ -393,6 +393,27 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 		rel->fdwroutine = NULL;
 	}
 
+	/* Initialize rel->partinfo. */
+	if (relation->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+	{
+		int		i, ncolumns;
+		PartitionOptInfo *info = makeNode(PartitionOptInfo);
+
+		info->rel = rel;
+		info->ncolumns = ncolumns = relation->rd_partkey->partnatts;
+		info->partkeys = (int *) palloc(sizeof(int) * ncolumns);
+		info->opfamily = (Oid *) palloc(sizeof(Oid) * ncolumns);
+
+		for (i = 0; i < info->ncolumns; i++)
+		{
+			info->partkeys[i] = relation->rd_partkey->partkey.values[i];
+			info->opfamily[i] = relation->rd_partopfamily[i];
+		}
+		info->partexprs = RelationGetPartitionExpressions(relation);
+
+		rel->partoptinfo = info;
+	}
+
 	heap_close(relation, NoLock);
 
 	/*

@@ -1152,7 +1152,8 @@ get_relation_by_qualified_name(ObjectType objtype, List *objname,
 								RelationGetRelationName(relation))));
 			break;
 		case OBJECT_TABLE:
-			if (relation->rd_rel->relkind != RELKIND_RELATION)
+			if (relation->rd_rel->relkind != RELKIND_RELATION &&
+				relation->rd_rel->relkind != RELKIND_PARTITIONED_REL)
 				ereport(ERROR,
 						(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 						 errmsg("\"%s\" is not a table",
@@ -3181,7 +3182,15 @@ getRelationDescription(StringInfo buffer, Oid relid)
 	switch (relForm->relkind)
 	{
 		case RELKIND_RELATION:
-			appendStringInfo(buffer, _("table %s"),
+			if (relForm->relispartition)
+				appendStringInfo(buffer, _("partition %s"),
+								 relname);
+			else
+				appendStringInfo(buffer, _("table %s"),
+								 relname);
+			break;
+		case RELKIND_PARTITIONED_REL:
+			appendStringInfo(buffer, _("partitioned table %s"),
 							 relname);
 			break;
 		case RELKIND_INDEX:
@@ -3635,6 +3644,9 @@ getRelationTypeDescription(StringInfo buffer, Oid relid, int32 objectSubId)
 	{
 		case RELKIND_RELATION:
 			appendStringInfoString(buffer, "table");
+			break;
+		case RELKIND_PARTITIONED_REL:
+			appendStringInfoString(buffer, "partitioned table");
 			break;
 		case RELKIND_INDEX:
 			appendStringInfoString(buffer, "index");

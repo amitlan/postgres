@@ -169,11 +169,17 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 	else
 		rel = heap_openrv(stmt->relation, ShareRowExclusiveLock);
 
+	if (rel->rd_rel->relispartition)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot define triggers on a partition of another table"),
+				 errhint("Perform CREATE TRIGGER on the parent instead.")));
 	/*
 	 * Triggers must be on tables or views, and there are additional
 	 * relation-type-specific restrictions.
 	 */
-	if (rel->rd_rel->relkind == RELKIND_RELATION)
+	if (rel->rd_rel->relkind == RELKIND_RELATION ||
+		rel->rd_rel->relkind == RELKIND_PARTITIONED_REL)
 	{
 		/* Tables can't have INSTEAD OF triggers */
 		if (stmt->timing != TRIGGER_TYPE_BEFORE &&
@@ -183,6 +189,13 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 					 errmsg("\"%s\" is a table",
 							RelationGetRelationName(rel)),
 					 errdetail("Tables cannot have INSTEAD OF triggers.")));
+
+		/* Disallow row-level AFTER triggers on partitioned tables, *yet*. */
+		if (rel->rd_rel->relkind == RELKIND_PARTITIONED_REL &&
+				stmt->timing == TRIGGER_TYPE_AFTER && stmt->row)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("Row-level AFTER triggers are not supported on partitioned tables")));
 	}
 	else if (rel->rd_rel->relkind == RELKIND_VIEW)
 	{
@@ -1113,6 +1126,7 @@ RemoveTriggerById(Oid trigOid)
 	rel = heap_open(relid, AccessExclusiveLock);
 
 	if (rel->rd_rel->relkind != RELKIND_RELATION &&
+		rel->rd_rel->relkind != RELKIND_PARTITIONED_REL &&
 		rel->rd_rel->relkind != RELKIND_VIEW &&
 		rel->rd_rel->relkind != RELKIND_FOREIGN_TABLE)
 		ereport(ERROR,
@@ -1218,7 +1232,9 @@ RangeVarCallbackForRenameTrigger(const RangeVar *rv, Oid relid, Oid oldrelid,
 	form = (Form_pg_class) GETSTRUCT(tuple);
 
 	/* only tables and views can have triggers */
-	if (form->relkind != RELKIND_RELATION && form->relkind != RELKIND_VIEW &&
+	if (form->relkind != RELKIND_RELATION &&
+		form->relkind != RELKIND_PARTITIONED_REL &&
+		form->relkind != RELKIND_VIEW &&
 		form->relkind != RELKIND_FOREIGN_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),

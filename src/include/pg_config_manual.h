@@ -46,6 +46,11 @@
 #define INDEX_MAX_KEYS		32
 
 /*
+ * Maximum number of columns in a partition key (really arbitrary number)
+ */
+#define PARTITION_MAX_KEYS	16
+
+/*
  * Set the upper and lower bounds of sequence values.
  */
 #define SEQ_MAXVALUE	PG_INT64_MAX

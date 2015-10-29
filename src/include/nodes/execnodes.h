@@ -20,6 +20,7 @@
 #include "lib/pairingheap.h"
 #include "nodes/params.h"
 #include "nodes/plannodes.h"
+#include "utils/rel.h"
 #include "utils/reltrigger.h"
 #include "utils/sortsupport.h"
 #include "utils/tuplestore.h"
@@ -75,6 +76,27 @@ typedef struct IndexInfo
 	bool		ii_Concurrent;
 	bool		ii_BrokenHotChain;
 } IndexInfo;
+
+/*
+ * PartitionKeyInfo
+ *
+ *		This struct holds the information needed to extract partition
+ *		column values from a heap tuple.
+ *
+ *		NumKeyAttrs			number of columns in partition key
+ *		KeyAttrNumbers		underlying-rel attribute numbers used as keys
+ *							(zeroes indicate expressions)
+ *		Expressions			expr trees for expression entries, or NIL if none
+ *		ExpressionsState	exec state for expressions, or NIL if none
+ */
+typedef struct PartitionKeyInfo
+{
+	NodeTag		type;
+	int			pi_NumKeyAttrs;
+	AttrNumber	pi_KeyAttrNumbers[PARTITION_MAX_KEYS];
+	List	   *pi_Expressions;			/* list of Expr */
+	List	   *pi_ExpressionsState;	/* list of ExprState */
+} PartitionKeyInfo;
 
 /* ----------------
  *	  ExprContext_CB
@@ -341,6 +363,8 @@ typedef struct ResultRelInfo
 	ProjectionInfo *ri_projectReturning;
 	ProjectionInfo *ri_onConflictSetProj;
 	List	   *ri_onConflictSetWhere;
+	PartitionKeyInfo *ri_PartitionKeyInfo;
+	PartitionDesc  *ri_PartitionDesc;
 } ResultRelInfo;
 
 /* ----------------

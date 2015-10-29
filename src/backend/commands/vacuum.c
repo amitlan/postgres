@@ -1292,6 +1292,21 @@ vacuum_rel(Oid relid, RangeVar *relation, int options, VacuumParams *params)
 	}
 
 	/*
+	 * XXX - Vacuuming a partitioned table not supported yet
+	 */
+	if (onerel->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+	{
+		if(!IsAutoVacuumWorkerProcess())
+			ereport(ERROR,
+					(errmsg("cannot vacuum partitioned table \"%s\"", RelationGetRelationName(onerel)),
+					 errhint("Run VACUUM on individual partitions one-by-one.")));
+		else
+			ereport(WARNING,
+					(errmsg("skipping \"%s\" --- cannot vacuum partitioned tables",
+							RelationGetRelationName(onerel))));
+	}
+
+	/*
 	 * Check that it's a vacuumable relation; we used to do this in
 	 * get_rel_oids() but seems safer to check after we've locked the
 	 * relation.

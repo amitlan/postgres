@@ -2901,6 +2901,7 @@ get_rels_with_domain(Oid domainOid, LOCKMODE lockmode)
 			 * index columns.
 			 */
 			if (rel->rd_rel->relkind != RELKIND_RELATION &&
+				rel->rd_rel->relkind != RELKIND_PARTITIONED_REL &&
 				rel->rd_rel->relkind != RELKIND_MATVIEW)
 			{
 				relation_close(rel, lockmode);

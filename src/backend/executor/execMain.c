@@ -42,6 +42,7 @@
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/heap.h"
 #include "commands/matview.h"
 #include "commands/trigger.h"
 #include "executor/execdebug.h"
@@ -56,6 +57,7 @@
 #include "utils/acl.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/partition.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
 #include "utils/tqual.h"
@@ -1019,6 +1021,34 @@ CheckValidResultRel(Relation resultRel, CmdType operation)
 	switch (resultRel->rd_rel->relkind)
 	{
 		case RELKIND_RELATION:
+			/*
+			 * prevent direct modifications on partitions; we have no way
+			 * of ensuring at partition level that paritioning rules allow
+			 * the result row to be in resultRel at all
+			 */
+			if (resultRel->rd_rel->relispartition)
+			{
+				switch (operation)
+				{
+					case CMD_INSERT:
+						ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot insert into a partition of another table"),
+							 errhint("Perform INSERT on the parent instead.")));
+						break;
+					case CMD_UPDATE:
+						ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot update a partition of another table"),
+							 errhint("Perform UPDATE on the parent instead.")));
+						break;
+					default:
+						/* CMD_DELETE doesn't hurt */
+						break;
+				}
+			}
+			break;
+		case RELKIND_PARTITIONED_REL:
 			/* OK */
 			break;
 		case RELKIND_SEQUENCE:
@@ -1152,6 +1182,7 @@ CheckValidRowMarkRel(Relation rel, RowMarkType markType)
 	switch (rel->rd_rel->relkind)
 	{
 		case RELKIND_RELATION:
+		case RELKIND_PARTITIONED_REL:
 			/* OK */
 			break;
 		case RELKIND_SEQUENCE:
@@ -1248,6 +1279,11 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_ConstraintExprs = NULL;
 	resultRelInfo->ri_junkFilter = NULL;
 	resultRelInfo->ri_projectReturning = NULL;
+	if (resultRelationDesc->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+	{
+		resultRelInfo->ri_PartitionKeyInfo = BuildPartitionKeyInfo(resultRelationDesc);
+		resultRelInfo->ri_PartitionDesc = RelationGetPartitionDesc(resultRelationDesc);
+	}
 }
 
 /*
@@ -2915,4 +2951,68 @@ EvalPlanQualEnd(EPQState *epqstate)
 	epqstate->estate = NULL;
 	epqstate->planstate = NULL;
 	epqstate->origslot = NULL;
+}
+
+/*
+ * ExecFindPartition
+ *		Determine the partition of rel for tuple contained in slot
+ *
+ * By consulting resultRelInfo->ri_PartitionDesc, find_partition_for_tuple()
+ * determines oid of the target partition. If it turns out to be InvalidOid,
+ * complain that the tuple cannot be inserted in this relation.
+ */
+ResultRelInfo *
+ExecFindPartition(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
+					EState *estate, bool is_insert)
+{
+	Oid				partOid;
+	Relation		parentRelDesc = resultRelInfo->ri_RelationDesc;
+	Relation		partRelDesc;
+	ResultRelInfo  *partition;
+
+	partOid = get_partition_for_tuple(parentRelDesc,
+									  resultRelInfo->ri_PartitionKeyInfo,
+									  resultRelInfo->ri_PartitionDesc,
+									  slot,
+									  estate);
+
+	if (partOid != InvalidOid)
+	{
+		partRelDesc = heap_open(partOid, RowExclusiveLock);
+
+		partition = makeNode(ResultRelInfo);
+		InitResultRelInfo(partition,
+							partRelDesc,
+							1,		/* dummy */
+							0);
+
+		ExecOpenIndices(partition, false);
+		partition->ri_junkFilter = resultRelInfo->ri_junkFilter;
+	}
+	else if (is_insert)
+	{
+		char	   *val_desc;
+		Bitmapset  *modifiedCols;
+		Bitmapset  *insertedCols;
+		Bitmapset  *updatedCols;
+
+		insertedCols = GetInsertedColumns(resultRelInfo, estate);
+		updatedCols = GetUpdatedColumns(resultRelInfo, estate);
+		modifiedCols = bms_union(insertedCols, updatedCols);
+		val_desc = ExecBuildSlotValueDescription(RelationGetRelid(parentRelDesc),
+												 slot,
+												 RelationGetDescr(parentRelDesc),
+												 modifiedCols,
+												 64);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot find partition for the new row for relation \"%s\"",
+						RelationGetRelationName(parentRelDesc)),
+				 val_desc ? errdetail("Failing row contains %s.", val_desc) : 0));
+	}
+	else
+		return NULL;
+
+	return partition;
 }

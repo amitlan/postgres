@@ -129,6 +129,9 @@ extern List *generate_join_implied_equalities(PlannerInfo *root,
 								 Relids outer_relids,
 								 RelOptInfo *inner_rel);
 extern bool exprs_known_equal(PlannerInfo *root, Node *item1, Node *item2);
+extern void add_partition_equivalences(PlannerInfo *root,
+						   RelOptInfo *parent_rel,
+						   RelOptInfo *partition_rel);
 extern void add_child_rel_equivalences(PlannerInfo *root,
 						   AppendRelInfo *appinfo,
 						   RelOptInfo *parent_rel,
@@ -204,5 +207,8 @@ extern List *truncate_useless_pathkeys(PlannerInfo *root,
 						  RelOptInfo *rel,
 						  List *pathkeys);
 extern bool has_useful_pathkeys(PlannerInfo *root, RelOptInfo *rel);
+extern Node *adjust_partition_attrs(Node *node,
+									int parent_relid,
+									int partition_relid);
 
 #endif   /* PATHS_H */

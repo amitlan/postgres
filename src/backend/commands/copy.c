@@ -1652,6 +1652,13 @@ BeginCopyTo(Relation rel,
 
 	if (rel != NULL && rel->rd_rel->relkind != RELKIND_RELATION)
 	{
+		/* a partitioned table itself does not support heap scan */
+		if (rel->rd_rel->relkind == RELKIND_PARTITIONED_REL)
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot copy from partitioned table \"%s\"",
+							RelationGetRelationName(rel)),
+					 errhint("Try the COPY (SELECT ...) TO variant.")));
 		if (rel->rd_rel->relkind == RELKIND_VIEW)
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -2167,6 +2174,7 @@ CopyFrom(CopyState cstate)
 	Datum	   *values;
 	bool	   *nulls;
 	ResultRelInfo *resultRelInfo;
+	ResultRelInfo *saved_resultRelInfo = NULL;	/* for partitioned table case */
 	EState	   *estate = CreateExecutorState(); /* for ExecConstraints() */
 	ExprContext *econtext;
 	TupleTableSlot *myslot;
@@ -2175,7 +2183,7 @@ CopyFrom(CopyState cstate)
 	ErrorContextCallback errcallback;
 	CommandId	mycid = GetCurrentCommandId(true);
 	int			hi_options = 0; /* start with default heap_insert options */
-	BulkInsertState bistate;
+	BulkInsertState bistate = NULL;
 	uint64		processed = 0;
 	bool		useHeapMultiInsert;
 	int			nBufferedTuples = 0;
@@ -2187,7 +2195,8 @@ CopyFrom(CopyState cstate)
 
 	Assert(cstate->rel);
 
-	if (cstate->rel->rd_rel->relkind != RELKIND_RELATION)
+	if (cstate->rel->rd_rel->relkind != RELKIND_RELATION &&
+			cstate->rel->rd_rel->relkind != RELKIND_PARTITIONED_REL)
 	{
 		if (cstate->rel->rd_rel->relkind == RELKIND_VIEW)
 			ereport(ERROR,
@@ -2215,6 +2224,13 @@ CopyFrom(CopyState cstate)
 					 errmsg("cannot copy to non-table relation \"%s\"",
 							RelationGetRelationName(cstate->rel))));
 	}
+
+	/* prevent copying to partitions directly */
+	if (cstate->rel->rd_rel->relispartition)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot copy to a partition of another table"),
+				 errhint("Perform COPY on the parent instead.")));
 
 	tupDesc = RelationGetDescr(cstate->rel);
 
@@ -2318,10 +2334,14 @@ CopyFrom(CopyState cstate)
 	 * expressions. Such triggers or expressions might query the table we're
 	 * inserting to, and act differently if the tuples that have already been
 	 * processed and prepared for insertion are not there.
+	 *
+	 * Also, Do not use multi- mode if inserting into a partitioned table
+	 * because we need to determine a partition for each row individually.
 	 */
 	if ((resultRelInfo->ri_TrigDesc != NULL &&
 		 (resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
 		  resultRelInfo->ri_TrigDesc->trig_insert_instead_row)) ||
+		resultRelInfo->ri_PartitionDesc != NULL ||
 		cstate->volatile_defexprs)
 	{
 		useHeapMultiInsert = false;
@@ -2346,7 +2366,9 @@ CopyFrom(CopyState cstate)
 	values = (Datum *) palloc(tupDesc->natts * sizeof(Datum));
 	nulls = (bool *) palloc(tupDesc->natts * sizeof(bool));
 
-	bistate = GetBulkInsertState();
+	if (resultRelInfo->ri_PartitionDesc == NULL)
+		bistate = GetBulkInsertState();
+
 	econtext = GetPerTupleExprContext(estate);
 
 	/* Set up callback to identify error line number */
@@ -2418,6 +2440,18 @@ CopyFrom(CopyState cstate)
 			if (cstate->rel->rd_att->constr)
 				ExecConstraints(resultRelInfo, slot, estate);
 
+			/*
+			 * Switch resultRelInfo to one corresponding to the partition
+			 * that this tuple maps to.
+			 */
+			if (resultRelInfo->ri_PartitionDesc)
+			{
+				saved_resultRelInfo = resultRelInfo;
+				econtext->ecxt_scantuple = slot;	/* for partition key expressions */
+				resultRelInfo = ExecFindPartition(resultRelInfo, slot, estate, true);
+				estate->es_result_relation_info = resultRelInfo;
+			}
+
 			if (useHeapMultiInsert)
 			{
 				/* Add this tuple to the tuple buffer */
@@ -2448,7 +2482,8 @@ CopyFrom(CopyState cstate)
 				List	   *recheckIndexes = NIL;
 
 				/* OK, store the tuple and create index entries for it */
-				heap_insert(cstate->rel, tuple, mycid, hi_options, bistate);
+				heap_insert(resultRelInfo->ri_RelationDesc,
+									tuple, mycid, hi_options, bistate);
 
 				if (resultRelInfo->ri_NumIndices > 0)
 					recheckIndexes = ExecInsertIndexTuples(slot, &(tuple->t_self),
@@ -2469,6 +2504,17 @@ CopyFrom(CopyState cstate)
 			 */
 			processed++;
 		}
+
+		/* Restore the resultRelInfo, if had been switched. */
+		if (saved_resultRelInfo)
+		{
+			heap_close(resultRelInfo->ri_RelationDesc, RowExclusiveLock);
+			ExecCloseIndices(resultRelInfo);
+			pfree(resultRelInfo);
+			resultRelInfo = saved_resultRelInfo;
+			estate->es_result_relation_info = resultRelInfo;
+			saved_resultRelInfo = NULL; /* aka, paranoia! */
+		}
 	}
 
 	/* Flush any remaining buffered tuples */
@@ -2481,7 +2527,8 @@ CopyFrom(CopyState cstate)
 	/* Done, clean up */
 	error_context_stack = errcallback.previous;
 
-	FreeBulkInsertState(bistate);
+	if (bistate)
+		FreeBulkInsertState(bistate);
 
 	MemoryContextSwitchTo(oldcontext);
 

@@ -30,6 +30,7 @@
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
+#include "optimizer/partitioning.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
@@ -72,6 +73,10 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 static void set_plain_rel_size(PlannerInfo *root, RelOptInfo *rel,
 				   RangeTblEntry *rte);
 static void set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
+					   RangeTblEntry *rte);
+static void set_partitioned_rel_size(PlannerInfo *root, RelOptInfo *rel,
+				   RangeTblEntry *rte);
+static void set_partitioned_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 					   RangeTblEntry *rte);
 static void set_tablesample_rel_size(PlannerInfo *root, RelOptInfo *rel,
 						 RangeTblEntry *rte);
@@ -120,6 +125,7 @@ static void subquery_push_qual(Query *subquery,
 static void recurse_push_qual(Node *setOp, Query *topquery,
 				  RangeTblEntry *rte, Index rti, Node *qual);
 static void remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel);
+static Relids adjust_relid_set(Relids relids, Index oldrelid, Index newrelid);
 
 
 /*
@@ -147,7 +153,7 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 
 		Assert(brel->relid == rti);		/* sanity check on array */
 
-		/* ignore RTEs that are "other rels" */
+		/* ignore RTEs that are "other rels" (no "partition rels" yet) */
 		if (brel->reloptkind != RELOPT_BASEREL)
 			continue;
 
@@ -235,13 +241,18 @@ set_base_rel_sizes(PlannerInfo *root)
 	{
 		RelOptInfo *rel = root->simple_rel_array[rti];
 
-		/* there may be empty slots corresponding to non-baserel RTEs */
+		/*
+		 * There may be empty slots corresponding to non-baserel RTEs or, by
+		 * now, it's possible that there are some unused slots at the end due
+		 * to overfluous repalloc when adding "partition rels".
+		 */
 		if (rel == NULL)
 			continue;
 
-		Assert(rel->relid == rti);		/* sanity check on array */
+		/* sanity check on array */
+		Assert(rel->relid);
 
-		/* ignore RTEs that are "other rels" */
+		/* ignore RTEs that are "other rels" and "partition rels" */
 		if (rel->reloptkind != RELOPT_BASEREL)
 			continue;
 
@@ -264,13 +275,18 @@ set_base_rel_pathlists(PlannerInfo *root)
 	{
 		RelOptInfo *rel = root->simple_rel_array[rti];
 
-		/* there may be empty slots corresponding to non-baserel RTEs */
+		/*
+		 * There may be empty slots corresponding to non-baserel RTEs or, by
+		 * now it's possible that there are some unused slots at the end due
+		 * to overfluous repalloc when adding "partition rels".
+		 */
 		if (rel == NULL)
 			continue;
 
-		Assert(rel->relid == rti);		/* sanity check on array */
+		/* sanity check on array */
+		Assert(rel->relid == rti);
 
-		/* ignore RTEs that are "other rels" */
+		/* ignore RTEs that are "other rels" and "partition rels" */
 		if (rel->reloptkind != RELOPT_BASEREL)
 			continue;
 
@@ -316,6 +332,11 @@ set_rel_size(PlannerInfo *root, RelOptInfo *rel,
 				{
 					/* Foreign table */
 					set_foreign_size(root, rel, rte);
+				}
+				else if (rte->relkind == RELKIND_PARTITIONED_REL)
+				{
+					/* Partitioned table */
+					set_partitioned_rel_size(root, rel, rte);
 				}
 				else if (rte->tablesample != NULL)
 				{
@@ -393,6 +414,11 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 				{
 					/* Foreign table */
 					set_foreign_pathlist(root, rel, rte);
+				}
+				else if (rte->relkind == RELKIND_PARTITIONED_REL)
+				{
+					/* Partitioned table */
+					set_partitioned_rel_pathlist(root, rel, rte);
 				}
 				else if (rte->tablesample != NULL)
 				{
@@ -482,6 +508,319 @@ set_plain_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 	/* Consider TID scans */
 	create_tidscan_paths(root, rel);
+}
+
+/*
+ * set_partitioned_rel_size
+ *	  Set size estimates for a partitioned relation
+ */
+static void
+set_partitioned_rel_size(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	Query	   *parse = root->parse;
+	PlanRowMark *oldrc;
+	LOCKMODE	lockmode;
+	Index		rti = rel->relid;
+	List	   *partOIDS;
+	ListCell   *l;
+
+	/* Determine lockmode to use when opening partitions */
+	oldrc = get_plan_rowmark(root->rowMarks, rti);
+	if (rti == parse->resultRelation)
+		lockmode = RowExclusiveLock;
+	else if (oldrc && RowMarkRequiresRowShareLock(oldrc->markType))
+		lockmode = RowShareLock;
+	else
+		lockmode = AccessShareLock;
+
+	/* Get partitions relevant to this query */
+	partOIDS = get_rel_partitions(rel, rte);
+
+	if (list_length(partOIDS) == 0)
+	{
+		/*
+		 * Either no partitions or none satisfying the quals. So, mark this
+		 * rel dummy.  We must do this in this phase so that the rel's
+		 * dummy-ness is visible when we generate paths for other rels.
+		 */
+		set_dummy_rel_pathlist(rel);
+	}
+
+	foreach(l, partOIDS)
+	{
+		Oid				partOID = lfirst_oid(l);
+		Relation		partition;
+		RelOptInfo	   *partrel;
+		RangeTblEntry  *partRTE;
+		Index			partRTindex;
+
+		partition = heap_open(partOID, lockmode);
+
+		if (RELATION_IS_OTHER_TEMP(partition))
+		{
+			heap_close(partition, lockmode);
+			continue;
+		}
+
+		/* Build an RTE for the partition and attach to query's rangetable */
+		partRTE = copyObject(rte);
+		partRTE->relid = partOID;
+		partRTE->relkind = partition->rd_rel->relkind;
+		partRTE->requiredPerms = 0;
+		parse->rtable = lappend(parse->rtable, partRTE);
+		partRTindex = list_length(parse->rtable);
+
+		/*
+		 * If there is enough space, store the RTE in simple_rte_array.
+		 * If there isn't, build_simple_rel() will resize it.
+		 */
+		if (partRTindex < root->simple_rel_array_size)
+			root->simple_rte_array[partRTindex] = partRTE;
+
+		/* Remember partition RT index */
+		rel->partrelids = lappend_int(rel->partrelids, partRTindex);
+
+		/*
+		 * Build RelOptInfo. Result is also saved in simple_rel_array at
+		 * partRTindex.
+		 */
+		partrel = build_simple_rel(root, partRTindex, RELOPT_PARTITION_REL);
+
+		partrel->parent_relid = rti;
+
+		/* Copy fields interesting for partition's planning */
+		partrel->baserestrictinfo = (List *)
+						adjust_partition_attrs((Node *) rel->baserestrictinfo,
+											   rti,
+											   partRTindex);
+		partrel->joininfo = (List *)
+						adjust_partition_attrs((Node *) rel->joininfo,
+											   rti,
+											   partRTindex);
+		partrel->reltargetlist = (List *)
+						adjust_partition_attrs((Node *) rel->reltargetlist,
+											   rti,
+											   partRTindex);
+
+		/*
+		 * We have to make partition entries in the EquivalenceClass data
+		 * structures as well.  This is needed either if the parent
+		 * participates in some eclass joins (because we will want to consider
+		 * inner-indexscan joins on the individual partitions) or if the parent
+		 * has useful pathkeys (because we should try to build MergeAppend
+		 * paths that produce those sort orderings).
+		 */
+		if (rel->has_eclass_joins)
+			add_partition_equivalences(root, rel, partrel);
+
+		partrel->has_eclass_joins = rel->has_eclass_joins;
+
+		/* Compute the partitions's size */
+		set_rel_size(root, partrel, partRTindex, partRTE);
+
+		/* Accumulate size information from each partition */
+		Assert(partrel->rows > 0);
+		rel->rows += partrel->rows;
+
+		/* Add partrel's pages to root->total_table_pages */
+		root->total_table_pages += partrel->pages;
+
+		/*
+		 * Build a PlanRowMark for partition if rel is marked
+		 * FOR UPDATE/SHARE
+		 */
+		if (oldrc)
+		{
+			PlanRowMark *newrc = makeNode(PlanRowMark);
+
+			newrc->rti = partRTindex;
+			newrc->prti = rti;
+			newrc->rowmarkId = oldrc->rowmarkId;
+			/* Reselect rowmark type, because relkind might not match parent */
+			newrc->markType = select_rowmark_type(partRTE, oldrc->strength);
+			newrc->allMarkTypes = (1 << newrc->markType);
+			newrc->strength = oldrc->strength;
+			newrc->waitPolicy = oldrc->waitPolicy;
+			newrc->isParent = false;
+
+			/* Include child's rowmark type in parent's allMarkTypes */
+			oldrc->allMarkTypes |= newrc->allMarkTypes;
+
+			root->rowMarks = lappend(root->rowMarks, newrc);
+		}
+
+		/* Close rel but keep the lock */
+		heap_close(partition, NoLock);
+	}
+
+	if (list_length(rel->partrelids) < 1)
+		set_dummy_rel_pathlist(rel);
+
+	rel->tuples = rel->rows;
+
+	/* Set relation width */
+	set_partitioned_rel_size_estimates(root, rel);
+}
+
+/*
+ * set_partitioned_rel_pathlist
+ *	  Build access paths for a partitioned relation
+ */
+static void
+set_partitioned_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	ListCell   *l;
+	bool		subpaths_valid = true;
+	List	   *partrels = NIL;
+	List	   *subpaths = NIL;
+	List	   *all_part_pathkeys = NIL;
+	List	   *all_part_outers = NIL;
+
+	foreach(l, rel->partrelids)
+	{
+		ListCell	   *lpp;
+		Index			partRTindex = lfirst_int(l);
+		RangeTblEntry  *partRTE = planner_rt_fetch(partRTindex, root);
+		RelOptInfo	   *partrel = find_base_rel(root, partRTindex);
+
+		partrels = lappend(partrels, partrel);
+
+		/* Compute the partition's access paths */
+		set_rel_pathlist(root, partrel, partRTindex, partRTE);
+
+		/*
+		 * If partition has an unparameterized cheapest-total path, add that to
+		 * the unparameterized Append path we are constructing for rel. If not,
+		 * there's no workable unparameterized path.
+		 */
+		if (partrel->cheapest_total_path->param_info == NULL)
+			subpaths = accumulate_append_subpath(subpaths,
+											  partrel->cheapest_total_path);
+		else
+			subpaths_valid = false;
+
+		/*
+		 * Collect lists of all the available path orderings and
+		 * parameterizations for all the partitions.  We use these as a
+		 * heuristic to indicate which sort orderings and parameterizations we
+		 * should build Append and MergeAppend paths for.
+		 */
+		foreach(lpp, partrel->pathlist)
+		{
+			Path	   *partpath = (Path *) lfirst(lpp);
+			List	   *partkeys = partpath->pathkeys;
+			Relids		partouter = PATH_REQ_OUTER(partpath);
+
+			/* Unsorted paths don't contribute to pathkey list */
+			if (partkeys != NIL)
+			{
+				ListCell   *lpk;
+				bool		found = false;
+
+				/* Have we already seen this ordering? */
+				foreach(lpk, all_part_pathkeys)
+				{
+					List	   *existing_pathkeys = (List *) lfirst(lpk);
+
+					if (compare_pathkeys(existing_pathkeys,
+										 partkeys) == PATHKEYS_EQUAL)
+					{
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+				{
+					/* No, so add it to all_part_pathkeys */
+					all_part_pathkeys = lappend(all_part_pathkeys,
+												 partkeys);
+				}
+			}
+
+			/* Unparameterized paths don't contribute to param-set list */
+			if (partouter)
+			{
+				ListCell   *lco;
+				bool		found = false;
+
+				/* Have we already seen this param set? */
+				foreach(lco, all_part_outers)
+				{
+					Relids		existing_outers = (Relids) lfirst(lco);
+
+					if (bms_equal(existing_outers, partouter))
+					{
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+				{
+					/* No, so add it to all_part_outers */
+					all_part_outers = lappend(all_part_outers,
+											   partouter);
+				}
+			}
+		}
+	}
+
+	/*
+	 * If we found unparameterized paths for all partitions, build an unordered,
+	 * unparameterized Append path for the rel.
+	 */
+	if (subpaths_valid)
+		add_path(rel, (Path *) create_append_path(rel, subpaths, NULL));
+
+	/*
+	 * Also build unparameterized MergeAppend paths based on the collected
+	 * list of partition pathkeys.
+	 */
+	if (subpaths_valid)
+		generate_mergeappend_paths(root, rel, partrels,
+								   all_part_pathkeys);
+
+	/*
+	 * Build Append paths for each parameterization seen among the partition rels.
+	 * (This may look pretty expensive, but in most cases of practical
+	 * interest, the partition rels will expose mostly the same parameterizations,
+	 * so that not that many cases actually get considered here.)
+	 *
+	 * The Append node itself cannot enforce quals, so all qual checking must
+	 * be done in the partition paths.  This means that to have a parameterized
+	 * Append path, we must have the exact same parameterization for each
+	 * partition path; otherwise some partitions might be failing to check the
+	 * moved-down quals.  To make them match up, we can try to increase the
+	 * parameterization of lesser-parameterized paths.
+	 */
+	foreach(l, all_part_outers)
+	{
+		Relids		required_outer = (Relids) lfirst(l);
+		ListCell   *lcr;
+
+		/* Select the partition paths for an Append with this parameterization */
+		subpaths = NIL;
+		subpaths_valid = true;
+		foreach(lcr, partrels)
+		{
+			RelOptInfo *partrel = (RelOptInfo *) lfirst(lcr);
+			Path	   *subpath;
+
+			subpath = get_cheapest_parameterized_child_path(root,
+															partrel,
+															required_outer);
+			if (subpath == NULL)
+			{
+				/* failed to make a suitable path for this partition */
+				subpaths_valid = false;
+				break;
+			}
+			subpaths = accumulate_append_subpath(subpaths, subpath);
+		}
+
+		if (subpaths_valid)
+			add_path(rel, (Path *)
+					 create_append_path(rel, subpaths, required_outer));
+	}
 }
 
 /*
@@ -1282,7 +1621,7 @@ has_multiple_baserels(PlannerInfo *root)
 		if (brel == NULL)
 			continue;
 
-		/* ignore RTEs that are "other rels" */
+		/* ignore RTEs that are "other rels" and "partition rels" */
 		if (brel->reloptkind == RELOPT_BASEREL)
 			if (++num_base_rels > 1)
 				return true;
@@ -2474,6 +2813,132 @@ remove_unused_subquery_outputs(Query *subquery, RelOptInfo *rel)
 										   exprTypmod(texpr),
 										   exprCollation(texpr));
 	}
+}
+
+/***************************************************************************
+ *			Doesn't really belong here (copied from prepunion.c)
+ ***************************************************************************/
+
+typedef struct adjust_partition_attrs_context
+{
+	Index	parent_relid;
+	Index	partition_relid;
+} adjust_partition_attrs_context;
+
+/*
+ * Substitute newrelid for oldrelid in a Relid set
+ */
+static Relids
+adjust_relid_set(Relids relids, Index oldrelid, Index newrelid)
+{
+	if (bms_is_member(oldrelid, relids))
+	{
+		/* Ensure we have a modifiable copy */
+		relids = bms_copy(relids);
+		/* Remove old, add new */
+		relids = bms_del_member(relids, oldrelid);
+		relids = bms_add_member(relids, newrelid);
+	}
+	return relids;
+}
+
+/*
+ * adjust_partition_attrs
+ */
+static Node *
+adjust_partition_attrs_mutator(Node *node,
+						adjust_partition_attrs_context *context)
+{
+	if (node == NULL)
+		return NULL;
+
+	if (IsA(node, Var))
+	{
+		if (((Var *) node)->varno == context->parent_relid)
+		{
+			Var *newvar = (Var *) copyObject(node);
+
+			newvar->varno = context->partition_relid;
+			return (Node *) newvar;
+		}
+	}
+
+	/*
+	 * We have to process RestrictInfo nodes specially.
+	 */
+	if (IsA(node, RestrictInfo))
+	{
+		RestrictInfo *oldinfo = (RestrictInfo *) node;
+		RestrictInfo *newinfo = makeNode(RestrictInfo);
+
+		/* Copy all flat-copiable fields */
+		memcpy(newinfo, oldinfo, sizeof(RestrictInfo));
+
+		/* Recursively fix the clause itself */
+		newinfo->clause = (Expr *)
+			adjust_partition_attrs_mutator((Node *) oldinfo->clause, context);
+
+		/* and the modified version, if an OR clause */
+		newinfo->orclause = (Expr *)
+			adjust_partition_attrs_mutator((Node *) oldinfo->orclause, context);
+
+		/* adjust relid sets too */
+		newinfo->clause_relids = adjust_relid_set(oldinfo->clause_relids,
+												  context->parent_relid,
+												  context->partition_relid);
+		newinfo->required_relids = adjust_relid_set(oldinfo->required_relids,
+													context->parent_relid,
+													context->partition_relid);
+		newinfo->outer_relids = adjust_relid_set(oldinfo->outer_relids,
+												 context->parent_relid,
+												 context->partition_relid);
+		newinfo->nullable_relids = adjust_relid_set(oldinfo->nullable_relids,
+													context->parent_relid,
+													context->partition_relid);
+		newinfo->left_relids = adjust_relid_set(oldinfo->left_relids,
+												context->parent_relid,
+												context->partition_relid);
+		newinfo->right_relids = adjust_relid_set(oldinfo->right_relids,
+												 context->parent_relid,
+												 context->partition_relid);
+
+		/*
+		 * Reset cached derivative fields, since these might need to have
+		 * different values when considering the child relation.  Note we
+		 * don't reset left_ec/right_ec: each child variable is implicitly
+		 * equivalent to its parent, so still a member of the same EC if any.
+		 */
+		newinfo->eval_cost.startup = -1;
+		newinfo->norm_selec = -1;
+		newinfo->outer_selec = -1;
+		newinfo->left_em = NULL;
+		newinfo->right_em = NULL;
+		newinfo->scansel_cache = NIL;
+		newinfo->left_bucketsize = -1;
+		newinfo->right_bucketsize = -1;
+
+		return (Node *) newinfo;
+	}
+
+	return expression_tree_mutator(node,
+								   adjust_partition_attrs_mutator,
+								   (void *) context);
+}
+
+/*
+ * adjust_partition_attrs
+ */
+Node *
+adjust_partition_attrs(Node *node, int parent_relid, int partition_relid)
+{
+	adjust_partition_attrs_context context;
+
+	context.parent_relid = parent_relid;
+	context.partition_relid = partition_relid;
+
+	return expression_tree_mutator(node,
+								   adjust_partition_attrs_mutator,
+								   (void *) &context);
 }
 
 /*****************************************************************************

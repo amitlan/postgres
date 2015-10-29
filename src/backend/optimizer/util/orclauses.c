@@ -86,7 +86,7 @@ extract_restriction_or_clauses(PlannerInfo *root)
 
 		Assert(rel->relid == rti);		/* sanity check on array */
 
-		/* ignore RTEs that are "other rels" */
+		/* ignore RTEs that are "other rels" (no "partition rels" yet) */
 		if (rel->reloptkind != RELOPT_BASEREL)
 			continue;
 

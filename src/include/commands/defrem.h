@@ -42,6 +42,8 @@ extern bool CheckIndexCompatible(Oid oldId,
 					 List *attributeList,
 					 List *exclusionOpNames);
 extern Oid	GetDefaultOpClass(Oid type_id, Oid am_id);
+extern Oid	GetIndexOpClass(List *opclass, Oid attrType, char *accessMethodName,
+					Oid accessMethodId);
 
 /* commands/functioncmds.c */
 extern ObjectAddress CreateFunction(CreateFunctionStmt *stmt, const char *queryString);

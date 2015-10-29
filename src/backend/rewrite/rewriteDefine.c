@@ -260,6 +260,7 @@ DefineQueryRewrite(char *rulename,
 	 * blocks them for users.  Don't mention them in the error message.
 	 */
 	if (event_relation->rd_rel->relkind != RELKIND_RELATION &&
+		event_relation->rd_rel->relkind != RELKIND_PARTITIONED_REL &&
 		event_relation->rd_rel->relkind != RELKIND_MATVIEW &&
 		event_relation->rd_rel->relkind != RELKIND_VIEW)
 		ereport(ERROR,

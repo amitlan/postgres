@@ -1020,6 +1020,7 @@ _equalAlterTableCmd(const AlterTableCmd *a, const AlterTableCmd *b)
 	COMPARE_STRING_FIELD(name);
 	COMPARE_NODE_FIELD(newowner);
 	COMPARE_NODE_FIELD(def);
+	COMPARE_NODE_FIELD(using_table);
 	COMPARE_SCALAR_FIELD(behavior);
 	COMPARE_SCALAR_FIELD(missing_ok);
 
@@ -1140,8 +1141,11 @@ static bool
 _equalCreateStmt(const CreateStmt *a, const CreateStmt *b)
 {
 	COMPARE_NODE_FIELD(relation);
+	COMPARE_NODE_FIELD(partitionOf);
 	COMPARE_NODE_FIELD(tableElts);
 	COMPARE_NODE_FIELD(inhRelations);
+	COMPARE_NODE_FIELD(partValues);
+	COMPARE_NODE_FIELD(partitionby);
 	COMPARE_NODE_FIELD(ofTypename);
 	COMPARE_NODE_FIELD(constraints);
 	COMPARE_NODE_FIELD(options);
@@ -2325,6 +2329,8 @@ _equalColumnDef(const ColumnDef *a, const ColumnDef *b)
 	COMPARE_SCALAR_FIELD(is_local);
 	COMPARE_SCALAR_FIELD(is_not_null);
 	COMPARE_SCALAR_FIELD(is_from_type);
+	COMPARE_SCALAR_FIELD(is_for_partition);
+	COMPARE_SCALAR_FIELD(is_dropped_copy);
 	COMPARE_SCALAR_FIELD(storage);
 	COMPARE_NODE_FIELD(raw_default);
 	COMPARE_NODE_FIELD(cooked_default);
@@ -2333,6 +2339,47 @@ _equalColumnDef(const ColumnDef *a, const ColumnDef *b)
 	COMPARE_NODE_FIELD(constraints);
 	COMPARE_NODE_FIELD(fdwoptions);
 	COMPARE_LOCATION_FIELD(location);
+
+	return true;
+}
+
+static bool
+_equalPartitionBy(const PartitionBy *a, const PartitionBy *b)
+{
+	COMPARE_SCALAR_FIELD(strategy);
+	COMPARE_NODE_FIELD(partParams);
+	COMPARE_LOCATION_FIELD(location);
+
+	return true;
+}
+
+static bool
+_equalPartitionElem(const PartitionElem *a, const PartitionElem *b)
+{
+	COMPARE_STRING_FIELD(name);
+	COMPARE_NODE_FIELD(expr);
+	COMPARE_NODE_FIELD(opclass);
+	COMPARE_LOCATION_FIELD(location);
+
+	return true;
+}
+
+static bool
+_equalPartitionValues(const PartitionValues *a, const PartitionValues *b)
+{
+	COMPARE_NODE_FIELD(listvalues);
+	COMPARE_NODE_FIELD(rangemaxs);
+	COMPARE_LOCATION_FIELD(location);
+
+	return true;
+}
+
+static bool
+_equalPartitionDef(const PartitionDef *a, const PartitionDef *b)
+{
+	COMPARE_NODE_FIELD(name);
+	COMPARE_NODE_FIELD(parent);
+	COMPARE_NODE_FIELD(values);
 
 	return true;
 }
@@ -3264,6 +3311,18 @@ equal(const void *a, const void *b)
 			break;
 		case T_ColumnDef:
 			retval = _equalColumnDef(a, b);
+			break;
+		case T_PartitionBy:
+			retval = _equalPartitionBy(a, b);
+			break;
+		case T_PartitionElem:
+			retval = _equalPartitionElem(a, b);
+			break;
+		case T_PartitionValues:
+			retval = _equalPartitionValues(a, b);
+			break;
+		case T_PartitionDef:
+			retval = _equalPartitionDef(a, b);
 			break;
 		case T_Constraint:
 			retval = _equalConstraint(a, b);

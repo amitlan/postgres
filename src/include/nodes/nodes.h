@@ -37,6 +37,7 @@ typedef enum NodeTag
 	T_ResultRelInfo,
 	T_EState,
 	T_TupleTableSlot,
+	T_PartitionKeyInfo,
 
 	/*
 	 * TAGS FOR PLAN NODES (plannodes.h)
@@ -223,6 +224,7 @@ typedef enum NodeTag
 	T_PlannerGlobal,
 	T_RelOptInfo,
 	T_IndexOptInfo,
+	T_PartitionOptInfo,
 	T_ParamPathInfo,
 	T_Path,
 	T_IndexPath,
@@ -429,6 +431,10 @@ typedef enum NodeTag
 	T_OnConflictClause,
 	T_CommonTableExpr,
 	T_RoleSpec,
+	T_PartitionBy,
+	T_PartitionElem,
+	T_PartitionValues,
+	T_PartitionDef,
 
 	/*
 	 * TAGS FOR REPLICATION GRAMMAR PARSE NODES (replnodes.h)
