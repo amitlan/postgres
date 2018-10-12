@@ -315,10 +315,6 @@ expand_inherited_rtentry(PlannerInfo *root, RangeTblEntry *rte, Index rti,
  *
  * Partitions are added to the query in order in which they are found in
  * the parent's PartitionDesc.
- *
- * Note: even though only the unpruned partitions will be added to the
- * resulting plan, this still locks *all* partitions via find_all_inheritors
- * when this function is called for the root partitioned table.
  */
 static void
 expand_partitioned_rtentry(PlannerInfo *root, RangeTblEntry *parentrte,
@@ -331,10 +327,6 @@ expand_partitioned_rtentry(PlannerInfo *root, RangeTblEntry *parentrte,
 	Index		rootParentRTindex = parentrel->inh_root_parent > 0 ?
 									parentrel->inh_root_parent :
 									parentRTindex;
-
-	/* If root partitioned table, lock *all* partitions in the tree. */
-	if (parentRTindex == rootParentRTindex)
-		(void) find_all_inheritors(parentrte->relid, lockmode, NULL);
 
 	/*
 	 * Initialize partitioned_child_rels to contain this RT index.
@@ -371,8 +363,7 @@ expand_partitioned_rtentry(PlannerInfo *root, RangeTblEntry *parentrte,
 		RangeTblEntry *childrte;
 		Index		childRTindex;
 
-		/* Already locked above. */
-		newrelation = heap_open(childOID, NoLock);
+		newrelation = heap_open(childOID, lockmode);
 		Assert(!RELATION_IS_OTHER_TEMP(newrelation));
 
 		/*
