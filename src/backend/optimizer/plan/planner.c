@@ -6824,7 +6824,9 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 		List	   *live_children = NIL;
 
 		/* Adjust each partition. */
-		for (partition_idx = 0; partition_idx < rel->nparts; partition_idx++)
+		partition_idx = -1;
+		while ((partition_idx = bms_next_member(rel->live_parts,
+												partition_idx)) >= 0)
 		{
 			RelOptInfo *child_rel = rel->part_rels[partition_idx];
 			ListCell   *lc;
@@ -6832,9 +6834,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 			int			nappinfos;
 			List	   *child_scanjoin_targets = NIL;
 
-			/* Skip processing pruned partitions. */
-			if (child_rel == NULL)
-				continue;
+			Assert(child_rel != NULL);
 
 			/* Translate scan/join targets for this child. */
 			appinfos = find_appinfos_by_relids(root, child_rel->relids,
@@ -6915,7 +6915,6 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 									PartitionwiseAggregateType patype,
 									GroupPathExtraData *extra)
 {
-	int			nparts = input_rel->nparts;
 	int			cnt_parts;
 	List	   *grouped_live_children = NIL;
 	List	   *partially_grouped_live_children = NIL;
@@ -6927,7 +6926,9 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 		   partially_grouped_rel != NULL);
 
 	/* Add paths for partitionwise aggregation/grouping. */
-	for (cnt_parts = 0; cnt_parts < nparts; cnt_parts++)
+	cnt_parts = -1;
+	while ((cnt_parts = bms_next_member(input_rel->live_parts,
+										cnt_parts)) >= 0)
 	{
 		RelOptInfo *child_input_rel = input_rel->part_rels[cnt_parts];
 		PathTarget *child_target = copy_pathtarget(target);
@@ -6937,9 +6938,8 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 		RelOptInfo *child_grouped_rel;
 		RelOptInfo *child_partially_grouped_rel;
 
-		/* Skip processing pruned partitions. */
-		if (child_input_rel == NULL)
-			continue;
+		/* A live partition must have a RelOptInfo. */
+		Assert(child_input_rel != NULL);
 
 		/* Input child rel must have a path */
 		Assert(child_input_rel->pathlist != NIL);

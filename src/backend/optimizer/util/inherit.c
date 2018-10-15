@@ -348,6 +348,7 @@ expand_partitioned_rtentry(PlannerInfo *root, RangeTblEntry *parentrte,
 
 	/* Perform pruning. */
 	partindexes = prune_append_rel_partitions(parentrel);
+	parentrel->live_parts = partindexes;
 
 	/* Must expand PlannerInfo arrays before we can add children. */
 	expand_planner_arrays(root, bms_num_members(partindexes));

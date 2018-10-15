@@ -1749,6 +1749,9 @@ build_joinrel_partition_info(RelOptInfo *joinrel, RelOptInfo *outer_rel,
 		joinrel->partexprs[cnt] = partexpr;
 		joinrel->nullable_partexprs[cnt] = nullable_partexpr;
 	}
+
+	/* Partitions will be added by try_partitionwise_join. */
+	joinrel->live_parts = NULL;
 }
 
 /*

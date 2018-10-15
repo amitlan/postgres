@@ -733,6 +733,10 @@ typedef struct RelOptInfo
 	Oid		   *part_oids;		/* partition OIDs */
 	struct RelOptInfo **part_rels;	/* Array of RelOptInfos of partitions,
 									 * stored in the same order of bounds */
+	Bitmapset  *live_parts;		/* Indexes into part_rels of the non-NULL
+								 * RelOptInfos of unpruned partitions; exists
+								 * to avoid having to iterate over the entire
+								 * part_rels array to filter NULL entries. */
 	List	  **partexprs;		/* Non-nullable partition key expressions. */
 	List	  **nullable_partexprs; /* Nullable partition key expressions. */
 	List	   *partitioned_child_rels; /* List of RT indexes. */

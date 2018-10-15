@@ -1426,6 +1426,9 @@ try_partitionwise_join(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 		populate_joinrel_with_paths(root, child_rel1, child_rel2,
 									child_joinrel, child_sjinfo,
 									child_restrictlist);
+		if (!IS_DUMMY_REL(child_joinrel))
+			joinrel->live_parts = bms_add_member(joinrel->live_parts,
+												 cnt_parts);
 	}
 }
 

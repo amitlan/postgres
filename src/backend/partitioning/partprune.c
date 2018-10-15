@@ -441,29 +441,21 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		memset(subplan_map, -1, nparts * sizeof(int));
 		subpart_map = (int *) palloc(nparts * sizeof(int));
 		memset(subpart_map, -1, nparts * sizeof(int));
-		present_parts = NULL;
+		present_parts = bms_copy(subpart->live_parts);
 
-		for (i = 0; i < nparts; i++)
+		i = -1;
+		while ((i = bms_next_member(present_parts, i)) >= 0)
 		{
 			RelOptInfo *partrel = subpart->part_rels[i];
 			int			subplanidx;
 			int			subpartidx;
 
-			/* Skip processing pruned partitions. */
-			if (partrel == NULL)
-				continue;
-
+			Assert(partrel != NULL);
 			subplan_map[i] = subplanidx = relid_subplan_map[partrel->relid] - 1;
 			subpart_map[i] = subpartidx = relid_subpart_map[partrel->relid] - 1;
+			/* Record finding this subplan */
 			if (subplanidx >= 0)
-			{
-				present_parts = bms_add_member(present_parts, i);
-
-				/* Record finding this subplan  */
 				subplansfound = bms_add_member(subplansfound, subplanidx);
-			}
-			else if (subpartidx >= 0)
-				present_parts = bms_add_member(present_parts, i);
 		}
 
 		pinfo = makeNode(PartitionedRelPruneInfo);
