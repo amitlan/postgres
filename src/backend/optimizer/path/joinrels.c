@@ -20,6 +20,7 @@
 #include "optimizer/joininfo.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/tlist.h"
 #include "partitioning/partbounds.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -49,6 +50,9 @@ static int match_expr_to_partition_keys(Expr *expr, RelOptInfo *rel,
 static SpecialJoinInfo *build_child_join_sjinfo(PlannerInfo *root,
 						SpecialJoinInfo *parent_sjinfo,
 						Relids left_relids, Relids right_relids);
+static RelOptInfo *build_dummy_partition_rel(PlannerInfo *root,
+									RelOptInfo *parent,
+									int partidx);
 
 
 /*
@@ -1379,6 +1383,11 @@ try_partitionwise_join(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 		AppendRelInfo **appinfos;
 		int			nappinfos;
 
+		if (IS_SIMPLE_REL(rel1) && child_rel1 == NULL)
+			child_rel1 = build_dummy_partition_rel(root, rel1, cnt_parts);
+		if (IS_SIMPLE_REL(rel1) && child_rel2 == NULL)
+			child_rel2 = build_dummy_partition_rel(root, rel2, cnt_parts);
+
 		/* We should never try to join two overlapping sets of rels. */
 		Assert(!bms_overlap(child_rel1->relids, child_rel2->relids));
 		child_joinrelids = bms_union(child_rel1->relids, child_rel2->relids);
@@ -1626,4 +1635,56 @@ build_child_join_sjinfo(PlannerInfo *root, SpecialJoinInfo *parent_sjinfo,
 	pfree(right_appinfos);
 
 	return sjinfo;
+}
+
+/*
+ * build_dummy_partition_rel
+ *		Build a RelOptInfo and AppendRelInfo for a pruned partition
+ *
+ * This does not result in opening the relation or a range table entry being
+ * created.  Also, the RelOptInfo thus created is not stored anywhere else
+ * beside the parent's part_rels array.
+ *
+ * The only reason this exists is because partition-wise join, in some cases,
+ * needs a RelOptInfo to represent an empty relation that's on the nullable
+ * side of an outer join, so that a Path representing the outer join can be
+ * created.
+ */
+static RelOptInfo *
+build_dummy_partition_rel(PlannerInfo *root, RelOptInfo *parent, int partidx)
+{
+	RangeTblEntry *parentrte = root->simple_rte_array[parent->relid];
+	RelOptInfo *rel;
+
+	Assert(parent->part_rels[partidx] == NULL);
+
+	/* Create minimally valid-looking RelOptInfo with parent's relid. */
+	rel = makeNode(RelOptInfo);
+	rel->reloptkind = RELOPT_OTHER_MEMBER_REL;
+	rel->relid = parent->relid;
+	rel->relids = bms_copy(parent->relids);
+	if (parent->top_parent_relids)
+		rel->top_parent_relids = parent->top_parent_relids;
+	else
+		rel->top_parent_relids = bms_copy(parent->relids);
+	rel->reltarget = copy_pathtarget(parent->reltarget);
+	parent->part_rels[partidx] = rel;
+	mark_dummy_rel(rel);
+
+	/*
+	 * Now we'll need a (no-op) AppendRelInfo for parent, because we're
+	 * setting the dummy partition's relid to be same as the parent's.
+	 */
+	if (root->append_rel_array[parent->relid] == NULL)
+	{
+		AppendRelInfo *appinfo = make_append_rel_info(parent, parentrte,
+													  parent->tupdesc,
+													  parentrte->relid,
+													  parent->reltype,
+													  parent->relid);
+
+		root->append_rel_array[parent->relid] = appinfo;
+	}
+
+	return rel;
 }

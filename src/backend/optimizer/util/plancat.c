@@ -105,20 +105,20 @@ static void set_baserel_partition_key_exprs(Relation relation,
  * important for it.
  */
 void
-get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
-				  RelOptInfo *rel)
+get_relation_info(PlannerInfo *root, RangeTblEntry *rte, RelOptInfo *rel)
 {
 	Index		varno = rel->relid;
 	Relation	relation;
 	bool		hasindex;
 	List	   *indexinfos = NIL;
+	bool		inhparent = rte->inh;
 
 	/*
 	 * We need not lock the relation since it was already locked, either by
 	 * the rewriter or when expand_inherited_rtentry() added it to the query's
 	 * rangetable.
 	 */
-	relation = heap_open(relationObjectId, NoLock);
+	relation = heap_open(rte->relid, NoLock);
 
 	/* Temporary and unlogged relations are inaccessible during recovery. */
 	if (!RelationNeedsWAL(relation) && RecoveryInProgress())
@@ -444,11 +444,32 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	get_relation_foreign_keys(root, rel, relation, inhparent);
 
 	/*
-	 * Collect info about relation's partitioning scheme, if any. Only
-	 * inheritance parents may be partitioned.
+	 * Collect some additional information for inheritance parents.
 	 */
-	if (inhparent && relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-		set_relation_partition_info(root, rel, relation);
+	if (inhparent)
+	{
+		/*
+		 * We'll need the TupleDesc when initializing the child relation.
+		 * A copy is being made because concurrent changes might drop
+		 * the relcache entry.  That's possible because ALTER TABLE
+		 * child_table NO INHERIT parent_table only requires an
+		 * AccessShareLock on parent_table.
+		 */
+		rel->tupdesc = CreateTupleDescCopy(RelationGetDescr(relation));
+		rel->reltype = RelationGetForm(relation)->reltype;
+
+		/*
+		 * If partitioned, also save the information of partitioning scheme,
+		 * and whether the query updates any of the partition key columns.
+		 */
+		if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			set_relation_partition_info(root, rel, relation);
+			root->partColsUpdated |= has_partition_attrs(relation,
+														 rte->updatedCols,
+														 NULL);
+		}
+	}
 
 	heap_close(relation, NoLock);
 
@@ -458,7 +479,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	 * removing an index, or adding a hypothetical index to the indexlist.
 	 */
 	if (get_relation_info_hook)
-		(*get_relation_info_hook) (root, relationObjectId, inhparent, rel);
+		(*get_relation_info_hook) (root, rte->relid, rte->inh, rel);
 }
 
 /*
@@ -1844,16 +1865,20 @@ set_relation_partition_info(PlannerInfo *root, RelOptInfo *rel,
 							Relation relation)
 {
 	PartitionDesc partdesc;
-	PartitionKey partkey;
 
 	Assert(relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
 
 	partdesc = RelationGetPartitionDesc(relation);
-	partkey = RelationGetPartitionKey(relation);
 	rel->part_scheme = find_partition_scheme(root, relation);
 	Assert(partdesc != NULL && rel->part_scheme != NULL);
-	rel->boundinfo = partition_bounds_copy(partdesc->boundinfo, partkey);
 	rel->nparts = partdesc->nparts;
+
+	/*
+	 * Since we must've taken a lock on the table, it's okay to simply copy
+	 * the pointers to relcache data here.
+	 */
+	rel->part_oids = partdesc->oids;
+	rel->boundinfo = partdesc->boundinfo;
 	set_baserel_partition_key_exprs(relation, rel);
 	rel->partition_qual = RelationGetPartitionQual(relation);
 }

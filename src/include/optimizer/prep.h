@@ -38,7 +38,8 @@ extern Expr *canonicalize_qual(Expr *qual, bool is_check);
 /*
  * prototypes for preptlist.c
  */
-extern List *preprocess_targetlist(PlannerInfo *root);
+extern List *preprocess_targetlist(PlannerInfo *root,
+							bool inheritance_expanded);
 
 extern PlanRowMark *get_plan_rowmark(List *rowmarks, Index rtindex);
 

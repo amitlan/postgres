@@ -31,10 +31,10 @@ typedef struct
 	AppendRelInfo **appinfos;
 } adjust_appendrel_attrs_context;
 
-static void make_inh_translation_list(Relation oldrelation,
-						  Relation newrelation,
-						  Index newvarno,
-						  List **translated_vars);
+static void make_inh_translation_list(TupleDesc old_tupdesc,
+						  TupleDesc new_tupdesc,
+						  Oid from_rel, Oid to_rel,
+						  Index newvarno, List **translated_vars);
 static Node *adjust_appendrel_attrs_mutator(Node *node,
 							   adjust_appendrel_attrs_context *context);
 static List *adjust_inherited_tlist(List *tlist,
@@ -46,18 +46,20 @@ static List *adjust_inherited_tlist(List *tlist,
  *	  Build an AppendRelInfo for the parent-child pair
  */
 AppendRelInfo *
-make_append_rel_info(Relation parentrel, Relation childrel,
-					 Index parentRTindex, Index childRTindex)
+make_append_rel_info(RelOptInfo *parent, RangeTblEntry *parentrte,
+					 TupleDesc childdesc, Oid childoid, Oid childtype,
+					 Index childRTindex)
 {
 	AppendRelInfo *appinfo = makeNode(AppendRelInfo);
 
-	appinfo->parent_relid = parentRTindex;
+	appinfo->parent_relid = parent->relid;
 	appinfo->child_relid = childRTindex;
-	appinfo->parent_reltype = parentrel->rd_rel->reltype;
-	appinfo->child_reltype = childrel->rd_rel->reltype;
-	make_inh_translation_list(parentrel, childrel, childRTindex,
-							  &appinfo->translated_vars);
-	appinfo->parent_reloid = RelationGetRelid(parentrel);
+	appinfo->parent_reltype = parent->reltype;
+	appinfo->child_reltype = childtype;
+	make_inh_translation_list(parent->tupdesc, childdesc,
+							  parentrte->relid, childoid,
+							  childRTindex, &appinfo->translated_vars);
+	appinfo->parent_reloid = parentrte->relid;
 
 	return appinfo;
 }
@@ -70,14 +72,11 @@ make_append_rel_info(Relation parentrel, Relation childrel,
  * For paranoia's sake, we match type/collation as well as attribute name.
  */
 static void
-make_inh_translation_list(Relation oldrelation, Relation newrelation,
-						  Index newvarno,
-						  List **translated_vars)
+make_inh_translation_list(TupleDesc old_tupdesc, TupleDesc new_tupdesc,
+						  Oid from_rel, Oid to_rel,
+						  Index newvarno, List **translated_vars)
 {
 	List	   *vars = NIL;
-	TupleDesc	old_tupdesc = RelationGetDescr(oldrelation);
-	TupleDesc	new_tupdesc = RelationGetDescr(newrelation);
-	Oid			new_relid = RelationGetRelid(newrelation);
 	int			oldnatts = old_tupdesc->natts;
 	int			newnatts = new_tupdesc->natts;
 	int			old_attno;
@@ -107,7 +106,7 @@ make_inh_translation_list(Relation oldrelation, Relation newrelation,
 		 * When we are generating the "translation list" for the parent table
 		 * of an inheritance set, no need to search for matches.
 		 */
-		if (oldrelation == newrelation)
+		if (from_rel == to_rel)
 		{
 			vars = lappend(vars, makeVar(newvarno,
 										 (AttrNumber) (old_attno + 1),
@@ -133,10 +132,10 @@ make_inh_translation_list(Relation oldrelation, Relation newrelation,
 		{
 			HeapTuple	newtup;
 
-			newtup = SearchSysCacheAttName(new_relid, attname);
+			newtup = SearchSysCacheAttName(to_rel, attname);
 			if (!newtup)
 				elog(ERROR, "could not find inherited attribute \"%s\" of relation \"%s\"",
-					 attname, RelationGetRelationName(newrelation));
+					 attname, get_rel_name(to_rel));
 			new_attno = ((Form_pg_attribute) GETSTRUCT(newtup))->attnum - 1;
 			ReleaseSysCache(newtup);
 
@@ -146,10 +145,10 @@ make_inh_translation_list(Relation oldrelation, Relation newrelation,
 		/* Found it, check type and collation match */
 		if (atttypid != att->atttypid || atttypmod != att->atttypmod)
 			elog(ERROR, "attribute \"%s\" of relation \"%s\" does not match parent's type",
-				 attname, RelationGetRelationName(newrelation));
+				 attname, get_rel_name(to_rel));
 		if (attcollation != att->attcollation)
 			elog(ERROR, "attribute \"%s\" of relation \"%s\" does not match parent's collation",
-				 attname, RelationGetRelationName(newrelation));
+				 attname, get_rel_name(to_rel));
 
 		vars = lappend(vars, makeVar(newvarno,
 									 (AttrNumber) (new_attno + 1),

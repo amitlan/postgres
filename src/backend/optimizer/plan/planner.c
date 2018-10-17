@@ -23,6 +23,7 @@
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/pg_constraint.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "executor/executor.h"
@@ -701,25 +702,16 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		}
 		if (rte->lateral)
 			root->hasLateralRTEs = true;
+
+		/*
+		 * While at it, also update the inh status.  If the relation doesn't
+		 * or can't have any children, there is no point in letting inh be set
+		 * to true.  Note that we do this before processing rowmarks, so that
+		 * the correct information for setting isParent field of PlanRowMarks.
+		 */
+		if (rte->rtekind == RTE_RELATION)
+			rte->inh = rte->inh && has_subclass(rte->relid);
 	}
-
-	/*
-	 * Preprocess RowMark information.  We need to do this after subquery
-	 * pullup (so that all non-inherited RTEs are present) and before
-	 * inheritance expansion (so that the info is available for
-	 * expand_inherited_tables to examine and modify).
-	 */
-	preprocess_rowmarks(root);
-
-	/*
-	 * Expand any rangetable entries that are inheritance sets into "append
-	 * relations".  This can add entries to the rangetable, but they must be
-	 * plain base relations not joins, so it's OK (and marginally more
-	 * efficient) to do it after checking for join RTEs.  We must do it after
-	 * pulling up subqueries, else we'd fail to handle inherited tables in
-	 * subqueries.
-	 */
-	expand_inherited_tables(root);
 
 	/*
 	 * Now that we have figured out "actual" inheritance situation of the
@@ -727,6 +719,12 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	 */
 	root->inherited_update = (parse->resultRelation &&
 					  rt_fetch(parse->resultRelation, parse->rtable)->inh);
+
+	/*
+	 * Preprocess RowMark information.  We need to do this after subquery
+	 * pullup (so that all non-inherited RTEs are present).
+	 */
+	preprocess_rowmarks(root);
 
 	/*
 	 * Set hasHavingQual to remember if HAVING clause is present.  Needed
@@ -1220,8 +1218,11 @@ inheritance_planner(PlannerInfo *root)
 	 */
 	root->unexpanded_tlist = list_copy(root->parse->targetList);
 
-	/* Do the scan/join planning. */
-	tlist = preprocess_targetlist(root);
+	/*
+	 * Do the scan/join planning.  We haven't expanded inheritance yet, so
+	 * pass false.
+	 */
+	tlist = preprocess_targetlist(root, false);
 	root->processed_tlist = tlist;
 	qp_extra.tlist = tlist;
 	qp_extra.activeWindows = qp_extra.groupClause = NIL;
@@ -1230,9 +1231,11 @@ inheritance_planner(PlannerInfo *root)
 	/*
 	 * If it turned out during query planning that all the children are dummy
 	 * (pruned or excluded by constraints), no need to do the steps below.
-	 * Let grouping_planner finish up the final path.
+	 * For regular inheritance case, it's possible that we only need to modify
+	 * the parent table.  Let grouping_planner finish up the final path.
 	 */
-	if (IS_DUMMY_REL(planned_rel))
+	parent_rte = planner_rt_fetch(top_parentRTindex, root);
+	if (!parent_rte->inh || IS_DUMMY_REL(planned_rel))
 	{
 		grouping_planner(root, false, planned_rel, 0.0);
 		return;
@@ -1248,7 +1251,6 @@ inheritance_planner(PlannerInfo *root)
 	 * not appear anywhere else in the plan, so the confusion explained below
 	 * for non-partitioning inheritance cases is not possible.
 	 */
-	parent_rte = planner_rt_fetch(top_parentRTindex, root);
 	if (parent_rte->relkind == RELKIND_PARTITIONED_TABLE)
 	{
 		nominalRelation = top_parentRTindex;
@@ -1580,14 +1582,19 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 		 */
 		if (planned_rel == NULL)
 		{
-			tlist = preprocess_targetlist(root);
+			/* We haven't expanded inheritance yet, so pass false. */
+			tlist = preprocess_targetlist(root, false);
 
 			/*
-			 * We are now done hacking up the query's targetlist.  Most of the
-			 * remaining planning work will be done with the PathTarget
-			 * representation of tlists, but save aside the full representation
-			 * so that we can transfer its decoration (resnames etc) to the
-			 * topmost tlist of the finished Plan.
+			 * We are now mostly done hacking up the query's targetlist.  More
+			 * columns might be added during query_planner after inheritance
+			 * expansion in make_one_rel, because some children may require
+			 * different column than the parent for row mark handling; see
+			 * add_rowmark_junk_columns().  Most of the remaining planning
+			 * work will be done with the PathTarget representation of tlists,
+			 * but save aside the full representation so that we can transfer
+			 * its decoration (resnames etc) to the topmost tlist of the
+			 * finished Plan.
 			 */
 			root->processed_tlist = tlist;
 		}
@@ -2363,7 +2370,7 @@ preprocess_rowmarks(PlannerInfo *root)
 		newrc->allMarkTypes = (1 << newrc->markType);
 		newrc->strength = rc->strength;
 		newrc->waitPolicy = rc->waitPolicy;
-		newrc->isParent = false;
+		newrc->isParent = rte->inh;
 
 		prowmarks = lappend(prowmarks, newrc);
 	}
@@ -2388,7 +2395,7 @@ preprocess_rowmarks(PlannerInfo *root)
 		newrc->allMarkTypes = (1 << newrc->markType);
 		newrc->strength = LCS_NONE;
 		newrc->waitPolicy = LockWaitBlock;	/* doesn't matter */
-		newrc->isParent = false;
+		newrc->isParent = rte->rtekind == RTE_RELATION ? rte->inh : false;
 
 		prowmarks = lappend(prowmarks, newrc);
 	}
@@ -6825,6 +6832,10 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 			int			nappinfos;
 			List	   *child_scanjoin_targets = NIL;
 
+			/* Skip processing pruned partitions. */
+			if (child_rel == NULL)
+				continue;
+
 			/* Translate scan/join targets for this child. */
 			appinfos = find_appinfos_by_relids(root, child_rel->relids,
 											   &nappinfos);
@@ -6925,6 +6936,10 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 		GroupPathExtraData child_extra;
 		RelOptInfo *child_grouped_rel;
 		RelOptInfo *child_partially_grouped_rel;
+
+		/* Skip processing pruned partitions. */
+		if (child_input_rel == NULL)
+			continue;
 
 		/* Input child rel must have a path */
 		Assert(child_input_rel->pathlist != NIL);

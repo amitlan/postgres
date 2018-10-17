@@ -15,6 +15,7 @@
 #define RELATION_H
 
 #include "access/sdir.h"
+#include "access/tupdesc.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "nodes/params.h"
@@ -729,6 +730,7 @@ typedef struct RelOptInfo
 	int			nparts;			/* number of partitions */
 	struct PartitionBoundInfoData *boundinfo;	/* Partition bounds */
 	List	   *partition_qual; /* partition constraint */
+	Oid		   *part_oids;		/* partition OIDs */
 	struct RelOptInfo **part_rels;	/* Array of RelOptInfos of partitions,
 									 * stored in the same order of bounds */
 	List	  **partexprs;		/* Non-nullable partition key expressions. */
@@ -743,6 +745,13 @@ typedef struct RelOptInfo
 	 * RT index of UNION ALL parent subquery.
 	 */
 	Index		inh_root_parent;
+
+	/*
+	 * Set only if this is an inheritance parent relation.  This information
+	 * is needed when initializing the planning info for children.
+	 */
+	TupleDesc	tupdesc;		/* A "copy" of the table's tuple desriptor */
+	Oid			reltype;		/* Table's reltype */
 } RelOptInfo;
 
 /*

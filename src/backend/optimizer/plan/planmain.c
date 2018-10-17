@@ -258,6 +258,16 @@ query_planner(PlannerInfo *root, List *tlist,
 	}
 
 	/*
+	 * Expand RT entries that represent inherited or partitioned tables.
+	 * This will perform partition pruning on partitioned tables in the
+	 * original range table and also recursively on any child partitioned
+	 * tables that were added by the expansion of the original parent(s).
+	 * As new entries are added to the range table, various arrays in the
+	 * PlannerInfo will be expanded accordingly.
+	 */
+	expand_inherited_tables(root);
+
+	/*
 	 * Add child subroots needed to use during planning for individual child
 	 * targets
 	 */
@@ -370,7 +380,7 @@ adjust_inherited_target_child_root(PlannerInfo *root, AppendRelInfo *appinfo)
 	 * column, filling placeholder entries for dropped columns, etc., all of
 	 * which occurs with the child's TupleDesc.
 	 */
-	tlist = preprocess_targetlist(subroot);
+	tlist = preprocess_targetlist(subroot, true);
 	subroot->processed_tlist = tlist;
 
 	/* Add any newly added Vars to the child RelOptInfo. */
