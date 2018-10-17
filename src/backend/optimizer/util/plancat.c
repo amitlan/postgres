@@ -1264,36 +1264,6 @@ get_relation_constraints(PlannerInfo *root,
 		}
 	}
 
-	/*
-	 * Append partition predicates, if any.
-	 *
-	 * For selects, partition pruning uses the parent table's partition bound
-	 * descriptor, instead of constraint exclusion which is driven by the
-	 * individual partition's partition constraint.
-	 */
-	if (enable_partition_pruning && root->parse->commandType != CMD_SELECT)
-	{
-		List	   *pcqual = RelationGetPartitionQual(relation);
-
-		if (pcqual)
-		{
-			/*
-			 * Run the partition quals through const-simplification similar to
-			 * check constraints.  We skip canonicalize_qual, though, because
-			 * partition quals should be in canonical form already; also,
-			 * since the qual is in implicit-AND format, we'd have to
-			 * explicitly convert it to explicit-AND format and back again.
-			 */
-			pcqual = (List *) eval_const_expressions(root, (Node *) pcqual);
-
-			/* Fix Vars to have the desired varno */
-			if (varno != 1)
-				ChangeVarNodes((Node *) pcqual, 1, varno, 0);
-
-			result = list_concat(result, pcqual);
-		}
-	}
-
 	heap_close(relation, NoLock);
 
 	return result;
@@ -1417,40 +1387,15 @@ relation_excluded_by_constraints(PlannerInfo *root,
 	/*
 	 * Skip further tests, depending on constraint_exclusion.
 	 */
-	switch (constraint_exclusion)
-	{
-		case CONSTRAINT_EXCLUSION_OFF:
-
-			/*
-			 * Don't prune if feature turned off -- except if the relation is
-			 * a partition.  While partprune.c-style partition pruning is not
-			 * yet in use for all cases (update/delete is not handled), it
-			 * would be a UI horror to use different user-visible controls
-			 * depending on such a volatile implementation detail.  Therefore,
-			 * for partitioned tables we use enable_partition_pruning to
-			 * control this behavior.
-			 */
-			if (root->inhTargetKind == INHKIND_PARTITIONED)
-				break;
-			return false;
-
-		case CONSTRAINT_EXCLUSION_PARTITION:
-
-			/*
-			 * When constraint_exclusion is set to 'partition' we only handle
-			 * OTHER_MEMBER_RELs, or BASERELs in cases where the result target
-			 * is an inheritance parent or a partitioned table.
-			 */
-			if ((rel->reloptkind != RELOPT_OTHER_MEMBER_REL) &&
-				!(rel->reloptkind == RELOPT_BASEREL &&
-				  root->inhTargetKind != INHKIND_NONE &&
-				  rel->relid == root->parse->resultRelation))
-				return false;
-			break;
-
-		case CONSTRAINT_EXCLUSION_ON:
-			break;				/* always try to exclude */
-	}
+	if (constraint_exclusion == CONSTRAINT_EXCLUSION_OFF)
+		return false;
+	/*
+	 * When constraint_exclusion is set to 'partition' we only handle
+	 * OTHER_MEMBER_RELs.
+	 */
+	else if (constraint_exclusion == CONSTRAINT_EXCLUSION_PARTITION &&
+			 rel->reloptkind != RELOPT_OTHER_MEMBER_REL)
+		return false;
 
 	/*
 	 * Check for self-contradictory restriction clauses.  We dare not make

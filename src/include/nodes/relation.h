@@ -319,9 +319,6 @@ typedef struct PlannerInfo
 	Index		qual_security_level;	/* minimum security_level for quals */
 	/* Note: qual_security_level is zero if there are no securityQuals */
 
-	InheritanceKind inhTargetKind;	/* indicates if the target relation is an
-									 * inheritance child or partition or a
-									 * partitioned table */
 	bool		hasJoinRTEs;	/* true if any RTEs are RTE_JOIN kind */
 	bool		hasLateralRTEs; /* true if any RTEs are marked LATERAL */
 	bool		hasDeletedRTEs; /* true if any RTE was deleted from jointree */
@@ -343,6 +340,40 @@ typedef struct PlannerInfo
 
 	/* Does this query modify any partition key columns? */
 	bool		partColsUpdated;
+
+	/*
+	 * The following fields are set during query planning portion of an
+	 * inherited UPDATE/DEELETE operation.
+	 */
+	bool		inherited_update;	/* UPDATE/DELETE on inheritance parent? */
+
+	/*
+	 * This stores the original version of the query's targetlist that's
+	 * not modified by the planner.
+	 */
+	List	   *unexpanded_tlist;
+
+	/*
+	 * Array containing simple_rel_array_size elements, indexed by rangetable
+	 * index (entry 0 is wasted like simple_rel_array).  Only elements
+	 * corresponding to individual inheritance child target relations are
+	 * non-NULL.  Content of each PlannerInfo is same as the parent
+	 * PlannerInfo, except for the parse tree which is a translated copy of
+	 * the parent's parse tree.
+	 */
+	struct PlannerInfo **inh_target_child_roots;
+
+	/* List of RT indexes of child RT indexes. */
+	List	   *inh_target_child_rels;
+
+	/*
+	 * RelOptInfos corresponding to each child target rel.  For leaf children,
+	 * it's the RelOptInfo representing the output of make_rel_from_joinlist()
+	 * called with the parent rel in the original join tree replaced by a
+	 * given leaf child.  For non-leaf children, it's the baserel RelOptInfo
+	 * itself, left as a placeholder.
+	 */
+	List	   *inh_target_child_joinrels;
 } PlannerInfo;
 
 

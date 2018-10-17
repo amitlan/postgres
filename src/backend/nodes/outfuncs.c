@@ -2210,7 +2210,6 @@ _outPlannerInfo(StringInfo str, const PlannerInfo *node)
 	WRITE_FLOAT_FIELD(tuple_fraction, "%.4f");
 	WRITE_FLOAT_FIELD(limit_tuples, "%.0f");
 	WRITE_UINT_FIELD(qual_security_level);
-	WRITE_ENUM_FIELD(inhTargetKind, InheritanceKind);
 	WRITE_BOOL_FIELD(hasJoinRTEs);
 	WRITE_BOOL_FIELD(hasLateralRTEs);
 	WRITE_BOOL_FIELD(hasDeletedRTEs);
@@ -2221,6 +2220,7 @@ _outPlannerInfo(StringInfo str, const PlannerInfo *node)
 	WRITE_BITMAPSET_FIELD(curOuterRels);
 	WRITE_NODE_FIELD(curOuterParams);
 	WRITE_BOOL_FIELD(partColsUpdated);
+	WRITE_BOOL_FIELD(inherited_update);
 }
 
 static void

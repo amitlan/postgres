@@ -28,7 +28,11 @@
 #include "optimizer/paths.h"
 #include "optimizer/placeholder.h"
 #include "optimizer/planmain.h"
+#include "optimizer/prep.h"
 
+static void add_inherited_target_child_roots(PlannerInfo *root);
+static PlannerInfo *adjust_inherited_target_child_root(PlannerInfo *root,
+									AppendRelInfo *appinfo);
 
 /*
  * query_planner
@@ -59,6 +63,7 @@ query_planner(PlannerInfo *root, List *tlist,
 	Query	   *parse = root->parse;
 	List	   *joinlist;
 	RelOptInfo *final_rel;
+	Index		rti;
 
 	/*
 	 * If the query has an empty join tree, then it's something easy like
@@ -232,14 +237,170 @@ query_planner(PlannerInfo *root, List *tlist,
 	extract_restriction_or_clauses(root);
 
 	/*
+	 * Construct the all_baserels Relids set.
+	 */
+	root->all_baserels = NULL;
+	for (rti = 1; rti < root->simple_rel_array_size; rti++)
+	{
+		RelOptInfo *brel = root->simple_rel_array[rti];
+
+		/* there may be empty slots corresponding to non-baserel RTEs */
+		if (brel == NULL)
+			continue;
+
+		Assert(brel->relid == rti); /* sanity check on array */
+
+		/* ignore RTEs that are "other rels" */
+		if (brel->reloptkind != RELOPT_BASEREL)
+			continue;
+
+		root->all_baserels = bms_add_member(root->all_baserels, brel->relid);
+	}
+
+	/*
+	 * Add child subroots needed to use during planning for individual child
+	 * targets
+	 */
+	if (root->inherited_update)
+	{
+		root->inh_target_child_roots = (PlannerInfo **)
+										palloc0(root->simple_rel_array_size *
+												sizeof(PlannerInfo *));
+		add_inherited_target_child_roots(root);
+	}
+
+	/*
 	 * Ready to do the primary planning.
 	 */
 	final_rel = make_one_rel(root, joinlist);
 
-	/* Check that we got at least one usable path */
-	if (!final_rel || !final_rel->cheapest_total_path ||
-		final_rel->cheapest_total_path->param_info != NULL)
+	/*
+	 * Check that we got at least one usable path.  In the case of an
+	 * inherited update/delete operation, no path has been created for
+	 * the query's actual target relation yet.
+	 */
+	if (!root->inherited_update &&
+		(!final_rel ||
+		 !final_rel->cheapest_total_path ||
+		 final_rel->cheapest_total_path->param_info != NULL))
 		elog(ERROR, "failed to construct the join relation");
 
 	return final_rel;
+}
+
+/*
+ * add_inherited_target_child_roots
+ *		Add PlannerInfos for inheritance target children
+ */
+static void
+add_inherited_target_child_roots(PlannerInfo *root)
+{
+	Index		resultRelation = root->parse->resultRelation;
+	ListCell   *lc;
+
+	Assert(root->inh_target_child_roots != NULL);
+
+	foreach(lc, root->append_rel_list)
+	{
+		AppendRelInfo *appinfo = lfirst(lc);
+		RangeTblEntry *childRTE;
+		PlannerInfo   *subroot;
+
+		if (appinfo->parent_relid != resultRelation)
+			continue;
+
+		childRTE = root->simple_rte_array[appinfo->child_relid];
+
+		/*
+		 * Create a PlannerInfo for processing this child target relation
+		 * with.
+		 */
+		subroot = adjust_inherited_target_child_root(root, appinfo);
+
+		if (childRTE->inh)
+			add_inherited_target_child_roots(subroot);
+
+		root->inh_target_child_roots[appinfo->child_relid] = subroot;
+	}
+}
+
+/*
+ * add_inherit_target_child_root
+ *		This translates query to match the child given by appinfo and
+ *		puts it in a PlannerInfo that will be used for planning the child
+ *
+ * The child PlannerInfo reuses most of the parent PlannerInfo's fields
+ * unchanged, except unexpanded_tlist and processed_tlist are based on the
+ * child relation.
+ */
+static PlannerInfo *
+adjust_inherited_target_child_root(PlannerInfo *root, AppendRelInfo *appinfo)
+{
+	PlannerInfo *subroot;
+	List	   *tlist;
+	ListCell   *lc;
+
+	Assert(root->parse->commandType == CMD_UPDATE ||
+		   root->parse->commandType == CMD_DELETE);
+
+	/* Translate the original query's expressions to this child. */
+	subroot = makeNode(PlannerInfo);
+	memcpy(subroot, root, sizeof(PlannerInfo));
+
+	/*
+	 * Restore the unexpanded tlist for translation, so that child's
+	 * query contains targetList numbered (resnos) per its own
+	 * TupleDesc, which adjust_inherited_tlist ensures.
+	 */
+	root->parse->targetList = root->unexpanded_tlist;
+	subroot->parse = (Query *) adjust_appendrel_attrs(root,
+													  (Node *) root->parse,
+													  1, &appinfo);
+
+	/*
+	 * Save the original unexpanded targetlist in child subroot, just as
+	 * we did for the parent root, so that this child's own children can use
+	 * it.  Must use copy because subroot->parse->targetList will be modified
+	 * soon.
+	 */
+	subroot->unexpanded_tlist = list_copy(subroot->parse->targetList);
+
+	/*
+	 * Apply planner's expansion of targetlist, such as adding various junk
+	 * column, filling placeholder entries for dropped columns, etc., all of
+	 * which occurs with the child's TupleDesc.
+	 */
+	tlist = preprocess_targetlist(subroot);
+	subroot->processed_tlist = tlist;
+
+	/* Add any newly added Vars to the child RelOptInfo. */
+	build_base_rel_tlists(subroot, tlist);
+
+	/*
+	 * Adjust all_baserels to replace the original target relation with the
+	 * child target relation.  Copy it before modifying though.
+	 */
+	subroot->all_baserels = bms_copy(root->all_baserels);
+	subroot->all_baserels = bms_del_member(subroot->all_baserels,
+										   root->parse->resultRelation);
+	subroot->all_baserels = bms_add_member(subroot->all_baserels,
+										   subroot->parse->resultRelation);
+
+	/*
+	 * Child root should get its own copy of ECs, because they'll be modified
+	 * to replace parent EC expressions by child expressions in
+	 * add_child_rel_equivalences.
+	 */
+	subroot->eq_classes = NIL;
+	foreach(lc, root->eq_classes)
+	{
+		EquivalenceClass *ec = lfirst(lc);
+		EquivalenceClass *new_ec = makeNode(EquivalenceClass);
+
+		memcpy(new_ec, ec, sizeof(EquivalenceClass));
+		new_ec->ec_members = list_copy(ec->ec_members);
+		subroot->eq_classes = lappend(subroot->eq_classes, new_ec);
+	}
+
+	return subroot;
 }

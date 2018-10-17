@@ -2104,12 +2104,16 @@ match_eclasses_to_foreign_key_col(PlannerInfo *root,
  *
  * parent_rel and child_rel could be derived from appinfo, but since the
  * caller has already computed them, we might as well just pass them in.
+ *
+ * If 'replace' is true then the child EC members *replace* the corresponding
+ * parent members.
  */
 void
 add_child_rel_equivalences(PlannerInfo *root,
 						   AppendRelInfo *appinfo,
 						   RelOptInfo *parent_rel,
-						   RelOptInfo *child_rel)
+						   RelOptInfo *child_rel,
+						   bool replace)
 {
 	ListCell   *lc1;
 
@@ -2117,14 +2121,23 @@ add_child_rel_equivalences(PlannerInfo *root,
 	{
 		EquivalenceClass *cur_ec = (EquivalenceClass *) lfirst(lc1);
 		ListCell   *lc2;
+		ListCell   *prev;
+		ListCell   *next;
 
 		/*
 		 * If this EC contains a volatile expression, then generating child
 		 * EMs would be downright dangerous, so skip it.  We rely on a
-		 * volatile EC having only one EM.
+		 * volatile EC having only one EM.  If the caller asked to *replace*
+		 * the original parent expression with the child one, then it's
+		 * okay to proceed, because we wouldn't be adding another expression
+		 * as being equivalent in that case.
 		 */
 		if (cur_ec->ec_has_volatile)
-			continue;
+		{
+			Assert(list_length(cur_ec->ec_members) == 1);
+			if (!replace)
+				continue;
+		}
 
 		/*
 		 * No point in searching if parent rel not mentioned in eclass; but we
@@ -2134,12 +2147,18 @@ add_child_rel_equivalences(PlannerInfo *root,
 			!bms_is_subset(parent_rel->relids, cur_ec->ec_relids))
 			continue;
 
-		foreach(lc2, cur_ec->ec_members)
+		prev = NULL;
+		for (lc2 = list_head(cur_ec->ec_members); lc2 != NULL; lc2 = next)
 		{
 			EquivalenceMember *cur_em = (EquivalenceMember *) lfirst(lc2);
 
+			next = lnext(lc2);
+
 			if (cur_em->em_is_const)
+			{
+				prev = lc2;
 				continue;		/* ignore consts here */
+			}
 
 			/* Does it reference parent_rel? */
 			if (bms_overlap(cur_em->em_relids, parent_rel->relids))
@@ -2177,10 +2196,38 @@ add_child_rel_equivalences(PlannerInfo *root,
 														  child_rel->relids);
 				}
 
+				/*
+				 * Caller may have asked us to replace the parent expression
+				 * with the child expression, so delete the parent expression
+				 * first.
+				 */
+				if (replace)
+					cur_ec->ec_members = list_delete_cell(cur_ec->ec_members,
+														  lc2, prev);
+
+				/*
+				 * If we're replacing, then the new member isn't really a
+				 * a child, so em_is_child should be set to false.
+				 */
 				(void) add_eq_member(cur_ec, child_expr,
 									 new_relids, new_nullable_relids,
-									 true, cur_em->em_datatype);
+									 !replace, cur_em->em_datatype);
 			}
+			else
+				prev = lc2;
+		}
+
+		if (replace)
+		{
+			/*
+			 * Now fix up EC's relids set.  It's OK to modify EC like this,
+			 * because caller must have made a copy of the original EC.
+			 * For example, see adjust_inherited_target_child_root.
+			 */
+			cur_ec->ec_relids = bms_difference(cur_ec->ec_relids,
+											   parent_rel->relids);
+			cur_ec->ec_relids = bms_add_members(cur_ec->ec_relids,
+												child_rel->relids);
 		}
 	}
 }

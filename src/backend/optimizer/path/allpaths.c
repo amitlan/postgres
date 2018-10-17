@@ -38,6 +38,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
+#include "optimizer/planmain.h"
 #include "optimizer/planner.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
@@ -92,8 +93,12 @@ static void set_foreign_size(PlannerInfo *root, RelOptInfo *rel,
 				 RangeTblEntry *rte);
 static void set_foreign_pathlist(PlannerInfo *root, RelOptInfo *rel,
 					 RangeTblEntry *rte);
+static void set_inherit_target_rel_sizes(PlannerInfo *root, RelOptInfo *rel,
+							 Index rti, RangeTblEntry *rte);
 static void set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 					Index rti, RangeTblEntry *rte);
+static void set_inherit_target_rel_pathlists(PlannerInfo *root,
+							 RelOptInfo *rel, Index rti, RangeTblEntry *rte);
 static void set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 						Index rti, RangeTblEntry *rte);
 static void generate_mergeappend_paths(PlannerInfo *root, RelOptInfo *rel,
@@ -120,6 +125,8 @@ static void set_namedtuplestore_pathlist(PlannerInfo *root, RelOptInfo *rel,
 static void set_worktable_pathlist(PlannerInfo *root, RelOptInfo *rel,
 					   RangeTblEntry *rte);
 static RelOptInfo *make_rel_from_joinlist(PlannerInfo *root, List *joinlist);
+static void inheritance_make_rel_from_joinlist(PlannerInfo *root,
+						List *joinlist);
 static bool subquery_is_pushdown_safe(Query *subquery, Query *topquery,
 						  pushdown_safety_info *safetyInfo);
 static bool recurse_pushdown_safe(Node *setOp, Query *topquery,
@@ -149,27 +156,6 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 	RelOptInfo *rel;
 	Index		rti;
 	double		total_pages;
-
-	/*
-	 * Construct the all_baserels Relids set.
-	 */
-	root->all_baserels = NULL;
-	for (rti = 1; rti < root->simple_rel_array_size; rti++)
-	{
-		RelOptInfo *brel = root->simple_rel_array[rti];
-
-		/* there may be empty slots corresponding to non-baserel RTEs */
-		if (brel == NULL)
-			continue;
-
-		Assert(brel->relid == rti); /* sanity check on array */
-
-		/* ignore RTEs that are "other rels" */
-		if (brel->reloptkind != RELOPT_BASEREL)
-			continue;
-
-		root->all_baserels = bms_add_member(root->all_baserels, brel->relid);
-	}
 
 	/* Mark base rels as to whether we care about fast-start plans */
 	set_base_rel_consider_startup(root);
@@ -218,13 +204,34 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 
 	/*
 	 * Generate access paths for the entire join tree.
+	 *
+	 * For UPDATE/DELETE on an inheritance parent, join paths should be
+	 * generated for each child result rel separately.
 	 */
-	rel = make_rel_from_joinlist(root, joinlist);
+	if (root->parse->resultRelation &&
+		root->simple_rte_array[root->parse->resultRelation]->inh)
+	{
+		inheritance_make_rel_from_joinlist(root, joinlist);
 
-	/*
-	 * The result should join all and only the query's base rels.
-	 */
-	Assert(bms_equal(rel->relids, root->all_baserels));
+		/*
+		 * Return the RelOptInfo of original target relation, although this
+		 * doesn't really contain the final path.  inheritance_planner
+		 * from where we got here will generate the final path, but it will
+		 * do so by iterative over child subroots, not through this
+		 * RelOptInfo.
+		 */
+		rel = find_base_rel(root, root->parse->resultRelation);
+	}
+	else
+	{
+		rel = make_rel_from_joinlist(root, joinlist);
+
+		/*
+		 * The result should join all and only the query's base rels.
+		 */
+		Assert(bms_equal(rel->relids, root->all_baserels));
+
+	}
 
 	return rel;
 }
@@ -308,9 +315,10 @@ set_base_rel_sizes(PlannerInfo *root)
 		 * If parallelism is allowable for this query in general, see whether
 		 * it's allowable for this rel in particular.  We have to do this
 		 * before set_rel_size(), because (a) if this rel is an inheritance
-		 * parent, set_append_rel_size() will use and perhaps change the rel's
-		 * consider_parallel flag, and (b) for some RTE types, set_rel_size()
-		 * goes ahead and makes paths immediately.
+		 * parent, set_append_rel_size() or set_inherit_target_rel_sizes()
+		 * will use and perhaps change the rel's consider_parallel flag, and
+		 * (b) for some RTE types, set_rel_size() goes ahead and makes paths
+		 * immediately.
 		 */
 		if (root->glob->parallelModeOK)
 			set_rel_consider_parallel(root, rel, rte);
@@ -374,8 +382,15 @@ set_rel_size(PlannerInfo *root, RelOptInfo *rel,
 	}
 	else if (rte->inh)
 	{
-		/* It's an "append relation", process accordingly */
-		set_append_rel_size(root, rel, rti, rte);
+		/*
+		 * If it's a target relation, set the sizes of children instead.
+		 * Otherwise, we'll append the outputs of children, so process it as
+		 * an "append relation".
+		 */
+		if (rti == root->parse->resultRelation)
+			set_inherit_target_rel_sizes(root, rel, rti, rte);
+		else
+			set_append_rel_size(root, rel, rti, rte);
 	}
 	else
 	{
@@ -459,14 +474,26 @@ static void
 set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 				 Index rti, RangeTblEntry *rte)
 {
+	bool	inherited_update = false;
+
 	if (IS_DUMMY_REL(rel))
 	{
 		/* We already proved the relation empty, so nothing more to do */
 	}
 	else if (rte->inh)
 	{
-		/* It's an "append relation", process accordingly */
-		set_append_rel_pathlist(root, rel, rti, rte);
+		/*
+		 * If it's a target relation, set the pathlists of children instead.
+		 * Otherwise, we'll append the outputs of children, so process it as
+		 * an "append relation".
+		 */
+		if (root->inherited_update && root->parse->resultRelation == rti)
+		{
+			inherited_update = true;
+			set_inherit_target_rel_pathlists(root, rel, rti, rte);
+		}
+		else
+			set_append_rel_pathlist(root, rel, rti, rte);
 	}
 	else
 	{
@@ -541,8 +568,12 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	if (set_rel_pathlist_hook)
 		(*set_rel_pathlist_hook) (root, rel, rti, rte);
 
-	/* Now find the cheapest of the paths for this rel */
-	set_cheapest(rel);
+	/*
+	 * Now find the cheapest of the paths for this rel, unless it's an
+	 * inheritance parent and this is an update/delete operation.
+	 */
+	if (!inherited_update)
+		set_cheapest(rel);
 
 #ifdef OPTIMIZER_DEBUG
 	debug_print_rel(root, rel);
@@ -904,6 +935,347 @@ set_foreign_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 }
 
 /*
+ * set_inherit_target_rel_sizes
+ *	  Set size estimates for the child target relations
+ *
+ * The passed-in rel represents the target relation of the query that is
+ * known to have inheritance children.  This is very much like
+ * set_append_rel_size, except it doesn't set the size estimates for the
+ * passed-in rel itself, because we don't need to "append" the children
+ * in this case.
+ */
+static void
+set_inherit_target_rel_sizes(PlannerInfo *root, RelOptInfo *rel,
+							 Index rti, RangeTblEntry *rte)
+{
+	int			parentRTindex = rti;
+	bool		has_live_children;
+	ListCell   *l;
+	Relids		live_children = NULL;
+	bool		did_pruning = false;
+
+	/* Guard against stack overflow due to overly deep inheritance tree. */
+	check_stack_depth();
+
+	Assert(IS_SIMPLE_REL(rel));
+
+	/*
+	 * If the partitioned relation has any baserestrictinfo quals then we
+	 * attempt to use these quals to prune away partitions that cannot
+	 * possibly contain any tuples matching these quals.  In this case we'll
+	 * store the relids of all partitions which could possibly contain a
+	 * matching tuple, and skip anything else in the loop below.
+	 */
+	if (enable_partition_pruning &&
+		rte->relkind == RELKIND_PARTITIONED_TABLE &&
+		rel->baserestrictinfo != NIL)
+	{
+		live_children = prune_append_rel_partitions(rel);
+		did_pruning = true;
+	}
+
+	foreach(l, root->append_rel_list)
+	{
+		AppendRelInfo *appinfo = (AppendRelInfo *) lfirst(l);
+		int			childRTindex;
+		RangeTblEntry *childRTE;
+		RelOptInfo *childrel;
+		List	   *childquals;
+		Index		cq_min_security;
+		bool		have_const_false_cq;
+		PlannerInfo *subroot;
+		ListCell   *lc;
+		List	   *translated_exprs,
+				   *child_target_exprs;
+
+		/* append_rel_list contains all append rels; ignore others */
+		if (appinfo->parent_relid != parentRTindex)
+			continue;
+
+		childRTindex = appinfo->child_relid;
+		childRTE = root->simple_rte_array[childRTindex];
+		subroot = root->inh_target_child_roots[childRTindex];
+
+		/*
+		 * The child rel's RelOptInfo was already created during
+		 * add_base_rels_to_query.
+		 */
+		childrel = find_base_rel(root, childRTindex);
+		Assert(childrel->reloptkind == RELOPT_OTHER_MEMBER_REL);
+
+		/*
+		 * We have to copy the parent's quals to the child, with appropriate
+		 * substitution of variables.  However, only the baserestrictinfo
+		 * quals are needed before we can check for constraint exclusion; so
+		 * do that first and then check to see if we can disregard this child.
+		 *
+		 * The child rel's targetlist might contain non-Var expressions, which
+		 * means that substitution into the quals could produce opportunities
+		 * for const-simplification, and perhaps even pseudoconstant quals.
+		 * Therefore, transform each RestrictInfo separately to see if it
+		 * reduces to a constant or pseudoconstant.  (We must process them
+		 * separately to keep track of the security level of each qual.)
+		 */
+		childquals = NIL;
+		cq_min_security = UINT_MAX;
+		have_const_false_cq = false;
+		foreach(lc, rel->baserestrictinfo)
+		{
+			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+			Node	   *childqual;
+			ListCell   *lc2;
+
+			Assert(IsA(rinfo, RestrictInfo));
+			childqual = adjust_appendrel_attrs(root,
+											   (Node *) rinfo->clause,
+											   1, &appinfo);
+			childqual = eval_const_expressions(root, childqual);
+			/* check for flat-out constant */
+			if (childqual && IsA(childqual, Const))
+			{
+				if (((Const *) childqual)->constisnull ||
+					!DatumGetBool(((Const *) childqual)->constvalue))
+				{
+					/* Restriction reduces to constant FALSE or NULL */
+					have_const_false_cq = true;
+					break;
+				}
+				/* Restriction reduces to constant TRUE, so drop it */
+				continue;
+			}
+			/* might have gotten an AND clause, if so flatten it */
+			foreach(lc2, make_ands_implicit((Expr *) childqual))
+			{
+				Node	   *onecq = (Node *) lfirst(lc2);
+				bool		pseudoconstant;
+
+				/* check for pseudoconstant (no Vars or volatile functions) */
+				pseudoconstant =
+					!contain_vars_of_level(onecq, 0) &&
+					!contain_volatile_functions(onecq);
+				if (pseudoconstant)
+				{
+					/* tell createplan.c to check for gating quals */
+					root->hasPseudoConstantQuals = true;
+				}
+				/* reconstitute RestrictInfo with appropriate properties */
+				childquals = lappend(childquals,
+									 make_restrictinfo((Expr *) onecq,
+													   rinfo->is_pushed_down,
+													   rinfo->outerjoin_delayed,
+													   pseudoconstant,
+													   rinfo->security_level,
+													   NULL, NULL, NULL));
+				/* track minimum security level among child quals */
+				cq_min_security = Min(cq_min_security, rinfo->security_level);
+			}
+		}
+
+		/*
+		 * In addition to the quals inherited from the parent, we might have
+		 * securityQuals associated with this particular child node.
+		 * (Currently this can only happen in appendrels originating from
+		 * UNION ALL; inheritance child tables don't have their own
+		 * securityQuals, see expand_inherited_rtentry().)	Pull any such
+		 * securityQuals up into the baserestrictinfo for the child.  This is
+		 * similar to process_security_barrier_quals() for the parent rel,
+		 * except that we can't make any general deductions from such quals,
+		 * since they don't hold for the whole appendrel.
+		 */
+		if (childRTE->securityQuals)
+		{
+			Index		security_level = 0;
+
+			foreach(lc, childRTE->securityQuals)
+			{
+				List	   *qualset = (List *) lfirst(lc);
+				ListCell   *lc2;
+
+				foreach(lc2, qualset)
+				{
+					Expr	   *qual = (Expr *) lfirst(lc2);
+
+					/* not likely that we'd see constants here, so no check */
+					childquals = lappend(childquals,
+										 make_restrictinfo(qual,
+														   true, false, false,
+														   security_level,
+														   NULL, NULL, NULL));
+					cq_min_security = Min(cq_min_security, security_level);
+				}
+				security_level++;
+			}
+			Assert(security_level <= root->qual_security_level);
+		}
+
+		/*
+		 * OK, we've got all the baserestrictinfo quals for this child.
+		 */
+		childrel->baserestrictinfo = childquals;
+		childrel->baserestrict_min_security = cq_min_security;
+
+		if (have_const_false_cq)
+		{
+			/*
+			 * Some restriction clause reduced to constant FALSE or NULL after
+			 * substitution, so this child need not be scanned.
+			 */
+			set_dummy_rel_pathlist(childrel);
+			continue;
+		}
+
+		if (did_pruning && !bms_is_member(appinfo->child_relid, live_children))
+		{
+			/* This partition was pruned; skip it. */
+			set_dummy_rel_pathlist(childrel);
+			continue;
+		}
+
+		if (relation_excluded_by_constraints(root, childrel, childRTE))
+		{
+			/* This child is excluded; skip it. */
+			set_dummy_rel_pathlist(childrel);
+			continue;
+		}
+
+		/*
+		 * Add missing Vars to child's reltarget.
+		 *
+		 * add_inherit_target_child_root() would've added only those that are
+		 * needed to be present in the top-level tlist (or ones that
+		 * preprocess_targetlist thinks are needed to be in the tlist.)  We
+		 * may need other attributes such as those contained in WHERE clauses,
+		 * which are already computed for the parent during
+		 * deconstruct_jointree processing of the original query (child's
+		 * query never goes through deconstruct_jointree.)
+		 */
+		translated_exprs = (List *)
+			adjust_appendrel_attrs(root,
+								   (Node *) rel->reltarget->exprs,
+								   1, &appinfo);
+		child_target_exprs = childrel->reltarget->exprs;
+		foreach(lc, translated_exprs)
+		{
+			Expr *expr = lfirst(lc);
+
+			if (!list_member(child_target_exprs, expr))
+				child_target_exprs = lappend(child_target_exprs, expr);
+		}
+
+		/*
+		 * Also, We have to find any ECs containing parent's expressions and
+		 * *replace* them with their copies containing child expressions.
+		 */
+		if (rel->has_eclass_joins || has_useful_pathkeys(root, rel))
+			add_child_rel_equivalences(subroot, appinfo, rel, childrel, true);
+		childrel->has_eclass_joins = rel->has_eclass_joins;
+
+		/* Translate join quals. */
+		childrel->joininfo = (List *)
+			adjust_appendrel_attrs(subroot,
+								   (Node *) rel->joininfo,
+								   1, &appinfo);
+
+		/*
+		 * If parallelism is allowable for this query in general, see whether
+		 * it's allowable for this childrel in particular.  For consistency,
+		 * do this before calling set_rel_size() for the child.
+		 */
+		if (root->glob->parallelModeOK)
+			set_rel_consider_parallel(subroot, childrel, childRTE);
+
+		/*
+		 * Compute the child's size using possibly modified subroot.
+		 */
+		set_rel_size(subroot, childrel, childRTindex, childRTE);
+
+		/* If the child itself is partitioned it may turn into a dummy rel. */
+		if (IS_DUMMY_REL(childrel))
+			continue;
+
+		/* We have at least one live child. */
+		has_live_children = true;
+
+		Assert(childrel->rows > 0);
+	}
+
+	if (has_live_children)
+	{
+		/*
+		 * Set a non-zero value here to cope with the caller's requirement
+		 * that non-dummy relations are actually not empty.  We don't try to
+		 * be accurate here, because we're not going to create a path that
+		 * combines the children outputs.
+		 */
+		rel->rows = 1;
+	}
+	else
+	{
+		/*
+		 * All children were excluded by constraints, so mark the relation
+		 * ass dummy.  We must do this in this phase so that the rel's
+		 * dummy-ness is visible when we generate paths for other rels.
+		 */
+		set_dummy_rel_pathlist(rel);
+	}
+}
+
+/*
+ * set_inherit_target_rel_pathlists
+ *	  Build access paths for the child target relations
+ *
+ * Similar to set_append_rel_pathlist, except that we build paths of the
+ * children, but don't build an Append path.
+ */
+static void
+set_inherit_target_rel_pathlists(PlannerInfo *root, RelOptInfo *rel,
+								 Index rti, RangeTblEntry *rte)
+{
+	int			parentRTindex = rti;
+	ListCell   *l;
+
+	/* Nothing to do if all the children were excluded. */
+	if (IS_DUMMY_REL(rel))
+		return;
+
+	/* Generate access paths for each of the children of passed-in rel */
+	foreach(l, root->append_rel_list)
+	{
+		AppendRelInfo *appinfo = (AppendRelInfo *) lfirst(l);
+		int			childRTindex;
+		RangeTblEntry *childRTE;
+		RelOptInfo *childrel;
+		PlannerInfo *subroot;
+
+		/* append_rel_list contains all append rels; ignore others */
+		if (appinfo->parent_relid != parentRTindex)
+			continue;
+
+		/* Re-locate the child RTE and RelOptInfo */
+		childRTindex = appinfo->child_relid;
+		childRTE = root->simple_rte_array[childRTindex];
+		childrel = root->simple_rel_array[childRTindex];
+		subroot = root->inh_target_child_roots[childRTindex];
+		/* Transfer the value from main root to subroot. */
+		subroot->total_table_pages = root->total_table_pages;
+
+		/*
+		 * If set_append_rel_size() decided the parent appendrel was
+		 * parallel-unsafe at some point after visiting this child rel, we
+		 * need to propagate the unsafety marking down to the child, so that
+		 * we don't generate useless partial paths for it.
+		 */
+		if (!rel->consider_parallel)
+			childrel->consider_parallel = false;
+
+		/*
+		 * Compute the child's access paths.
+		 */
+		set_rel_pathlist(subroot, childrel, childRTindex, childRTE);
+	}
+}
+
+/*
  * set_append_rel_size
  *	  Set size estimates for a simple "append relation"
  *
@@ -1046,7 +1418,8 @@ set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 		 * EquivalenceClass data structures.
 		 */
 		if (rel->has_eclass_joins || has_useful_pathkeys(root, rel))
-			add_child_rel_equivalences(root, appinfo, rel, childrel);
+			add_child_rel_equivalences(root, appinfo, rel, childrel,
+									   false);
 		childrel->has_eclass_joins = rel->has_eclass_joins;
 
 		/*
@@ -2621,6 +2994,140 @@ generate_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_rows)
 		path = create_gather_merge_path(root, rel, subpath, rel->reltarget,
 										subpath->pathkeys, NULL, rowsp);
 		add_path(rel, &path->path);
+	}
+}
+
+/*
+ * inheritance_make_rel_from_joinlist
+ *		Perform join planning for all non-dummy leaf inheritance children
+ *		in their role as an UPDATE/DELETE query's target relation
+ *
+ * If a child relation is a partitioned table, its children are processed in
+ * turn by recursively calling this function.
+ */
+static void
+inheritance_make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
+{
+	Index		resultRelation = root->parse->resultRelation;
+	ListCell   *lc;
+#ifdef USE_ASSERT_CHECKING
+	Relids	all_baserels;
+#endif
+
+	/* For UPDATE/DELETE queries, the top parent can only ever be a table. */
+	Assert(root->parse->commandType == CMD_UPDATE ||
+		   root->parse->commandType == CMD_DELETE);
+	Assert(planner_rt_fetch(resultRelation, root)->rtekind == RTE_RELATION);
+
+	/* Nothing to do. */
+	if (IS_DUMMY_REL(find_base_rel(root, resultRelation)))
+		return;
+
+	foreach(lc, root->append_rel_list)
+	{
+		AppendRelInfo *appinfo = lfirst(lc);
+		PlannerInfo *subroot;
+		RelOptInfo *childrel;
+		RelOptInfo *childjoinrel;
+		List	   *translated_joinlist;
+
+		if (appinfo->parent_relid != resultRelation)
+			continue;
+
+		childrel = find_base_rel(root, appinfo->child_relid);
+
+		/* Ignore excluded/pruned children. */
+		if (IS_DUMMY_REL(childrel))
+			continue;
+
+		/* Add this child. */
+		root->inh_target_child_rels = lappend_int(root->inh_target_child_rels,
+												  appinfo->child_relid);
+
+		/* Perform join planning with child subroot. */
+		subroot = root->inh_target_child_roots[appinfo->child_relid];
+		Assert(subroot->parse->resultRelation > 0);
+
+		/*
+		 * Modify joinlist such that relations joined to the top parent rel
+		 * appear to be joined to the child rel instead.  Do the same for
+		 * any SpecialJoinInfo structs.
+		 */
+		translated_joinlist = (List *)
+						adjust_appendrel_attrs(subroot,
+											   (Node *) joinlist,
+											   1, &appinfo);
+		subroot->join_info_list = (List *)
+						adjust_appendrel_attrs(subroot,
+											   (Node *) root->join_info_list,
+											   1, &appinfo);
+
+		/*
+		 * Sub-partitioned tables have to be processed recursively using the
+		 * translated subroot as the parent, because AppendRelInfos link
+		 * sub-partitions to their immediate parents, not the root partitioned
+		 * table.
+		 */
+		if (childrel->part_scheme != NULL)
+		{
+			inheritance_make_rel_from_joinlist(subroot, translated_joinlist);
+
+			/*
+			 * Add this child relation as a placeholder in the parent root's
+			 * inh_target_child_joinrels so that inheritance_planner see same
+			 * number of entries as inh_target_child_rels.
+			 */
+			root->inh_target_child_joinrels =
+					lappend(root->inh_target_child_joinrels, childrel);
+
+			/* Also propagate this child's own children into parent's list. */
+			if (subroot->inh_target_child_rels != NIL)
+			{
+				root->inh_target_child_rels =
+					list_concat(root->inh_target_child_rels,
+								subroot->inh_target_child_rels);
+				root->inh_target_child_joinrels =
+					list_concat(root->inh_target_child_joinrels,
+								subroot->inh_target_child_joinrels);
+			}
+			continue;
+		}
+
+		/*
+		 * Since we added the child rel directly into the join tree, we must
+		 * modify it to be a "base" rel instead of an "other" rel, which the
+		 * join planning code expects the relations being joined to be.
+		 */
+		childrel->reloptkind = RELOPT_BASEREL;
+
+		Assert(subroot->join_rel_list == NIL);
+		Assert(subroot->join_rel_hash == NULL);
+
+		/* Perform join planning and save the resulting RelOptInfo. */
+		childjoinrel = make_rel_from_joinlist(subroot, translated_joinlist);
+
+		/*
+		 * Remember this child target rel.  inheritance_planner will perform
+		 * the remaining steps of planning for each child relation separately.
+		 * Specifically, it will call grouping_planner on every
+		 * RelOptInfo contained in the inh_target_child_rels list, each of
+		 * which represents the source of tuples to be modified for a given
+		 * target child rel.
+		 */
+		root->inh_target_child_joinrels =
+					lappend(root->inh_target_child_joinrels, childjoinrel);
+#ifdef USE_ASSERT_CHECKING
+		/*
+		 * The following implements essentially the same Assert as in
+		 * make_one_rel, our caller.
+		 */
+		all_baserels = bms_copy(root->all_baserels);
+		all_baserels = bms_del_member(all_baserels,
+									  root->parse->resultRelation);
+		all_baserels = bms_add_member(all_baserels,
+									  subroot->parse->resultRelation);
+		Assert(bms_equal(childjoinrel->relids, all_baserels));
+#endif
 	}
 }
 

@@ -394,8 +394,39 @@ adjust_appendrel_attrs_mutator(Node *node,
 											  context->appinfos);
 		return (Node *) phv;
 	}
+
+	/*
+	 * This is needed, because inheritance_make_rel_from_joinlist needs to
+	 * translate root->join_info_list executing make_rel_from_joinlist for a
+	 * given child.
+	 */
+	if (IsA(node, SpecialJoinInfo))
+	{
+		SpecialJoinInfo *oldinfo = (SpecialJoinInfo *) node;
+		SpecialJoinInfo *newinfo = makeNode(SpecialJoinInfo);
+
+		memcpy(newinfo, oldinfo, sizeof(SpecialJoinInfo));
+		newinfo->min_lefthand = adjust_child_relids(oldinfo->min_lefthand,
+													context->nappinfos,
+													context->appinfos);
+		newinfo->min_righthand = adjust_child_relids(oldinfo->min_righthand,
+													 context->nappinfos,
+													 context->appinfos);
+		newinfo->syn_lefthand = adjust_child_relids(oldinfo->syn_lefthand,
+													context->nappinfos,
+													context->appinfos);
+		newinfo->syn_righthand = adjust_child_relids(oldinfo->syn_righthand,
+													 context->nappinfos,
+													 context->appinfos);
+		newinfo->semi_rhs_exprs =
+			(List *) expression_tree_mutator((Node *)
+											 oldinfo->semi_rhs_exprs,
+											 adjust_appendrel_attrs_mutator,
+											 (void *) context);
+		return (Node *) newinfo;
+	}
+
 	/* Shouldn't need to handle planner auxiliary nodes here */
-	Assert(!IsA(node, SpecialJoinInfo));
 	Assert(!IsA(node, AppendRelInfo));
 	Assert(!IsA(node, PlaceHolderInfo));
 	Assert(!IsA(node, MinMaxAggInfo));
