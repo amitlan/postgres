@@ -734,6 +734,15 @@ typedef struct RelOptInfo
 	List	  **partexprs;		/* Non-nullable partition key expressions. */
 	List	  **nullable_partexprs; /* Nullable partition key expressions. */
 	List	   *partitioned_child_rels; /* List of RT indexes. */
+
+	/*
+	 * For inheritance children, this is the RT index of inheritance table
+	 * mentioned in the query from which this relation originated.
+	 * top_parent_relids cannot be used for this, because if the inheritance
+	 * root table is itself under UNION ALL, top_parent_relids contains the
+	 * RT index of UNION ALL parent subquery.
+	 */
+	Index		inh_root_parent;
 } RelOptInfo;
 
 /*

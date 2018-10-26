@@ -195,6 +195,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->joininfo = NIL;
 	rel->has_eclass_joins = false;
 	rel->consider_partitionwise_join = false; /* might get changed later */
+	rel->top_parent_relids = NULL; /* might be changed later */
 	rel->part_scheme = NULL;
 	rel->nparts = 0;
 	rel->boundinfo = NULL;
@@ -203,6 +204,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->partexprs = NULL;
 	rel->nullable_partexprs = NULL;
 	rel->partitioned_child_rels = NIL;
+	rel->inh_root_parent = 0; /* might be changed later */
 
 	/*
 	 * Pass top parent's relids down the inheritance hierarchy. If the parent
@@ -216,9 +218,18 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 			rel->top_parent_relids = parent->top_parent_relids;
 		else
 			rel->top_parent_relids = bms_copy(parent->relids);
+
+		/*
+		 * For inheritance child relations, we also set inh_root_parent.
+		 * Note that 'parent' might itself be a child (a sub-partitioned
+		 * partition), in which case we simply use its value of
+		 * inh_root_parent.
+		 */
+		if (parent->rtekind == RTE_RELATION)
+			rel->inh_root_parent = parent->inh_root_parent > 0 ?
+										parent->inh_root_parent :
+										parent->relid;
 	}
-	else
-		rel->top_parent_relids = NULL;
 
 	/* Check type of rtable entry */
 	switch (rte->rtekind)
