@@ -358,7 +358,8 @@ static CoercionPathType findFkeyCast(Oid targetTypeId, Oid sourceTypeId,
 									 Oid *funcid);
 static void validateForeignKeyConstraint(char *conname,
 										 Relation rel, Relation pkrel,
-										 Oid pkindOid, Oid constraintOid);
+										 Oid pkindOid, Oid constraintOid,
+										 bool recursing);
 static void ATController(AlterTableStmt *parsetree,
 						 Relation rel, List *cmds, bool recurse, LOCKMODE lockmode,
 						 AlterTableUtilityContext *context);
@@ -470,7 +471,7 @@ static void addFkRecurseReferencing(List **wqueue, Constraint *fkconstraint,
 									Relation rel, Relation pkrel, Oid indexOid, Oid parentConstr,
 									int numfks, int16 *pkattnum, int16 *fkattnum,
 									Oid *pfeqoperators, Oid *ppeqoperators, Oid *ffeqoperators,
-									bool old_check_ok, LOCKMODE lockmode);
+									bool old_check_ok, bool recursing, LOCKMODE lockmode);
 static void CloneForeignKeyConstraints(List **wqueue, Relation parentRel,
 									   Relation partitionRel);
 static void CloneFkReferenced(Relation parentRel, Relation partitionRel);
@@ -5342,8 +5343,12 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 		Relation	rel = NULL;
 		ListCell   *lcon;
 
-		/* Relations without storage may be ignored here too */
-		if (!RELKIND_HAS_STORAGE(tab->relkind))
+		/*
+		 * Although partitioned tables have no storage,
+		 * validateForeignKeyConstraint() knows how to handle them.
+		 */
+		if (!RELKIND_HAS_STORAGE(tab->relkind) &&
+			tab->relkind != RELKIND_PARTITIONED_TABLE)
 			continue;
 
 		foreach(lcon, tab->constraints)
@@ -5365,7 +5370,7 @@ ATRewriteTables(AlterTableStmt *parsetree, List **wqueue, LOCKMODE lockmode,
 
 				validateForeignKeyConstraint(fkconstraint->conname, rel, refrel,
 											 con->refindid,
-											 con->conid);
+											 con->conid, false);
 
 				/*
 				 * No need to mark the constraint row as validated, we did
@@ -9069,6 +9074,7 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 							ppeqoperators,
 							ffeqoperators,
 							old_check_ok,
+							false,	/* recursing */
 							lockmode);
 
 	/*
@@ -9307,6 +9313,8 @@ addFkRecurseReferenced(List **wqueue, Constraint *fkconstraint, Relation rel,
  * pf/pp/ffeqoperators are OID array of operators between columns.
  * old_check_ok signals that this constraint replaces an existing one that
  *		was already validated (thus this one doesn't need validation).
+ * recursing signals that we are adding the constraint recursively to a
+ *		partition
  * lockmode is the lockmode to acquire on partitions when recursing.
  */
 static void
@@ -9314,7 +9322,7 @@ addFkRecurseReferencing(List **wqueue, Constraint *fkconstraint, Relation rel,
 						Relation pkrel, Oid indexOid, Oid parentConstr,
 						int numfks, int16 *pkattnum, int16 *fkattnum,
 						Oid *pfeqoperators, Oid *ppeqoperators, Oid *ffeqoperators,
-						bool old_check_ok, LOCKMODE lockmode)
+						bool old_check_ok, bool recursing, LOCKMODE lockmode)
 {
 	AssertArg(OidIsValid(parentConstr));
 
@@ -9330,38 +9338,11 @@ addFkRecurseReferencing(List **wqueue, Constraint *fkconstraint, Relation rel,
 	 * If the relation is partitioned, drill down to do it to its partitions.
 	 */
 	if (rel->rd_rel->relkind == RELKIND_RELATION)
-	{
 		createForeignKeyCheckTriggers(RelationGetRelid(rel),
 									  RelationGetRelid(pkrel),
 									  fkconstraint,
 									  parentConstr,
 									  indexOid);
-
-		/*
-		 * Tell Phase 3 to check that the constraint is satisfied by existing
-		 * rows. We can skip this during table creation, when requested
-		 * explicitly by specifying NOT VALID in an ADD FOREIGN KEY command,
-		 * and when we're recreating a constraint following a SET DATA TYPE
-		 * operation that did not impugn its validity.
-		 */
-		if (wqueue && !old_check_ok && !fkconstraint->skip_validation)
-		{
-			NewConstraint *newcon;
-			AlteredTableInfo *tab;
-
-			tab = ATGetQueueEntry(wqueue, rel);
-
-			newcon = (NewConstraint *) palloc0(sizeof(NewConstraint));
-			newcon->name = get_constraint_name(parentConstr);
-			newcon->contype = CONSTR_FOREIGN;
-			newcon->refrelid = RelationGetRelid(pkrel);
-			newcon->refindid = indexOid;
-			newcon->conid = parentConstr;
-			newcon->qual = (Node *) fkconstraint;
-
-			tab->constraints = lappend(tab->constraints, newcon);
-		}
-	}
 	else if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
 		PartitionDesc pd = RelationGetPartitionDesc(rel, false);
@@ -9485,10 +9466,44 @@ addFkRecurseReferencing(List **wqueue, Constraint *fkconstraint, Relation rel,
 									ppeqoperators,
 									ffeqoperators,
 									old_check_ok,
+									true,	/* recursing */
 									lockmode);
 
 			table_close(partition, NoLock);
 		}
+	}
+
+	/*
+	 * If the constraint is being added recursively, no need to queue the
+	 * constraint to be checked, because Phase 3 recurses on its own iff
+	 * needed.
+	 */
+	if (recursing)
+		return;
+
+	/*
+	 * Tell Phase 3 to check that the constraint is satisfied by existing
+	 * rows. We can skip this during table creation, when requested
+	 * explicitly by specifying NOT VALID in an ADD FOREIGN KEY command,
+	 * and when we're recreating a constraint following a SET DATA TYPE
+	 * operation that did not impugn its validity.
+	 */
+	if (wqueue && !old_check_ok && !fkconstraint->skip_validation)
+	{
+		NewConstraint *newcon;
+		AlteredTableInfo *tab;
+
+		tab = ATGetQueueEntry(wqueue, rel);
+
+		newcon = (NewConstraint *) palloc0(sizeof(NewConstraint));
+		newcon->name = get_constraint_name(parentConstr);
+		newcon->contype = CONSTR_FOREIGN;
+		newcon->refrelid = RelationGetRelid(pkrel);
+		newcon->refindid = indexOid;
+		newcon->conid = parentConstr;
+		newcon->qual = (Node *) fkconstraint;
+
+		tab->constraints = lappend(tab->constraints, newcon);
 	}
 }
 
@@ -9890,6 +9905,7 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 								conppeqop,
 								conffeqop,
 								false,	/* no old check exists */
+								false,	/* not recursing*/
 								AccessExclusiveLock);
 		table_close(pkrel, NoLock);
 	}
@@ -10742,7 +10758,8 @@ validateForeignKeyConstraint(char *conname,
 							 Relation rel,
 							 Relation pkrel,
 							 Oid pkindOid,
-							 Oid constraintOid)
+							 Oid constraintOid,
+							 bool recursing)
 {
 	TupleTableSlot *slot;
 	TableScanDesc scan;
@@ -10773,8 +10790,28 @@ validateForeignKeyConstraint(char *conname,
 	 * See if we can do it with a single LEFT JOIN query.  A false result
 	 * indicates we must proceed with the fire-the-trigger method.
 	 */
-	if (RI_Initial_Check(&trig, rel, pkrel))
+	if (!recursing && RI_Initial_Check(&trig, rel, pkrel))
 		return;
+
+	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		PartitionDesc	partdesc = RelationGetPartitionDesc(rel);
+		int				i;
+
+		for (i = 0; i < partdesc->nparts; i++)
+		{
+			Oid		partoid = partdesc->oids[i];
+			/* Partition must be locked already. */
+			Relation partrel = table_open(partoid, NoLock);
+			Oid		partconoid = get_relation_constraint_oid(partoid, conname,
+															 false);
+
+			validateForeignKeyConstraint(conname, partrel, pkrel, pkindOid,
+										 partconoid, true);
+			table_close(partrel, NoLock);
+		}
+		return;
+	}
 
 	/*
 	 * Scan through each tuple, calling RI_FKey_check_ins (insert trigger) as

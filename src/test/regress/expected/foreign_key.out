@@ -1673,7 +1673,7 @@ CREATE TABLE fk_partitioned_fk_full (x int, y int) PARTITION BY RANGE (x);
 CREATE TABLE fk_partitioned_fk_full_1 PARTITION OF fk_partitioned_fk_full DEFAULT;
 INSERT INTO fk_partitioned_fk_full VALUES (1, NULL);
 ALTER TABLE fk_partitioned_fk_full ADD FOREIGN KEY (x, y) REFERENCES fk_notpartitioned_pk MATCH FULL;  -- fails
-ERROR:  insert or update on table "fk_partitioned_fk_full_1" violates foreign key constraint "fk_partitioned_fk_full_x_y_fkey"
+ERROR:  insert or update on table "fk_partitioned_fk_full" violates foreign key constraint "fk_partitioned_fk_full_x_y_fkey"
 DETAIL:  MATCH FULL does not allow mixing of null and nonnull key values.
 TRUNCATE fk_partitioned_fk_full;
 ALTER TABLE fk_partitioned_fk_full ADD FOREIGN KEY (x, y) REFERENCES fk_notpartitioned_pk MATCH FULL;
@@ -1889,7 +1889,7 @@ CREATE TABLE fk_partitioned_fk_2_2 PARTITION OF fk_partitioned_fk_2 FOR VALUES F
 INSERT INTO fk_partitioned_fk_2 VALUES (1600, 601), (1600, 1601);
 ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2
   FOR VALUES IN (1600);
-ERROR:  insert or update on table "fk_partitioned_fk_2_1" violates foreign key constraint "fk_partitioned_fk_a_b_fkey"
+ERROR:  insert or update on table "fk_partitioned_fk_2" violates foreign key constraint "fk_partitioned_fk_a_b_fkey"
 DETAIL:  Key (a, b)=(1600, 601) is not present in table "fk_notpartitioned_pk".
 INSERT INTO fk_notpartitioned_pk VALUES (1600, 601), (1600, 1601);
 ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2
