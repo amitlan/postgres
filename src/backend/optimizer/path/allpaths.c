@@ -1278,7 +1278,6 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 	add_paths_to_append_rel(root, rel, live_childrels);
 }
 
-
 /*
  * add_paths_to_append_rel
  *		Generate paths for the given append relation given the set of non-dummy
@@ -1514,6 +1513,12 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		}
 	}
 
+	if (subpaths_valid &&
+		rel->reloptkind == RELOPT_BASEREL && partitioned_rels != NIL)
+		rel->runtime_pruneinfo =
+			make_partition_pruneinfo(root, rel, subpaths, partitioned_rels,
+									 NULL);
+
 	/*
 	 * If we found unparameterized paths for all children, build an unordered,
 	 * unparameterized Append path for the rel.  (Note: this is correct even
@@ -1671,6 +1676,12 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 			}
 			accumulate_append_subpath(subpath, &subpaths, NULL);
 		}
+
+		if (subpaths_valid &&
+			rel->reloptkind == RELOPT_BASEREL && partitioned_rels != NIL)
+			rel->runtime_pruneinfo =
+				make_partition_pruneinfo(root, rel, subpaths, partitioned_rels,
+										 required_outer);
 
 		if (subpaths_valid)
 			add_path(rel, (Path *)

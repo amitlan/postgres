@@ -30,5 +30,6 @@ extern List *identify_current_nestloop_params(PlannerInfo *root,
 extern Param *generate_new_exec_param(PlannerInfo *root, Oid paramtype,
 									  int32 paramtypmod, Oid paramcollation);
 extern int	assign_special_exec_param(PlannerInfo *root);
+extern Node *replace_nestloop_params(PlannerInfo *root, Node *expr);
 
 #endif							/* PARAMASSIGN_H */

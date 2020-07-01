@@ -48,7 +48,9 @@
 #include "optimizer/appendinfo.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/paramassign.h"
 #include "optimizer/pathnode.h"
+#include "optimizer/restrictinfo.h"
 #include "parser/parsetree.h"
 #include "partitioning/partbounds.h"
 #include "partitioning/partprune.h"
@@ -113,6 +115,8 @@ typedef struct GeneratePruningStepsContext
 	/* Copies of input arguments for gen_partprune_steps: */
 	RelOptInfo *rel;			/* the partitioned relation */
 	PartClauseTarget target;	/* use-case we're generating steps for */
+	Bitmapset *required_outer;	/* OUTER Relids when generating EXEC pruning
+								 * steps */
 	/* Result data: */
 	List	   *steps;			/* list of PartitionPruneSteps */
 	bool		has_mutable_op; /* clauses include any stable operators */
@@ -142,8 +146,10 @@ static List *make_partitionedrel_pruneinfo(PlannerInfo *root,
 										   RelOptInfo *parentrel,
 										   int *relid_subplan_map,
 										   List *partitioned_rels, List *prunequal,
+										   Bitmapset *required_outer,
 										   Bitmapset **matchedsubplans);
 static void gen_partprune_steps(RelOptInfo *rel, List *clauses,
+								Bitmapset *required_outer,
 								PartClauseTarget target,
 								GeneratePruningStepsContext *context);
 static List *gen_partprune_steps_internal(GeneratePruningStepsContext *context,
@@ -160,6 +166,10 @@ static PartClauseMatchStatus match_clause_to_partition_key(GeneratePruningStepsC
 														   Expr *clause, Expr *partkey, int partkeyidx,
 														   bool *clause_is_not_null,
 														   PartClauseInfo **pc, List **clause_steps);
+static bool check_exec_prune_expr(GeneratePruningStepsContext *context,
+					  Expr *clause);
+static Bitmapset *pull_exec_paramids(Node *node);
+static bool pull_exec_paramids_walker(Node *node, Bitmapset **context);
 static List *get_steps_using_prefix(GeneratePruningStepsContext *context,
 									StrategyNumber step_opstrategy,
 									bool step_op_is_ne,
@@ -188,9 +198,6 @@ static PruneStepResult *get_matching_list_bounds(PartitionPruneContext *context,
 static PruneStepResult *get_matching_range_bounds(PartitionPruneContext *context,
 												  StrategyNumber opstrategy, Datum *values, int nvalues,
 												  FmgrInfo *partsupfunc, Bitmapset *nullkeys);
-static Bitmapset *pull_exec_paramids(Expr *expr);
-static bool pull_exec_paramids_walker(Node *node, Bitmapset **context);
-static Bitmapset *get_partkey_exec_paramids(List *steps);
 static PruneStepResult *perform_pruning_base_step(PartitionPruneContext *context,
 												  PartitionPruneStepOp *opstep);
 static PruneStepResult *perform_pruning_combine_step(PartitionPruneContext *context,
@@ -224,12 +231,13 @@ static void partkey_datum_from_expr(PartitionPruneContext *context,
  * that set into the PartitionPruneInfo's 'other_subplans' field.  Callers
  * will likely never want to prune subplans which are mentioned in this field.
  *
- * 'prunequal' is a list of potential pruning quals.
+ * 'required_outer' is outer relation whose Vars may be referenced in
+ *  prunequal
  */
 PartitionPruneInfo *
 make_partition_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 						 List *subpaths, List *partitioned_rels,
-						 List *prunequal)
+						 Bitmapset *required_outer)
 {
 	PartitionPruneInfo *pruneinfo;
 	Bitmapset  *allmatchedsubplans = NULL;
@@ -237,6 +245,33 @@ make_partition_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 	ListCell   *lc;
 	List	   *prunerelinfos;
 	int			i;
+	List	   *prunequal;
+
+	Assert(parentrel->reloptkind == RELOPT_BASEREL && partitioned_rels != NIL);
+
+	if (!enable_partition_pruning)
+		return NULL;
+
+	if (parentrel->runtime_pruneinfo != NULL)
+		return parentrel->runtime_pruneinfo;
+
+	/*
+	 * Extract clauses.  Use both base restrict quals and parameterized quals
+	 * if any.
+	 */
+	prunequal = extract_actual_clauses(parentrel->baserestrictinfo, false);
+	if (required_outer)
+	{
+		ParamPathInfo *param_info = get_baserel_parampathinfo(root, parentrel,
+															  required_outer);
+		List	   *prmquals = param_info->ppi_clauses;
+
+		prmquals = extract_actual_clauses(prmquals, false);
+		prunequal = list_concat(prunequal, prmquals);
+	}
+
+	if (prunequal == NIL)
+		return NULL;
 
 	/*
 	 * Construct a temporary array to map from planner relids to subplan
@@ -274,6 +309,7 @@ make_partition_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		pinfolist = make_partitionedrel_pruneinfo(root, parentrel,
 												  relid_subplan_map,
 												  rels, prunequal,
+												  required_outer,
 												  &matchedsubplans);
 
 		/* When pruning is possible, record the matched subplans */
@@ -343,6 +379,7 @@ static List *
 make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 							  int *relid_subplan_map,
 							  List *partitioned_rels, List *prunequal,
+							  Bitmapset *required_outer,
 							  Bitmapset **matchedsubplans)
 {
 	RelOptInfo *targetpart = NULL;
@@ -372,7 +409,6 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		List	   *partprunequal;
 		List	   *initial_pruning_steps;
 		List	   *exec_pruning_steps;
-		Bitmapset  *execparamids;
 		GeneratePruningStepsContext context;
 
 		/*
@@ -444,7 +480,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		 * pruning steps and detects whether there's any possibly-useful quals
 		 * that would require per-scan pruning.
 		 */
-		gen_partprune_steps(subpart, partprunequal, PARTTARGET_INITIAL,
+		gen_partprune_steps(subpart, partprunequal, NULL, PARTTARGET_INITIAL,
 							&context);
 
 		if (context.contradictory)
@@ -475,11 +511,11 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		 * If no exec Params appear in potentially-usable pruning clauses,
 		 * then there's no point in even thinking about per-scan pruning.
 		 */
-		if (context.has_exec_param)
+		if (context.has_exec_param || required_outer)
 		{
 			/* ... OK, we'd better think about it */
-			gen_partprune_steps(subpart, partprunequal, PARTTARGET_EXEC,
-								&context);
+			gen_partprune_steps(subpart, partprunequal, required_outer,
+								PARTTARGET_EXEC, &context);
 
 			if (context.contradictory)
 			{
@@ -494,16 +530,14 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 			 * were in available clauses doesn't mean we actually used them.
 			 * Skip per-scan pruning if there are none.
 			 */
-			execparamids = get_partkey_exec_paramids(exec_pruning_steps);
-
-			if (bms_is_empty(execparamids))
+			if (bms_is_empty(pull_varnos((Node *) exec_pruning_steps)) &&
+				bms_is_empty(pull_exec_paramids((Node *) exec_pruning_steps)))
 				exec_pruning_steps = NIL;
 		}
 		else
 		{
 			/* No exec Params anywhere, so forget about scan-time pruning */
 			exec_pruning_steps = NIL;
-			execparamids = NULL;
 		}
 
 		if (initial_pruning_steps || exec_pruning_steps)
@@ -514,7 +548,12 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		pinfo->rtindex = rti;
 		pinfo->initial_pruning_steps = initial_pruning_steps;
 		pinfo->exec_pruning_steps = exec_pruning_steps;
-		pinfo->execparamids = execparamids;
+
+		/*
+		 * execparamids will be set when replace_nestloop_params() runs on
+		 * exec_pruning_steps.
+		 */
+
 		/* Remaining fields will be filled in the next loop */
 
 		pinfolist = lappend(pinfolist, pinfo);
@@ -597,6 +636,76 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 	return pinfolist;
 }
 
+PartitionPruneInfo *
+finalize_partition_pruneinfo(PlannerInfo *root, RelOptInfo *rel,
+							 Bitmapset *outer_rel)
+{
+	ListCell *lc;
+
+	if (rel->runtime_pruneinfo == NULL)
+		return NULL;
+
+	foreach(lc, rel->runtime_pruneinfo->prune_infos)
+	{
+		List   *prune_infos = lfirst(lc);
+		ListCell *lc2;
+
+		foreach(lc2, prune_infos)
+		{
+			PartitionedRelPruneInfo *pruneinfo = lfirst(lc2);
+			Bitmapset *execparamids;
+
+			execparamids =
+				pull_exec_paramids((Node *) pruneinfo->exec_pruning_steps);
+			if (bms_is_empty(execparamids) && bms_is_empty(outer_rel))
+				pruneinfo->exec_pruning_steps = NIL;
+			else if (!bms_is_empty(outer_rel))
+			{
+				pruneinfo->exec_pruning_steps = (List *)
+					replace_nestloop_params(root,
+											(Node *) pruneinfo->exec_pruning_steps);
+				execparamids =
+					pull_exec_paramids((Node *) pruneinfo->exec_pruning_steps);
+			}
+			pruneinfo->execparamids = execparamids;
+		}
+	}
+
+	return rel->runtime_pruneinfo;
+}
+
+/*
+ * pull_exec_paramids
+ *		Returns a Bitmapset containing the paramids of all Params with
+ *		paramkind = PARAM_EXEC in 'node'.
+ */
+static Bitmapset *
+pull_exec_paramids(Node *node)
+{
+	Bitmapset  *result = NULL;
+
+	(void) pull_exec_paramids_walker((Node *) node, &result);
+
+	return result;
+}
+
+static bool
+pull_exec_paramids_walker(Node *node, Bitmapset **context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Param))
+	{
+		Param	   *param = (Param *) node;
+
+		if (param->paramkind == PARAM_EXEC)
+			*context = bms_add_member(*context, param->paramid);
+		return false;
+	}
+	return expression_tree_walker(node, pull_exec_paramids_walker,
+								  (void *) context);
+}
+
 /*
  * gen_partprune_steps
  *		Process 'clauses' (typically a rel's baserestrictinfo list of clauses)
@@ -605,19 +714,22 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
  * 'target' tells whether to generate pruning steps for planning (use
  * immutable clauses only), or for executor startup (use any allowable
  * clause except ones containing PARAM_EXEC Params), or for executor
- * per-scan pruning (use any allowable clause).
+ * per-scan pruning (use any allowable clause).  When generating per-scan
+ * pruning steps, 'required_outer' must contain OUTER Relids.
  *
  * 'context' is an output argument that receives the steps list as well as
  * some subsidiary flags; see the GeneratePruningStepsContext typedef.
  */
 static void
-gen_partprune_steps(RelOptInfo *rel, List *clauses, PartClauseTarget target,
+gen_partprune_steps(RelOptInfo *rel, List *clauses, Bitmapset *required_outer,
+					PartClauseTarget target,
 					GeneratePruningStepsContext *context)
 {
 	/* Initialize all output values to zero/false/NULL */
 	memset(context, 0, sizeof(GeneratePruningStepsContext));
 	context->rel = rel;
 	context->target = target;
+	context->required_outer = required_outer;
 
 	/*
 	 * If this partitioned table is in turn a partition, and it shares any
@@ -672,7 +784,7 @@ prune_append_rel_partitions(RelOptInfo *rel)
 	 * If the clauses are found to be contradictory, we can return the empty
 	 * set.
 	 */
-	gen_partprune_steps(rel, clauses, PARTTARGET_PLANNER,
+	gen_partprune_steps(rel, clauses, NULL, PARTTARGET_PLANNER,
 						&gcontext);
 	if (gcontext.contradictory)
 		return NULL;
@@ -1771,49 +1883,8 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 		 * First, check for non-Const argument.  (We assume that any immutable
 		 * subexpression will have been folded to a Const already.)
 		 */
-		if (!IsA(expr, Const))
-		{
-			Bitmapset  *paramids;
-
-			/*
-			 * When pruning in the planner, we only support pruning using
-			 * comparisons to constants.  We cannot prune on the basis of
-			 * anything that's not immutable.  (Note that has_mutable_arg and
-			 * has_exec_param do not get set for this target value.)
-			 */
-			if (context->target == PARTTARGET_PLANNER)
-				return PARTCLAUSE_UNSUPPORTED;
-
-			/*
-			 * We can never prune using an expression that contains Vars.
-			 */
-			if (contain_var_clause((Node *) expr))
-				return PARTCLAUSE_UNSUPPORTED;
-
-			/*
-			 * And we must reject anything containing a volatile function.
-			 * Stable functions are OK though.
-			 */
-			if (contain_volatile_functions((Node *) expr))
-				return PARTCLAUSE_UNSUPPORTED;
-
-			/*
-			 * See if there are any exec Params.  If so, we can only use this
-			 * expression during per-scan pruning.
-			 */
-			paramids = pull_exec_paramids(expr);
-			if (!bms_is_empty(paramids))
-			{
-				context->has_exec_param = true;
-				if (context->target != PARTTARGET_EXEC)
-					return PARTCLAUSE_UNSUPPORTED;
-			}
-			else
-			{
-				/* It's potentially usable, but mutable */
-				context->has_mutable_arg = true;
-			}
-		}
+		if (!IsA(expr, Const) && !check_exec_prune_expr(context, expr))
+			return PARTCLAUSE_UNSUPPORTED;
 
 		/*
 		 * Check whether the comparison operator itself is immutable.  (We
@@ -1969,49 +2040,8 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 		 * Examine the array argument to see if it's usable for pruning.  This
 		 * is identical to the logic for a plain OpExpr.
 		 */
-		if (!IsA(rightop, Const))
-		{
-			Bitmapset  *paramids;
-
-			/*
-			 * When pruning in the planner, we only support pruning using
-			 * comparisons to constants.  We cannot prune on the basis of
-			 * anything that's not immutable.  (Note that has_mutable_arg and
-			 * has_exec_param do not get set for this target value.)
-			 */
-			if (context->target == PARTTARGET_PLANNER)
-				return PARTCLAUSE_UNSUPPORTED;
-
-			/*
-			 * We can never prune using an expression that contains Vars.
-			 */
-			if (contain_var_clause((Node *) rightop))
-				return PARTCLAUSE_UNSUPPORTED;
-
-			/*
-			 * And we must reject anything containing a volatile function.
-			 * Stable functions are OK though.
-			 */
-			if (contain_volatile_functions((Node *) rightop))
-				return PARTCLAUSE_UNSUPPORTED;
-
-			/*
-			 * See if there are any exec Params.  If so, we can only use this
-			 * expression during per-scan pruning.
-			 */
-			paramids = pull_exec_paramids(rightop);
-			if (!bms_is_empty(paramids))
-			{
-				context->has_exec_param = true;
-				if (context->target != PARTTARGET_EXEC)
-					return PARTCLAUSE_UNSUPPORTED;
-			}
-			else
-			{
-				/* It's potentially usable, but mutable */
-				context->has_mutable_arg = true;
-			}
-		}
+		if (!IsA(rightop, Const) && !check_exec_prune_expr(context, rightop))
+			return PARTCLAUSE_UNSUPPORTED;
 
 		/*
 		 * Check whether the comparison operator itself is immutable.  (We
@@ -2170,6 +2200,57 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 	 * return boolmatchstatus.
 	 */
 	return boolmatchstatus;
+}
+
+static bool
+check_exec_prune_expr(GeneratePruningStepsContext *context,
+					  Expr *expr)
+{
+	Bitmapset  *paramids;
+	Bitmapset  *varnos;
+
+	/*
+	 * When pruning in the planner, we only support pruning using
+	 * comparisons to constants.  We cannot prune on the basis of
+	 * anything that's not immutable.  (Note that has_mutable_arg and
+	 * has_exec_param do not get set for this target value.)
+	 */
+	if (context->target == PARTTARGET_PLANNER)
+		return false;
+
+	/*
+	 * And we must reject anything containing a volatile function.
+	 * Stable functions are OK though.
+	 */
+	if (contain_volatile_functions((Node *) expr))
+		return false;
+
+	/*
+	 * If the expression contains Vars whose values can be supplied
+	 * by an outer relation, we can use it during per-scan pruning.
+	 */
+	paramids = pull_exec_paramids((Node *) expr);
+	varnos = pull_varnos((Node *) expr);
+	if (!bms_is_empty(paramids) ||
+		(!bms_is_empty(context->required_outer) &&
+		 bms_equal(varnos, context->required_outer)))
+	{
+		context->has_exec_param = true;
+		if (context->target != PARTTARGET_EXEC)
+			return false;
+	}
+	else if (!bms_is_empty(varnos))
+	{
+		/* Other Vars cannot be used for pruning. */
+		return false;
+	}
+	else
+	{
+		/* It's potentially usable, but mutable */
+		context->has_mutable_arg = true;
+	}
+
+	return true;
 }
 
 /*
@@ -3054,73 +3135,6 @@ get_matching_range_bounds(PartitionPruneContext *context,
 		result->bound_offsets = bms_add_range(NULL, minoff, maxoff);
 
 	return result;
-}
-
-/*
- * pull_exec_paramids
- *		Returns a Bitmapset containing the paramids of all Params with
- *		paramkind = PARAM_EXEC in 'expr'.
- */
-static Bitmapset *
-pull_exec_paramids(Expr *expr)
-{
-	Bitmapset  *result = NULL;
-
-	(void) pull_exec_paramids_walker((Node *) expr, &result);
-
-	return result;
-}
-
-static bool
-pull_exec_paramids_walker(Node *node, Bitmapset **context)
-{
-	if (node == NULL)
-		return false;
-	if (IsA(node, Param))
-	{
-		Param	   *param = (Param *) node;
-
-		if (param->paramkind == PARAM_EXEC)
-			*context = bms_add_member(*context, param->paramid);
-		return false;
-	}
-	return expression_tree_walker(node, pull_exec_paramids_walker,
-								  (void *) context);
-}
-
-/*
- * get_partkey_exec_paramids
- *		Loop through given pruning steps and find out which exec Params
- *		are used.
- *
- * Returns a Bitmapset of Param IDs.
- */
-static Bitmapset *
-get_partkey_exec_paramids(List *steps)
-{
-	Bitmapset  *execparamids = NULL;
-	ListCell   *lc;
-
-	foreach(lc, steps)
-	{
-		PartitionPruneStepOp *step = (PartitionPruneStepOp *) lfirst(lc);
-		ListCell   *lc2;
-
-		if (!IsA(step, PartitionPruneStepOp))
-			continue;
-
-		foreach(lc2, step->exprs)
-		{
-			Expr	   *expr = lfirst(lc2);
-
-			/* We can be quick for plain Consts */
-			if (!IsA(expr, Const))
-				execparamids = bms_join(execparamids,
-										pull_exec_paramids(expr));
-		}
-	}
-
-	return execparamids;
 }
 
 /*

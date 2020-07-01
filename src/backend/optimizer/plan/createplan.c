@@ -154,7 +154,6 @@ static CustomScan *create_customscan_plan(PlannerInfo *root,
 static NestLoop *create_nestloop_plan(PlannerInfo *root, NestPath *best_path);
 static MergeJoin *create_mergejoin_plan(PlannerInfo *root, MergePath *best_path);
 static HashJoin *create_hashjoin_plan(PlannerInfo *root, HashPath *best_path);
-static Node *replace_nestloop_params(PlannerInfo *root, Node *expr);
 static Node *replace_nestloop_params_mutator(Node *node, PlannerInfo *root);
 static void fix_indexqual_references(PlannerInfo *root, IndexPath *index_path,
 									 List **stripped_indexquals_p,
@@ -1084,7 +1083,7 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	List	   *subplans = NIL;
 	ListCell   *subpaths;
 	RelOptInfo *rel = best_path->path.parent;
-	PartitionPruneInfo *partpruneinfo = NULL;
+	ParamPathInfo *param_info = best_path->path.param_info;
 	int			nodenumsortkeys = 0;
 	AttrNumber *nodeSortColIdx = NULL;
 	Oid		   *nodeSortOperators = NULL;
@@ -1222,41 +1221,12 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 		subplans = lappend(subplans, subplan);
 	}
 
-	/*
-	 * If any quals exist, they may be useful to perform further partition
-	 * pruning during execution.  Gather information needed by the executor to
-	 * do partition pruning.
-	 */
-	if (enable_partition_pruning &&
-		rel->reloptkind == RELOPT_BASEREL &&
-		best_path->partitioned_rels != NIL)
-	{
-		List	   *prunequal;
-
-		prunequal = extract_actual_clauses(rel->baserestrictinfo, false);
-
-		if (best_path->path.param_info)
-		{
-			List	   *prmquals = best_path->path.param_info->ppi_clauses;
-
-			prmquals = extract_actual_clauses(prmquals, false);
-			prmquals = (List *) replace_nestloop_params(root,
-														(Node *) prmquals);
-
-			prunequal = list_concat(prunequal, prmquals);
-		}
-
-		if (prunequal != NIL)
-			partpruneinfo =
-				make_partition_pruneinfo(root, rel,
-										 best_path->subpaths,
-										 best_path->partitioned_rels,
-										 prunequal);
-	}
-
 	plan->appendplans = subplans;
 	plan->first_partial_plan = best_path->first_partial_path;
-	plan->part_prune_info = partpruneinfo;
+	plan->part_prune_info =
+		finalize_partition_pruneinfo(root, rel,
+									 param_info ? param_info->ppi_req_outer :
+									 NULL);
 
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
 
@@ -1296,7 +1266,7 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 	List	   *subplans = NIL;
 	ListCell   *subpaths;
 	RelOptInfo *rel = best_path->path.parent;
-	PartitionPruneInfo *partpruneinfo = NULL;
+	ParamPathInfo *param_info = best_path->path.param_info;
 
 	/*
 	 * We don't have the actual creation of the MergeAppend node split out
@@ -1389,39 +1359,11 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 		subplans = lappend(subplans, subplan);
 	}
 
-	/*
-	 * If any quals exist, they may be useful to perform further partition
-	 * pruning during execution.  Gather information needed by the executor to
-	 * do partition pruning.
-	 */
-	if (enable_partition_pruning &&
-		rel->reloptkind == RELOPT_BASEREL &&
-		best_path->partitioned_rels != NIL)
-	{
-		List	   *prunequal;
-
-		prunequal = extract_actual_clauses(rel->baserestrictinfo, false);
-
-		if (best_path->path.param_info)
-		{
-			List	   *prmquals = best_path->path.param_info->ppi_clauses;
-
-			prmquals = extract_actual_clauses(prmquals, false);
-			prmquals = (List *) replace_nestloop_params(root,
-														(Node *) prmquals);
-
-			prunequal = list_concat(prunequal, prmquals);
-		}
-
-		if (prunequal != NIL)
-			partpruneinfo = make_partition_pruneinfo(root, rel,
-													 best_path->subpaths,
-													 best_path->partitioned_rels,
-													 prunequal);
-	}
-
 	node->mergeplans = subplans;
-	node->part_prune_info = partpruneinfo;
+	node->part_prune_info =
+		finalize_partition_pruneinfo(root, rel,
+									 param_info ? param_info->ppi_req_outer :
+									 NULL);
 
 	/*
 	 * If prepare_sort_from_pathkeys added sort columns, but we were told to
@@ -4659,8 +4601,10 @@ create_hashjoin_plan(PlannerInfo *root,
  * All Vars and PlaceHolderVars belonging to the relation(s) identified by
  * root->curOuterRels are replaced by Params, and entries are added to
  * root->curOuterParams if not already present.
+ *
+ * Exported for use in finalize_partition_pruneinfo().
  */
-static Node *
+Node *
 replace_nestloop_params(PlannerInfo *root, Node *expr)
 {
 	/* No setup needed for tree walk, so away we go */

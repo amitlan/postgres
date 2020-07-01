@@ -753,6 +753,9 @@ typedef struct RelOptInfo
 	List	  **partexprs;		/* Non-nullable partition key expressions */
 	List	  **nullable_partexprs; /* Nullable partition key expressions */
 	List	   *partitioned_child_rels; /* List of RT indexes */
+
+	/* Runtime pruning information */
+	struct PartitionPruneInfo *runtime_pruneinfo;
 } RelOptInfo;
 
 /*

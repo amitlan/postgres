@@ -72,7 +72,9 @@ extern PartitionPruneInfo *make_partition_pruneinfo(struct PlannerInfo *root,
 													struct RelOptInfo *parentrel,
 													List *subpaths,
 													List *partitioned_rels,
-													List *prunequal);
+													Bitmapset *required_outer);
+extern PartitionPruneInfo *finalize_partition_pruneinfo(struct PlannerInfo *root,
+						   struct RelOptInfo *rel, Bitmapset *outer_relids);
 extern Bitmapset *prune_append_rel_partitions(struct RelOptInfo *rel);
 extern Bitmapset *get_matching_partitions(PartitionPruneContext *context,
 										  List *pruning_steps);
