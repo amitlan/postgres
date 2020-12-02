@@ -67,6 +67,7 @@ preprocess_targetlist(PlannerInfo *root)
 	CmdType		command_type = parse->commandType;
 	RangeTblEntry *target_rte = NULL;
 	Relation	target_relation = NULL;
+	Relation	merge_relation = NULL;
 	List	   *tlist;
 	ListCell   *lc;
 
@@ -122,6 +123,36 @@ preprocess_targetlist(PlannerInfo *root)
 		add_row_identity_columns(root, result_relation,
 								 target_rte, target_relation);
 		tlist = root->processed_tlist;
+	}
+
+	if (command_type == CMD_MERGE)
+	{
+		ListCell   *l;
+
+		/*
+		 * For MERGE, add any junk column(s) needed to allow the executor to
+		 * identify the rows to be inserted or updated.
+		 */
+		root->processed_tlist = tlist;
+		add_row_identity_columns(root, result_relation,
+								 target_rte, target_relation);
+
+		tlist = root->processed_tlist;
+
+		/*
+		 * For MERGE, handle targetlist of each MergeAction separately. Give
+		 * the same treatment to MergeAction->targetList as we would have given
+		 * to a regular INSERT.  We don't know to do anything for UPDATE.
+		 */
+		foreach(l, parse->mergeActionList)
+		{
+			MergeAction *action = (MergeAction *) lfirst(l);
+
+			if (action->commandType == CMD_INSERT)
+				action->targetList = expand_insert_targetlist(action->targetList,
+															  target_relation);
+		}
+
 	}
 
 	/*
@@ -241,6 +272,8 @@ preprocess_targetlist(PlannerInfo *root)
 
 	if (target_relation)
 		table_close(target_relation, NoLock);
+	if (merge_relation)
+		table_close(merge_relation, NoLock);
 }
 
 /*

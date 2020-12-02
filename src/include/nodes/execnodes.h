@@ -383,6 +383,36 @@ typedef struct OnConflictSetState
 	ExprState  *oc_WhereClause; /* state for the WHERE clause */
 } OnConflictSetState;
 
+
+/* ----------------
+ *	 MergeActionState information
+ *
+ *	Global info for a MERGE action.
+ * ----------------
+ */
+typedef struct MergeActionState
+{
+	NodeTag		type;
+
+	MergeAction *mas_action;	/* associated MergeAction node */
+} MergeActionState;
+
+/*
+ * RelMergeActionState
+ *
+ * Per-relation info for a MERGE action.
+ */
+typedef struct RelMergeActionState
+{
+	NodeTag		type;
+
+	MergeActionState *rmas_global;	/* XXX better name? */
+	ProjectionInfo *rmas_proj;	/* projection of the action's targetlist for
+								 * this rel */
+	TupleTableSlot *rmas_mergeslot; /* target slot for the projection */
+	ExprState  *rmas_whenqual;	/* WHEN AND conditions */
+} RelMergeActionState;
+
 /*
  * ResultRelInfo
  *
@@ -524,7 +554,38 @@ typedef struct ResultRelInfo
 
 	/* for use by copyfrom.c when performing multi-inserts */
 	struct CopyMultiInsertBuffer *ri_CopyMultiInsertBuffer;
+
+	TupleTableSlot *ri_mergeTuple;	/* for EPQ during MERGE */
+	List	   *ri_matchedMergeAction;	/* of RelMergeActionState */
+	List	   *ri_notMatchedMergeAction;	/* of RelMergeActionState */
+
+	/*
+	 * While executing MERGE, the target relation is processed twice; once as
+	 * a target relation and once to run a join between the target and the
+	 * source. We generate two different RTEs for these two purposes, one with
+	 * rte->inh set to false and other with rte->inh set to true.
+	 *
+	 * Since the plan re-evaluated by EvalPlanQual uses the join RTE, we must
+	 * install the updated tuple in the scan corresponding to that RTE. The
+	 * following member tracks the index of the second RTE for EvalPlanQual
+	 * purposes. ri_mergeTargetRTI is non-zero only when MERGE is in-progress.
+	 * We use ri_mergeTargetRTI to run EvalPlanQual for MERGE and
+	 * ri_RangeTableIndex elsewhere.
+	 */
+	Index		ri_mergeTargetRTI;
 } ResultRelInfo;
+
+/*
+ * Get the Range table index for EvalPlanQual.
+ *
+ * We use the ri_mergeTargetRTI if set, otherwise use ri_RangeTableIndex.
+ * ri_mergeTargetRTI should really be ever set iff we're running MERGE.
+ */
+/* XXX this macro is not really necessary */
+#define GetEPQRangeTableIndex(r) \
+	(((r)->ri_mergeTargetRTI > 0)  \
+	 ? (r)->ri_mergeTargetRTI \
+	 : (r)->ri_RangeTableIndex)
 
 /* ----------------
  *	  AsyncRequest
@@ -1077,6 +1138,11 @@ typedef struct PlanState
 		if (((PlanState *)(node))->instrument) \
 			((PlanState *)(node))->instrument->nfiltered2 += (delta); \
 	} while(0)
+#define InstrCountFiltered3(node, delta) \
+	do { \
+		if (((PlanState *)(node))->instrument) \
+			((PlanState *)(node))->instrument->nfiltered3 += (delta); \
+	} while(0)
 
 /*
  * EPQState is state for executing an EvalPlanQual recheck on a candidate
@@ -1178,6 +1244,13 @@ typedef struct ProjectSetState
 	MemoryContext argcontext;	/* context for SRF arguments */
 } ProjectSetState;
 
+typedef struct MergeState
+{
+	NodeTag		type;
+	/* List of MergeActionState actions */
+	List	   *actionStates;
+} MergeState;
+
 /* ----------------
  *	 ModifyTableState information
  * ----------------
@@ -1185,7 +1258,7 @@ typedef struct ProjectSetState
 typedef struct ModifyTableState
 {
 	PlanState	ps;				/* its first field is NodeTag */
-	CmdType		operation;		/* INSERT, UPDATE, or DELETE */
+	CmdType		operation;		/* INSERT, UPDATE, DELETE or MERGE */
 	bool		canSetTag;		/* do we set the command tag/es_processed? */
 	bool		mt_done;		/* are we done? */
 	int			mt_nrels;		/* number of entries in resultRelInfo[] */
@@ -1227,6 +1300,12 @@ typedef struct ModifyTableState
 
 	/* controls transition table population for INSERT...ON CONFLICT UPDATE */
 	struct TransitionCaptureState *mt_oc_transition_capture;
+
+	/* State for MERGE */
+	MergeState *mt_mergeState;
+
+	/* Flags showing which subcommands are present INS/UPD/DEL/DO NOTHING */
+	int			mt_merge_subcommands;
 } ModifyTableState;
 
 /* ----------------

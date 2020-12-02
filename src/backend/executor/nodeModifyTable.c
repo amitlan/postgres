@@ -41,6 +41,7 @@
 #include "commands/trigger.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
+#include "executor/execMerge.h"
 #include "executor/nodeModifyTable.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
@@ -75,12 +76,6 @@ static bool ExecOnConflictUpdate(ModifyTableState *mtstate,
 								 EState *estate,
 								 bool canSetTag,
 								 TupleTableSlot **returning);
-static TupleTableSlot *ExecPrepareTupleRouting(ModifyTableState *mtstate,
-											   EState *estate,
-											   PartitionTupleRouting *proute,
-											   ResultRelInfo *targetRelInfo,
-											   TupleTableSlot *slot,
-											   ResultRelInfo **partRelInfo);
 
 /*
  * Verify that the tuples to be produced by INSERT match the
@@ -97,7 +92,7 @@ static TupleTableSlot *ExecPrepareTupleRouting(ModifyTableState *mtstate,
  * We used to use this for UPDATE as well, but now the equivalent checks
  * are done in ExecBuildUpdateProjection.
  */
-static void
+void
 ExecCheckPlanOutput(Relation resultRel, List *targetList)
 {
 	TupleDesc	resultDesc = RelationGetDescr(resultRel);
@@ -590,12 +585,13 @@ ExecGetUpdateNewTuple(ResultRelInfo *relinfo,
  *		save the previous value to avoid losing track of it.
  * ----------------------------------------------------------------
  */
-static TupleTableSlot *
+TupleTableSlot *
 ExecInsert(ModifyTableState *mtstate,
 		   ResultRelInfo *resultRelInfo,
 		   TupleTableSlot *slot,
 		   TupleTableSlot *planSlot,
 		   EState *estate,
+		   MergeActionState *actionState,
 		   bool canSetTag)
 {
 	Relation	resultRelationDesc;
@@ -784,9 +780,17 @@ ExecInsert(ModifyTableState *mtstate,
 		 * partition, we should instead check UPDATE policies, because we are
 		 * executing policies defined on the target table, and not those
 		 * defined on the child partitions.
+		 *
+		 * If we're running MERGE, we refer to the action that we're executing
+		 * to know if we're doing an INSERT or UPDATE to a partition table.
 		 */
-		wco_kind = (mtstate->operation == CMD_UPDATE) ?
-			WCO_RLS_UPDATE_CHECK : WCO_RLS_INSERT_CHECK;
+		if (mtstate->operation == CMD_UPDATE)
+			wco_kind = WCO_RLS_UPDATE_CHECK;
+		else if (mtstate->operation == CMD_MERGE)
+			wco_kind = (actionState->mas_action->commandType == CMD_UPDATE) ?
+				WCO_RLS_UPDATE_CHECK : WCO_RLS_INSERT_CHECK;
+		else
+			wco_kind = WCO_RLS_INSERT_CHECK;
 
 		/*
 		 * ExecWithCheckOptions() will skip any WCOs which are not of the kind
@@ -1074,10 +1078,19 @@ ExecBatchInsert(ModifyTableState *mtstate,
  *		part of an UPDATE of partition-key, then the slot returned by
  *		EvalPlanQual() is passed back using output parameter epqslot.
  *
+ *		MERGE passes actionState of the action it's currently executing;
+ *		regular DELETE passes NULL. This is used by ExecDelete to know if it's
+ *		being called from MERGE or regular DELETE operation.
+ *
+ *		If the DELETE fails because the tuple is concurrently updated/deleted
+ *		by this or some other transaction, tmfdp is filled with the reason as
+ *		well as other important information. Currently only MERGE needs this
+ *		information.
+ *
  *		Returns RETURNING result if any, otherwise NULL.
  * ----------------------------------------------------------------
  */
-static TupleTableSlot *
+TupleTableSlot *
 ExecDelete(ModifyTableState *mtstate,
 		   ResultRelInfo *resultRelInfo,
 		   ItemPointer tupleid,
@@ -1088,6 +1101,8 @@ ExecDelete(ModifyTableState *mtstate,
 		   bool processReturning,
 		   bool canSetTag,
 		   bool changingPart,
+		   TM_FailureData *tmfdp,
+		   MergeActionState *actionState,
 		   bool *tupleDeleted,
 		   TupleTableSlot **epqreturnslot)
 {
@@ -1100,6 +1115,14 @@ ExecDelete(ModifyTableState *mtstate,
 	if (tupleDeleted)
 		*tupleDeleted = false;
 
+	/*
+	 * Initialize tmfdp. Since the caller is only interested in the failure
+	 * status, initialize with the state that is used to indicate successful
+	 * operation.
+	 */
+	if (tmfdp)
+		tmfdp->result = TM_Ok;
+
 	/* BEFORE ROW DELETE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
 		resultRelInfo->ri_TrigDesc->trig_delete_before_row)
@@ -1107,7 +1130,7 @@ ExecDelete(ModifyTableState *mtstate,
 		bool		dodelete;
 
 		dodelete = ExecBRDeleteTriggers(estate, epqstate, resultRelInfo,
-										tupleid, oldtuple, epqreturnslot);
+										tupleid, oldtuple, epqreturnslot, tmfdp);
 
 		if (!dodelete)			/* "do nothing" */
 			return NULL;
@@ -1171,6 +1194,14 @@ ldelete:;
 									&tmfd,
 									changingPart);
 
+		/*
+		 * Copy the necessary information, if the caller has asked for it. We
+		 * must do this irrespective of whether the tuple was updated or
+		 * deleted.
+		 */
+		if (tmfdp)
+			*tmfdp = tmfd;
+
 		switch (result)
 		{
 			case TM_SelfModified:
@@ -1205,7 +1236,11 @@ ldelete:;
 							 errmsg("tuple to be deleted was already modified by an operation triggered by the current command"),
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
-				/* Else, already deleted by self; nothing to do */
+				/*
+				 * Else, already deleted by self; nothing to do but inform
+				 * MERGE about it anyways so that it can take necessary
+				 * action.
+				 */
 				return NULL;
 
 			case TM_Ok:
@@ -1220,6 +1255,14 @@ ldelete:;
 						ereport(ERROR,
 								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 								 errmsg("could not serialize access due to concurrent update")));
+
+					/*
+					 * If we're executing MERGE, then the onus of running
+					 * EvalPlanQual() and handling its outcome lies with the
+					 * caller.
+					 */
+					if (actionState != NULL)
+						return NULL;
 
 					/*
 					 * Already know that we're going to need to do EPQ, so
@@ -1310,7 +1353,12 @@ ldelete:;
 					ereport(ERROR,
 							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 							 errmsg("could not serialize access due to concurrent delete")));
-				/* tuple already deleted; nothing to do */
+
+				/*
+				 * tuple already deleted; nothing to do. But MERGE might want
+				 * to handle it differently. We've already filled-in tmfdp
+				 * with sufficient information for MERGE to look at.
+				 */
 				return NULL;
 
 			default:
@@ -1432,6 +1480,8 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 						 ItemPointer tupleid, HeapTuple oldtuple,
 						 TupleTableSlot *slot, TupleTableSlot *planSlot,
 						 EPQState *epqstate, bool canSetTag,
+						 TM_FailureData *tmfdp,
+						 MergeActionState *actionState,
 						 TupleTableSlot **retry_slot,
 						 TupleTableSlot **inserted_tuple)
 {
@@ -1493,6 +1543,7 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 			   false,			/* processReturning */
 			   false,			/* canSetTag */
 			   true,			/* changingPart */
+			   tmfdp, actionState,
 			   &tuple_deleted, &epqslot);
 
 	/*
@@ -1557,7 +1608,7 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 
 	/* Tuple routing starts from the root table. */
 	*inserted_tuple = ExecInsert(mtstate, mtstate->rootResultRelInfo, slot,
-								 planSlot, estate, canSetTag);
+								 planSlot, estate, actionState, canSetTag);
 
 	/*
 	 * Reset the transition state that may possibly have been written by
@@ -1594,10 +1645,21 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
  *		to access values from other input tables (for RETURNING),
  *		row-ID junk columns, etc.
  *
+ *		MERGE passes actionState of the action it's currently executing;
+ *		regular UPDATE passes NULL. This is used by ExecUpdate to know if it's
+ *		being called from MERGE or regular UPDATE operation. ExecUpdate may
+ *		pass this information to ExecInsert if it ends up running DELETE+INSERT
+ *		for partition key updates.
+ *
+ *		If the UPDATE fails because the tuple is concurrently updated/deleted
+ *		by this or some other transaction, tmfdp is filled with the reason as
+ *		well as other important information. Currently only MERGE needs this
+ *		information.
+ *
  *		Returns RETURNING result if any, otherwise NULL.
  * ----------------------------------------------------------------
  */
-static TupleTableSlot *
+TupleTableSlot *
 ExecUpdate(ModifyTableState *mtstate,
 		   ResultRelInfo *resultRelInfo,
 		   ItemPointer tupleid,
@@ -1606,6 +1668,9 @@ ExecUpdate(ModifyTableState *mtstate,
 		   TupleTableSlot *planSlot,
 		   EPQState *epqstate,
 		   EState *estate,
+		   bool *tuple_updated,
+		   TM_FailureData *tmfdp,
+		   MergeActionState *actionState,
 		   bool canSetTag)
 {
 	Relation	resultRelationDesc = resultRelInfo->ri_RelationDesc;
@@ -1618,6 +1683,17 @@ ExecUpdate(ModifyTableState *mtstate,
 	 */
 	if (IsBootstrapProcessingMode())
 		elog(ERROR, "cannot UPDATE during bootstrap");
+
+	if (tuple_updated)
+		*tuple_updated = false;
+
+	/*
+	 * Initialize tmfdp. Since the caller is only interested in the failure
+	 * status, initialize with the state that is used to indicate successful
+	 * operation.
+	 */
+	if (tmfdp)
+		tmfdp->result = TM_Ok;
 
 	ExecMaterializeSlot(slot);
 
@@ -1634,7 +1710,7 @@ ExecUpdate(ModifyTableState *mtstate,
 		resultRelInfo->ri_TrigDesc->trig_update_before_row)
 	{
 		if (!ExecBRUpdateTriggers(estate, epqstate, resultRelInfo,
-								  tupleid, oldtuple, slot))
+								  tupleid, oldtuple, slot, tmfdp))
 			return NULL;		/* "do nothing" */
 	}
 
@@ -1682,7 +1758,6 @@ ExecUpdate(ModifyTableState *mtstate,
 	}
 	else
 	{
-		LockTupleMode lockmode;
 		bool		partition_constraint_failed;
 		bool		update_indexes;
 
@@ -1756,6 +1831,7 @@ lreplace:;
 			retry = !ExecCrossPartitionUpdate(mtstate, resultRelInfo, tupleid,
 											  oldtuple, slot, planSlot,
 											  epqstate, canSetTag,
+											  tmfdp, actionState,
 											  &retry_slot, &inserted_tuple);
 			if (retry)
 			{
@@ -1789,7 +1865,16 @@ lreplace:;
 									estate->es_snapshot,
 									estate->es_crosscheck_snapshot,
 									true /* wait for commit */ ,
-									&tmfd, &lockmode, &update_indexes);
+									&tmfd, &tmfd.lockmode,	/* XXX redundant arg */
+									&update_indexes);
+
+		/*
+		 * Copy the necessary information, if the caller has asked for it. We
+		 * must do this irrespective of whether the tuple was updated or
+		 * deleted.
+		 */
+		if (tmfdp)
+			*tmfdp = tmfd;
 
 		switch (result)
 		{
@@ -1842,6 +1927,14 @@ lreplace:;
 								 errmsg("could not serialize access due to concurrent update")));
 
 					/*
+					 * If we're executing MERGE, then the onus of running
+					 * EvalPlanQual() and handling its outcome lies with the
+					 * caller.
+					 */
+					if (actionState != NULL)
+						return NULL;
+
+					/*
 					 * Already know that we're going to need to do EPQ, so
 					 * fetch tuple directly into the right slot.
 					 */
@@ -1851,7 +1944,7 @@ lreplace:;
 					result = table_tuple_lock(resultRelationDesc, tupleid,
 											  estate->es_snapshot,
 											  inputslot, estate->es_output_cid,
-											  lockmode, LockWaitBlock,
+											  tmfd.lockmode, LockWaitBlock,
 											  TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 											  &tmfd);
 
@@ -1922,7 +2015,12 @@ lreplace:;
 					ereport(ERROR,
 							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 							 errmsg("could not serialize access due to concurrent delete")));
-				/* tuple already deleted; nothing to do */
+
+				/*
+				 * tuple already deleted; nothing to do. But MERGE might want
+				 * to handle it differently. We've already filled-in tmfdp
+				 * with sufficient information for MERGE to look at.
+				 */
 				return NULL;
 
 			default:
@@ -1937,6 +2035,9 @@ lreplace:;
 												   slot, estate, true, false,
 												   NULL, NIL);
 	}
+
+	if (tuple_updated)
+		*tuple_updated = true;
 
 	if (canSetTag)
 		(estate->es_processed)++;
@@ -2035,9 +2136,9 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 			 * to break.
 			 *
 			 * It is the user's responsibility to prevent this situation from
-			 * occurring.  These problems are why SQL-2003 similarly specifies
-			 * that for SQL MERGE, an exception must be raised in the event of
-			 * an attempt to update the same row twice.
+			 * occurring.  These problems are why SQL Standard similarly
+			 * specifies that for SQL MERGE, an exception must be raised in
+			 * the event of an attempt to update the same row twice.
 			 */
 			xminDatum = slot_getsysattr(existing,
 										MinTransactionIdAttributeNumber,
@@ -2178,7 +2279,7 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 							resultRelInfo->ri_onConflict->oc_ProjSlot,
 							planSlot,
 							&mtstate->mt_epqstate, mtstate->ps.state,
-							canSetTag);
+							NULL, NULL, NULL, canSetTag);
 
 	/*
 	 * Clear out existing tuple, as there might not be another conflict among
@@ -2213,6 +2314,14 @@ fireBSTriggers(ModifyTableState *node)
 		case CMD_DELETE:
 			ExecBSDeleteTriggers(node->ps.state, resultRelInfo);
 			break;
+		case CMD_MERGE:
+			if (node->mt_merge_subcommands & MERGE_INSERT)
+				ExecBSInsertTriggers(node->ps.state, resultRelInfo);
+			if (node->mt_merge_subcommands & MERGE_UPDATE)
+				ExecBSUpdateTriggers(node->ps.state, resultRelInfo);
+			if (node->mt_merge_subcommands & MERGE_DELETE)
+				ExecBSDeleteTriggers(node->ps.state, resultRelInfo);
+			break;
 		default:
 			elog(ERROR, "unknown operation");
 			break;
@@ -2245,6 +2354,17 @@ fireASTriggers(ModifyTableState *node)
 		case CMD_DELETE:
 			ExecASDeleteTriggers(node->ps.state, resultRelInfo,
 								 node->mt_transition_capture);
+			break;
+		case CMD_MERGE:
+			if (node->mt_merge_subcommands & MERGE_DELETE)
+				ExecASDeleteTriggers(node->ps.state, resultRelInfo,
+									 node->mt_transition_capture);
+			if (node->mt_merge_subcommands & MERGE_UPDATE)
+				ExecASUpdateTriggers(node->ps.state, resultRelInfo,
+									 node->mt_transition_capture);
+			if (node->mt_merge_subcommands & MERGE_INSERT)
+				ExecASInsertTriggers(node->ps.state, resultRelInfo,
+									 node->mt_transition_capture);
 			break;
 		default:
 			elog(ERROR, "unknown operation");
@@ -2285,7 +2405,7 @@ ExecSetupTransitionCaptureState(ModifyTableState *mtstate, EState *estate)
  * This also sets the transition table information in mtstate based on the
  * selected partition.
  */
-static TupleTableSlot *
+TupleTableSlot *
 ExecPrepareTupleRouting(ModifyTableState *mtstate,
 						EState *estate,
 						PartitionTupleRouting *proute,
@@ -2473,6 +2593,12 @@ ExecModifyTable(PlanState *pstate)
 		EvalPlanQualSetSlot(&node->mt_epqstate, planSlot);
 		slot = planSlot;
 
+		if (operation == CMD_MERGE)
+		{
+			ExecMerge(node, resultRelInfo, estate, slot);
+			continue;
+		}
+
 		tupleid = NULL;
 		oldtuple = NULL;
 
@@ -2559,7 +2685,7 @@ ExecModifyTable(PlanState *pstate)
 					ExecInitInsertProjection(node, resultRelInfo);
 				slot = ExecGetInsertNewTuple(resultRelInfo, planSlot);
 				slot = ExecInsert(node, resultRelInfo, slot, planSlot,
-								  estate, node->canSetTag);
+								  estate, NULL, node->canSetTag);
 				break;
 			case CMD_UPDATE:
 				/* Initialize projection info if first time for this table */
@@ -2593,7 +2719,7 @@ ExecModifyTable(PlanState *pstate)
 				/* Now apply the update. */
 				slot = ExecUpdate(node, resultRelInfo, tupleid, oldtuple, slot,
 								  planSlot, &node->mt_epqstate, estate,
-								  node->canSetTag);
+								  NULL, NULL, NULL, node->canSetTag);
 				break;
 			case CMD_DELETE:
 				slot = ExecDelete(node, resultRelInfo, tupleid, oldtuple,
@@ -2601,7 +2727,7 @@ ExecModifyTable(PlanState *pstate)
 								  true, /* processReturning */
 								  node->canSetTag,
 								  false,	/* changingPart */
-								  NULL, NULL);
+								  NULL, NULL, NULL, NULL);
 				break;
 			default:
 				elog(ERROR, "unknown operation");
@@ -2781,6 +2907,16 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 * FDWs expect their ResultRelInfos to be available.
 	 */
 	resultRelInfo = mtstate->resultRelInfo;
+
+	/*
+	 * mergeTargetRelation must be set if we're running MERGE and mustn't be
+	 * set if we're not.
+	 */
+	Assert(operation != CMD_MERGE || node->mergeTargetRelation > 0);
+	Assert(operation == CMD_MERGE || node->mergeTargetRelation == 0);
+
+	resultRelInfo->ri_mergeTargetRTI = node->mergeTargetRelation;
+
 	i = 0;
 	foreach(l, node->resultRelations)
 	{
@@ -2800,8 +2936,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		}
 
 		/* Initialize the usesFdwDirectModify flag */
-		resultRelInfo->ri_usesFdwDirectModify = bms_is_member(i,
-															  node->fdwDirectModifyPlans);
+		resultRelInfo->ri_usesFdwDirectModify =
+			bms_is_member(i, node->fdwDirectModifyPlans);
 
 		/*
 		 * Verify result relation is a valid target for the current operation
@@ -2839,12 +2975,13 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		}
 
 		/*
-		 * For UPDATE/DELETE, find the appropriate junk attr now, either a
-		 * 'ctid' or 'wholerow' attribute depending on relkind.  For foreign
+		 * For UPDATE/DELETE/MERGE, find the appropriate junk attr now, either
+		 * a 'ctid' or 'wholerow' attribute depending on relkind.  For foreign
 		 * tables, the FDW might have created additional junk attr(s), but
 		 * those are no concern of ours.
 		 */
-		if (operation == CMD_UPDATE || operation == CMD_DELETE)
+		if (operation == CMD_UPDATE || operation == CMD_DELETE ||
+			operation == CMD_MERGE)
 		{
 			char		relkind;
 
@@ -2861,19 +2998,28 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 			else if (relkind == RELKIND_FOREIGN_TABLE)
 			{
 				/*
+				 * We don't support MERGE with foreign tables for now.  (It's
+				 * problematic because the implementation uses CTID.)
+				 */
+				Assert(operation != CMD_MERGE);
+
+				/*
 				 * When there is a row-level trigger, there should be a
 				 * wholerow attribute.  We also require it to be present in
-				 * UPDATE, so we can get the values of unchanged columns.
+				 * UPDATE and MERGE, so we can get the values of unchanged
+				 * columns.
 				 */
 				resultRelInfo->ri_RowIdAttNo =
 					ExecFindJunkAttributeInTlist(subplan->targetlist,
 												 "wholerow");
-				if (mtstate->operation == CMD_UPDATE &&
+				if ((mtstate->operation == CMD_UPDATE || mtstate->operation == CMD_MERGE) &&
 					!AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo))
 					elog(ERROR, "could not find junk wholerow column");
 			}
 			else
 			{
+				/* No support for MERGE */
+				Assert(operation != CMD_MERGE);
 				/* Other valid target relkinds must provide wholerow */
 				resultRelInfo->ri_RowIdAttNo =
 					ExecFindJunkAttributeInTlist(subplan->targetlist,
@@ -2885,10 +3031,10 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	}
 
 	/*
-	 * If this is an inherited update/delete, there will be a junk attribute
-	 * named "tableoid" present in the subplan's targetlist.  It will be used
-	 * to identify the result relation for a given tuple to be
-	 * updated/deleted.
+	 * If this is an inherited update/delete/merge, there will be a junk
+	 * attribute named "tableoid" present in the subplan's targetlist.  It
+	 * will be used to identify the result relation for a given tuple to be
+	 * updated/deleted/merged.
 	 */
 	mtstate->mt_resultOidAttno =
 		ExecFindJunkAttributeInTlist(subplan->targetlist, "tableoid");
@@ -2901,8 +3047,9 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 
 	/*
 	 * Build state for tuple routing if it's a partitioned INSERT.  An UPDATE
-	 * might need this too, but only if it actually moves tuples between
-	 * partitions; in that case setup is done by ExecCrossPartitionUpdate.
+	 * or MERGE might need this too, but only if it actually moves tuples
+	 * between partitions; in that case setup is done by
+	 * ExecCrossPartitionUpdate.
 	 */
 	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
 		operation == CMD_INSERT)
@@ -3070,6 +3217,11 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		aerm = ExecBuildAuxRowMark(erm, subplan->targetlist);
 		arowmarks = lappend(arowmarks, aerm);
 	}
+
+	/* For a MERGE command, initialize its state */
+	/* FIXME -- ...?? */
+	if (mtstate->operation == CMD_MERGE)
+		ExecInitMerge(mtstate, estate);
 
 	EvalPlanQualSetPlan(&mtstate->mt_epqstate, subplan, arowmarks);
 

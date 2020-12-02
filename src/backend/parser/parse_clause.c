@@ -72,9 +72,6 @@ static TableSampleClause *transformRangeTableSample(ParseState *pstate,
 													RangeTableSample *rts);
 static ParseNamespaceItem *getNSItemForSpecialRelationTypes(ParseState *pstate,
 															RangeVar *rv);
-static Node *transformFromClauseItem(ParseState *pstate, Node *n,
-									 ParseNamespaceItem **top_nsitem,
-									 List **namespace);
 static Var *buildVarFromNSColumn(ParseNamespaceColumn *nscol);
 static Node *buildMergedJoinVar(ParseState *pstate, JoinType jointype,
 								Var *l_colvar, Var *r_colvar);
@@ -131,6 +128,7 @@ transformFromClause(ParseState *pstate, List *frmList)
 
 		n = transformFromClauseItem(pstate, n,
 									&nsitem,
+									NULL,
 									&namespace);
 
 		checkNameSpaceConflicts(pstate, pstate->p_namespace, namespace);
@@ -1043,16 +1041,21 @@ getNSItemForSpecialRelationTypes(ParseState *pstate, RangeVar *rv)
  *
  * *top_nsitem: receives the ParseNamespaceItem directly corresponding to the
  * jointree item.  (This is only used during internal recursion, not by
- * outside callers.)
+ * outside callers, XXX except MERGE.)
  *
- * *namespace: receives a List of ParseNamespaceItems for the RTEs exposed
+ * *right_nsitem: receives the ParseNamespaceItem corresponding to the right
+ * side of the jointree. Only MERGE really needs to know about this and only
+ * MERGE passes a non-NULL pointer.
+ *
+ * *fnamespace: receives a List of ParseNamespaceItems for the RTEs exposed
  * as table/column names by this item.  (The lateral_only flags in these items
  * are indeterminate and should be explicitly set by the caller before use.)
  */
-static Node *
+Node *
 transformFromClauseItem(ParseState *pstate, Node *n,
 						ParseNamespaceItem **top_nsitem,
-						List **namespace)
+						ParseNamespaceItem **right_nsitem,
+						List **fnamespace)
 {
 	if (IsA(n, RangeVar))
 	{
@@ -1069,10 +1072,21 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 			nsitem = transformTableEntry(pstate, rv);
 
 		*top_nsitem = nsitem;
-		*namespace = list_make1(nsitem);
+		*fnamespace = list_make1(nsitem);
 		rtr = makeNode(RangeTblRef);
 		rtr->rtindex = nsitem->p_rtindex;
 		return (Node *) rtr;
+	}
+	else if (IsA(n, RangeTblRef))
+	{
+		RangeTblRef *rtr = (RangeTblRef *) n;
+		ParseNamespaceItem *nsitem;
+
+		nsitem = buildNSItemFromRangeTblRef(pstate, rtr);
+
+		*top_nsitem = nsitem;
+		*fnamespace = list_make1(nsitem);
+		return n;
 	}
 	else if (IsA(n, RangeSubselect))
 	{
@@ -1082,7 +1096,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 
 		nsitem = transformRangeSubselect(pstate, (RangeSubselect *) n);
 		*top_nsitem = nsitem;
-		*namespace = list_make1(nsitem);
+		*fnamespace = list_make1(nsitem);
 		rtr = makeNode(RangeTblRef);
 		rtr->rtindex = nsitem->p_rtindex;
 		return (Node *) rtr;
@@ -1095,7 +1109,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 
 		nsitem = transformRangeFunction(pstate, (RangeFunction *) n);
 		*top_nsitem = nsitem;
-		*namespace = list_make1(nsitem);
+		*fnamespace = list_make1(nsitem);
 		rtr = makeNode(RangeTblRef);
 		rtr->rtindex = nsitem->p_rtindex;
 		return (Node *) rtr;
@@ -1108,7 +1122,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 
 		nsitem = transformRangeTableFunc(pstate, (RangeTableFunc *) n);
 		*top_nsitem = nsitem;
-		*namespace = list_make1(nsitem);
+		*fnamespace = list_make1(nsitem);
 		rtr = makeNode(RangeTblRef);
 		rtr->rtindex = nsitem->p_rtindex;
 		return (Node *) rtr;
@@ -1122,7 +1136,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 
 		/* Recursively transform the contained relation */
 		rel = transformFromClauseItem(pstate, rts->relation,
-									  top_nsitem, namespace);
+									  top_nsitem, NULL, fnamespace);
 		rte = (*top_nsitem)->p_rte;
 		/* We only support this on plain relations and matviews */
 		if (rte->rtekind != RTE_RELATION ||
@@ -1148,6 +1162,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		List	   *l_namespace,
 				   *r_namespace,
 				   *my_namespace,
+				   *save_namespace,
 				   *l_colnames,
 				   *r_colnames,
 				   *res_colnames,
@@ -1168,6 +1183,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		 */
 		j->larg = transformFromClauseItem(pstate, j->larg,
 										  &l_nsitem,
+										  NULL,
 										  &l_namespace);
 
 		/*
@@ -1188,10 +1204,32 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		sv_namespace_length = list_length(pstate->p_namespace);
 		pstate->p_namespace = list_concat(pstate->p_namespace, l_namespace);
 
+		/*
+		 * If we are running MERGE, don't make the other RTEs visible while
+		 * parsing the source relation. It mustn't see them.
+		 *
+		 * Currently, only MERGE passes non-NULL value for right_nsitem, so we
+		 * can safely deduce if we're running MERGE or not by just looking at
+		 * the right_nsitem. If that ever changes, we should look at other
+		 * means to find that.
+		 */
+		if (right_nsitem)
+		{
+			save_namespace = pstate->p_namespace;
+			pstate->p_namespace = NIL;
+		}
+
 		/* And now we can process the RHS */
 		j->rarg = transformFromClauseItem(pstate, j->rarg,
 										  &r_nsitem,
+										  NULL,
 										  &r_namespace);
+
+		/*
+		 * And now restore the namespace again so that join-quals can see it.
+		 */
+		if (right_nsitem)
+			pstate->p_namespace = save_namespace;
 
 		/* Remove the left-side RTEs from the namespace list again */
 		pstate->p_namespace = list_truncate(pstate->p_namespace,
@@ -1219,6 +1257,9 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		l_colnames = l_nsitem->p_names->colnames;
 		r_nscolumns = r_nsitem->p_nscolumns;
 		r_colnames = r_nsitem->p_names->colnames;
+
+		if (right_nsitem)
+			*right_nsitem = r_nsitem;
 
 		/*
 		 * Natural join does not explicitly specify columns; must generate
@@ -1550,7 +1591,7 @@ transformFromClauseItem(ParseState *pstate, Node *n,
 		nsitem->p_lateral_ok = true;
 
 		*top_nsitem = nsitem;
-		*namespace = lappend(my_namespace, nsitem);
+		*fnamespace = lappend(my_namespace, nsitem);
 
 		return (Node *) j;
 	}

@@ -893,7 +893,7 @@ typedef struct PLpgSQL_stmt_execsql
 	int			lineno;
 	unsigned int stmtid;
 	PLpgSQL_expr *sqlstmt;
-	bool		mod_stmt;		/* is the stmt INSERT/UPDATE/DELETE? */
+	bool		mod_stmt;		/* is the stmt INSERT/UPDATE/DELETE/MERGE? */
 	bool		into;			/* INTO supplied? */
 	bool		strict;			/* INTO STRICT flag */
 	bool		mod_stmt_set;	/* is mod_stmt valid yet? */

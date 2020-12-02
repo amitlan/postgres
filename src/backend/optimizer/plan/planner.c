@@ -843,6 +843,24 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		/* exclRelTlist contains only Vars, so no preprocessing needed */
 	}
 
+	foreach(l, parse->mergeActionList)
+	{
+		MergeAction *action = (MergeAction *) lfirst(l);
+
+		action->targetList = (List *)
+			preprocess_expression(root,
+								  (Node *) action->targetList,
+								  EXPRKIND_TARGET);
+		action->qual =
+			preprocess_expression(root,
+								  (Node *) action->qual,
+								  EXPRKIND_QUAL);
+	}
+
+	parse->mergeSourceTargetList = (List *)
+		preprocess_expression(root, (Node *) parse->mergeSourceTargetList,
+							  EXPRKIND_TARGET);
+
 	root->append_rel_list = (List *)
 		preprocess_expression(root, (Node *) root->append_rel_list,
 							  EXPRKIND_APPINFO);
@@ -1707,7 +1725,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		}
 
 		/*
-		 * If this is an INSERT/UPDATE/DELETE, add the ModifyTable node.
+		 * If this is an INSERT/UPDATE/DELETE/MERGE, add the ModifyTable node.
 		 */
 		if (parse->commandType != CMD_SELECT)
 		{
@@ -1743,7 +1761,8 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					/* Build per-target-rel lists needed by ModifyTable */
 					resultRelations = lappend_int(resultRelations,
 												  resultRelation);
-					if (parse->commandType == CMD_UPDATE)
+					if (parse->commandType == CMD_UPDATE ||
+						parse->commandType == CMD_MERGE)
 					{
 						List	   *update_colnos = root->update_colnos;
 
@@ -1847,11 +1866,14 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 										rootRelation,
 										root->partColsUpdated,
 										resultRelations,
+										parse->mergeTarget_relation,
 										updateColnosLists,
 										withCheckOptionLists,
 										returningLists,
 										rowMarks,
 										parse->onConflict,
+										parse->mergeSourceTargetList,
+										parse->mergeActionList,
 										assign_special_exec_param(root));
 		}
 

@@ -34,6 +34,8 @@
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
 
+/* This include suggests that code requiring it should be elsewhere */
+#include "optimizer/prep.h"
 
 /*-----------------------
  * PartitionTupleRouting - Encapsulates all information required to
@@ -853,6 +855,116 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 		lappend(estate->es_tuple_routing_result_relations,
 				leaf_part_rri);
 
+	/*
+	 * Initialize information about this partition that's needed to handle
+	 * MERGE.
+	 */
+	if (node && node->operation == CMD_MERGE)
+	{
+		TupleConversionMap *map = leaf_part_rri->ri_RootToPartitionMap;
+		int			firstVarno = mtstate->resultRelInfo[0].ri_RangeTableIndex;
+		ResultRelInfo *firstResultRelInfo = &mtstate->resultRelInfo[0];
+
+		/*
+		 * If the root parent and partition have the same tuple descriptor,
+		 * just reuse the original MERGE state for partition.
+		 */
+		if (map == NULL)
+		{
+			leaf_part_rri->ri_mergeTuple = firstResultRelInfo->ri_mergeTuple;
+			leaf_part_rri->ri_matchedMergeAction = firstResultRelInfo->ri_matchedMergeAction;
+			leaf_part_rri->ri_notMatchedMergeAction = firstResultRelInfo->ri_notMatchedMergeAction;
+			elog(WARNING, "this might need work");
+		}
+		else
+		{
+			/* Convert expressions contain partition's attnos. */
+			ListCell   *lc;
+			ExprContext *econtext = mtstate->ps.ps_ExprContext;
+
+			leaf_part_rri->ri_mergeTuple =
+				ExecInitExtraTupleSlot(mtstate->ps.state,
+									   RelationGetDescr(partrel),
+									   &TTSOpsBufferHeapTuple);
+
+			foreach(lc, mtstate->mt_mergeState->actionStates)
+			{
+				MergeActionState *mastate = lfirst_node(MergeActionState, lc);
+				MergeAction *action = mastate->mas_action;
+				RelMergeActionState *relstate;
+				List	   *conv_tl;
+				List	   *conv_qual;
+				TupleDesc	tupdesc;
+				List	   *updateColnos;
+				List	  **list;
+
+				conv_tl = map_partition_varattnos((List *) action->targetList,
+												  firstVarno,
+												  partrel, firstResultRel);
+				tupdesc = ExecTypeFromTL(conv_tl);
+				/* XXX gotta pfree conv_tl and tupdesc? */
+
+				/* Generate the action's state for this relation */
+				relstate = makeNode(RelMergeActionState);
+				relstate->rmas_global = mastate;
+
+				relstate->rmas_mergeslot =
+					ExecInitExtraTupleSlot(mtstate->ps.state, tupdesc, &TTSOpsVirtual);
+
+				switch (action->commandType)
+				{
+					case CMD_INSERT:
+						/* no ExecCheckPlanOutput here, already done */
+						relstate->rmas_proj =
+							ExecBuildProjectionInfo(action->targetList, econtext,
+													leaf_part_rri->ri_newTupleSlot,
+													&mtstate->ps,
+													RelationGetDescr(partrel));
+						break;
+					case CMD_UPDATE:
+						updateColnos = extract_update_targetlist_colnos(action->targetList);
+						relstate->rmas_proj =
+							ExecBuildUpdateProjection(action->targetList,
+													  true,
+													  updateColnos,
+													  RelationGetDescr(leaf_part_rri->ri_RelationDesc),
+													  econtext,
+													  leaf_part_rri->ri_newTupleSlot,
+													  NULL);
+						break;
+					case CMD_DELETE:
+						elog(WARNING, "hoping nothing needed here");
+						break;
+
+					default:
+						elog(ERROR, "unknown action in MERGE WHEN clause");
+				}
+
+				conv_qual = map_partition_varattnos((List *) action->qual,
+													firstVarno,
+													partrel, firstResultRel);
+				relstate->rmas_whenqual = ExecInitQual(conv_qual,
+													   &mtstate->ps);
+
+
+				/* And put the action in the appropriate list */
+				if (action->matched)
+					list = &leaf_part_rri->ri_matchedMergeAction;
+				else
+					list = &leaf_part_rri->ri_notMatchedMergeAction;
+				*list = lappend(*list, relstate);
+			}
+		}
+
+		/*
+		 * get_partition_dispatch_recurse() and expand_partitioned_rtentry()
+		 * fetch the leaf OIDs in the same order. So we can safely derive the
+		 * index of the merge target relation corresponding to this partition
+		 * by simply adding partidx + 1 to the root's merge target relation.
+		 */
+		leaf_part_rri->ri_mergeTargetRTI = node->mergeTargetRelation +
+			partidx + 1;
+	}
 	MemoryContextSwitchTo(oldcxt);
 
 	return leaf_part_rri;

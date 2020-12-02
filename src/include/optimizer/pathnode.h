@@ -272,10 +272,12 @@ extern ModifyTablePath *create_modifytable_path(PlannerInfo *root,
 												Index nominalRelation, Index rootRelation,
 												bool partColsUpdated,
 												List *resultRelations,
+												Index mergeTargetRelation,
 												List *updateColnosLists,
 												List *withCheckOptionLists, List *returningLists,
 												List *rowMarks, OnConflictExpr *onconflict,
-												int epqParam);
+												List *mergeSourceTargetList,
+												List *mergeActionList, int epqParam);
 extern LimitPath *create_limit_path(PlannerInfo *root, RelOptInfo *rel,
 									Path *subpath,
 									Node *limitOffset, Node *limitCount,

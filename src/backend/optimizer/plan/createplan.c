@@ -306,9 +306,12 @@ static ModifyTable *make_modifytable(PlannerInfo *root, Plan *subplan,
 									 Index nominalRelation, Index rootRelation,
 									 bool partColsUpdated,
 									 List *resultRelations,
+									 Index mergeTargetRelation,
 									 List *updateColnosLists,
 									 List *withCheckOptionLists, List *returningLists,
-									 List *rowMarks, OnConflictExpr *onconflict, int epqParam);
+									 List *rowMarks, OnConflictExpr *onconflict,
+									 List *mergeSourceTargetList,
+									 List *mergeActionList, int epqParam);
 static GatherMerge *create_gather_merge_plan(PlannerInfo *root,
 											 GatherMergePath *best_path);
 
@@ -2748,11 +2751,14 @@ create_modifytable_plan(PlannerInfo *root, ModifyTablePath *best_path)
 							best_path->rootRelation,
 							best_path->partColsUpdated,
 							best_path->resultRelations,
+							best_path->mergeTargetRelation,
 							best_path->updateColnosLists,
 							best_path->withCheckOptionLists,
 							best_path->returningLists,
 							best_path->rowMarks,
 							best_path->onconflict,
+							best_path->mergeSourceTargetList,
+							best_path->mergeActionList,
 							best_path->epqParam);
 
 	copy_generic_path_info(&plan->plan, &best_path->path);
@@ -6874,9 +6880,12 @@ make_modifytable(PlannerInfo *root, Plan *subplan,
 				 Index nominalRelation, Index rootRelation,
 				 bool partColsUpdated,
 				 List *resultRelations,
+				 Index mergeTargetRelation,
 				 List *updateColnosLists,
 				 List *withCheckOptionLists, List *returningLists,
-				 List *rowMarks, OnConflictExpr *onconflict, int epqParam)
+				 List *rowMarks, OnConflictExpr *onconflict,
+				 List *mergeSourceTargetList,
+				 List *mergeActionList, int epqParam)
 {
 	ModifyTable *node = makeNode(ModifyTable);
 	List	   *fdw_private_list;
@@ -6884,9 +6893,10 @@ make_modifytable(PlannerInfo *root, Plan *subplan,
 	ListCell   *lc;
 	int			i;
 
-	Assert(operation == CMD_UPDATE ?
-		   list_length(resultRelations) == list_length(updateColnosLists) :
-		   updateColnosLists == NIL);
+	Assert(operation == CMD_MERGE || 
+		   (operation == CMD_UPDATE ?
+			list_length(resultRelations) == list_length(updateColnosLists) :
+			updateColnosLists == NIL));
 	Assert(withCheckOptionLists == NIL ||
 		   list_length(resultRelations) == list_length(withCheckOptionLists));
 	Assert(returningLists == NIL ||
@@ -6904,6 +6914,7 @@ make_modifytable(PlannerInfo *root, Plan *subplan,
 	node->rootRelation = rootRelation;
 	node->partColsUpdated = partColsUpdated;
 	node->resultRelations = resultRelations;
+	node->mergeTargetRelation = mergeTargetRelation;
 	if (!onconflict)
 	{
 		node->onConflictAction = ONCONFLICT_NONE;
@@ -6944,6 +6955,8 @@ make_modifytable(PlannerInfo *root, Plan *subplan,
 	node->withCheckOptionLists = withCheckOptionLists;
 	node->returningLists = returningLists;
 	node->rowMarks = rowMarks;
+	node->mergeSourceTargetList = mergeSourceTargetList;
+	node->mergeActionList = mergeActionList;
 	node->epqParam = epqParam;
 
 	/*

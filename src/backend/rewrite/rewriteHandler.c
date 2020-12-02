@@ -1624,7 +1624,6 @@ fill_extraUpdatedCols(RangeTblEntry *target_rte, Relation target_relation)
 	}
 }
 
-
 /*
  * matchLocks -
  *	  match the list of locks and returns the matching rules
@@ -3764,6 +3763,7 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 		}
 		else if (event == CMD_UPDATE)
 		{
+			Assert(parsetree->override == OVERRIDING_NOT_SET);
 			parsetree->targetList =
 				rewriteTargetListIU(parsetree->targetList,
 									parsetree->commandType,
@@ -3773,6 +3773,38 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 
 			/* Also populate extraUpdatedCols (for generated columns) */
 			fill_extraUpdatedCols(rt_entry, rt_entry_relation);
+		}
+		else if (event == CMD_MERGE)
+		{
+			Assert(parsetree->override == OVERRIDING_NOT_SET);
+
+			/*
+			 * Rewrite each action targetlist separately
+			 */
+			foreach(lc1, parsetree->mergeActionList)
+			{
+				MergeAction *action = (MergeAction *) lfirst(lc1);
+
+				switch (action->commandType)
+				{
+					case CMD_NOTHING:
+					case CMD_DELETE:	/* Nothing to do here */
+						break;
+					case CMD_UPDATE:
+					case CMD_INSERT:
+						/* XXX is it possible to have a VALUES clause? */
+						action->targetList =
+							rewriteTargetListIU(action->targetList,
+												action->commandType,
+												action->override,
+												rt_entry_relation,
+												NULL, 0, NULL);
+						break;
+					default:
+						elog(ERROR, "unrecognized commandType: %d", action->commandType);
+						break;
+				}
+			}
 		}
 		else if (event == CMD_DELETE)
 		{
@@ -3787,13 +3819,20 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 		locks = matchLocks(event, rt_entry_relation->rd_rules,
 						   result_relation, parsetree, &hasUpdate);
 
-		product_queries = fireRules(parsetree,
-									result_relation,
-									event,
-									locks,
-									&instead,
-									&returning,
-									&qual_product);
+		/*
+		 * XXX MERGE doesn't support write rules because they would violate
+		 * the SQL Standard spec and would be unclear how they should work.
+		 */
+		if (event == CMD_MERGE)
+			product_queries = NIL;
+		else
+			product_queries = fireRules(parsetree,
+										result_relation,
+										event,
+										locks,
+										&instead,
+										&returning,
+										&qual_product);
 
 		/*
 		 * If we have a VALUES RTE with any remaining untouched DEFAULT items,
