@@ -1,0 +1,19 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1spk s2ifk s1dpk s1c
+step s1spk: TABLE fk;
+a              
+
+step s2ifk: INSERT INTO fk VALUES (1);
+step s1dpk: DELETE FROM pk;
+ERROR:  could not serialize access due to concurrent update
+step s1c: COMMIT;
+
+starting permutation: s1spk s2ifk s1upk s1c
+step s1spk: TABLE fk;
+a              
+
+step s2ifk: INSERT INTO fk VALUES (1);
+step s1upk: UPDATE pk SET a = a + 1;
+ERROR:  could not serialize access due to concurrent update
+step s1c: COMMIT;

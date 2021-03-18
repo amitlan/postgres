@@ -2925,8 +2925,11 @@ l1:
 	if (crosscheck != InvalidSnapshot && result == TM_Ok)
 	{
 		/* Perform additional check for transaction-snapshot mode RI updates */
+		Assert(IsolationUsesXactSnapshot());
 		if (!HeapTupleSatisfiesVisibility(&tp, crosscheck, buffer))
-			result = TM_Updated;
+				ereport(ERROR,
+						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+						 errmsg("could not serialize access due to concurrent update")));
 	}
 
 	if (result != TM_Ok)
@@ -3554,11 +3557,11 @@ l2:
 	if (crosscheck != InvalidSnapshot && result == TM_Ok)
 	{
 		/* Perform additional check for transaction-snapshot mode RI updates */
+		Assert(IsolationUsesXactSnapshot());
 		if (!HeapTupleSatisfiesVisibility(&oldtup, crosscheck, buffer))
-		{
-			result = TM_Updated;
-			Assert(!ItemPointerEquals(&oldtup.t_self, &oldtup.t_data->t_ctid));
-		}
+				ereport(ERROR,
+						(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+						 errmsg("could not serialize access due to concurrent update")));
 	}
 
 	if (result != TM_Ok)
