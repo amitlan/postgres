@@ -83,6 +83,8 @@ typedef struct PlannedStmt
 								 * indexes of range table entries of the leaf
 								 * partitions scanned by prunable subplans;
 								 * see AcquireExecutorLocks() */
+	List	   *permInfos;		/* list of RTEPermissionInfo nodes for rtable
+								 * entries needing one */
 
 	/* rtable indexes of target relations for INSERT/UPDATE/DELETE/MERGE */
 	List	   *resultRelations;	/* integer list of RT indexes, or NIL */

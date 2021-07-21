@@ -41,6 +41,9 @@ typedef enum ReplaceVarsNoMatchOption
 } ReplaceVarsNoMatchOption;
 
 
+extern List *CombineRangeTables(List *rtable1, List *rtable2,
+								List *rteperminfos2,
+								List **rteperminfos1);
 extern void OffsetVarNodes(Node *node, int offset, int sublevels_up);
 extern void ChangeVarNodes(Node *node, int rt_index, int new_index,
 						   int sublevels_up);
