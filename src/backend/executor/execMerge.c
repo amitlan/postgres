@@ -529,7 +529,6 @@ void
 ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 {
 	ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
-	Plan	   *subplan = outerPlan(node);
 	TupleDesc	relationDesc = RelationGetDescr(mtstate->resultRelInfo->ri_RelationDesc);
 	ResultRelInfo *resultRelInfo = mtstate->resultRelInfo;
 	ExprContext *econtext;
