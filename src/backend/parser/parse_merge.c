@@ -305,7 +305,6 @@ transformMergeStmt(ParseState *pstate, MergeStmt *stmt)
 	 * A sub-query can include the Target, but otherwise the sub-query cannot
 	 * reference the outermost Target table at all.
 	 */
-	qry->querySource = QSRC_PARSER;
 
 	/*
 	 * Setup the MERGE target table.
