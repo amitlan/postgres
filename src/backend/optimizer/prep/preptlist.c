@@ -67,7 +67,6 @@ preprocess_targetlist(PlannerInfo *root)
 	CmdType		command_type = parse->commandType;
 	RangeTblEntry *target_rte = NULL;
 	Relation	target_relation = NULL;
-	Relation	merge_relation = NULL;
 	List	   *tlist;
 	ListCell   *lc;
 
@@ -272,8 +271,6 @@ preprocess_targetlist(PlannerInfo *root)
 
 	if (target_relation)
 		table_close(target_relation, NoLock);
-	if (merge_relation)
-		table_close(merge_relation, NoLock);
 }
 
 /*
