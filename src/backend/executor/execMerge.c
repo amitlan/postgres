@@ -634,8 +634,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 											  RelationGetDescr(resultRelInfo->ri_RelationDesc),
 											  econtext,
 											  resultRelInfo->ri_newTupleSlot,
-											  /* XXX is there a parent PlanState? */
-											  NULL);
+											  &mtstate->ps);
 				mtstate->mt_merge_subcommands |= MERGE_UPDATE;
 				break;
 			case CMD_DELETE:
