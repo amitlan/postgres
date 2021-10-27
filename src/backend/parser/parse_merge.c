@@ -119,8 +119,16 @@ transformMergeJoinClause(ParseState *pstate, Node *merge,
 	 * mergeSourceTargetList. Note that the right relation can either be a
 	 * plain relation or a subquery or anything that can have a
 	 * RangeTableEntry.
+	 *
+	 * XXX originally this only expanded right_nsitem, not top_nsitem; but
+	 * that meant that some targetlist entries would be missing that are
+	 * needed at setrefs.c time.  I'm not sure that this change is correct,
+	 * but at least it makes the tests pass.
+	 *
+	 * FIXME With this change, we don't need the &right_nsitem kludge that
+	 * is added to transformFromClauseItem, so consider removing it.
 	 */
-	*mergeSourceTargetList = expandNSItemAttrs(pstate, right_nsitem, 0, false, -1);
+	*mergeSourceTargetList = expandNSItemAttrs(pstate, top_nsitem, 0, false, -1);
 
 	/*
 	 * Add a whole-row-Var entry to support references to "source.*".
