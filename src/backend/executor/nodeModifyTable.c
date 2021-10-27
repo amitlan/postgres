@@ -2562,7 +2562,24 @@ ExecModifyTable(PlanState *pstate)
 			datum = ExecGetJunkAttribute(planSlot, node->mt_resultOidAttno,
 										 &isNull);
 			if (isNull)
+			{
+				/*
+				 * XXX For MERGE, any unmatched tuples will naturally have
+				 * InvalidOid for the "tableoid" column (since the tuple does
+				 * not exist in any partition).  In all other cases this is an
+				 * error, but we need to do ExecMerge.  Also note that we use
+				 * the node's toplevel resultRelInfo.
+				 */
+				if (operation == CMD_MERGE)
+				{
+					EvalPlanQualSetSlot(&node->mt_epqstate, planSlot);
+					slot = planSlot;
+					ExecMerge(node, node->resultRelInfo, estate, slot);
+					continue;
+				}
+
 				elog(ERROR, "tableoid is NULL");
+			}
 			resultoid = DatumGetObjectId(datum);
 
 			/* If it's not the same as last time, we need to locate the rel */
