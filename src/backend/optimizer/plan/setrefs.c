@@ -1050,8 +1050,10 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				 * available as INNER_VAR and the target relation attributes
 				 * are available from the scan tuple.
 				 */
-				if (splan->mergeActionList != NIL)
+				if (splan->mergeActionLists != NIL)
 				{
+					ListCell *lc;
+
 					/*
 					 * mergeSourceTargetList is already setup correctly to
 					 * include all Vars coming from the source relation. So we
@@ -1074,25 +1076,30 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 
 					splan->mergeTargetRelation += rtoffset;
 
-					foreach(l, splan->mergeActionList)
+					foreach(lc, splan->mergeActionLists)
 					{
-						MergeAction *action = (MergeAction *) lfirst(l);
+						List *mergeActionList = lfirst(lc);
 
-						/* Fix targetList of each action. */
-						action->targetList = fix_join_expr(root,
-														   action->targetList,
-														   NULL, itlist,
-														   linitial_int(splan->resultRelations),
-														   rtoffset,
-														   NUM_EXEC_TLIST(plan));
+						foreach(l, mergeActionList)
+						{
+							MergeAction *action = (MergeAction *) lfirst(l);
 
-						/* Fix quals too. */
-						action->qual = (Node *) fix_join_expr(root,
-															  (List *) action->qual,
-															  NULL, itlist,
-															  linitial_int(splan->resultRelations),
-															  rtoffset,
-															  NUM_EXEC_QUAL(plan));
+							/* Fix targetList of each action. */
+							action->targetList = fix_join_expr(root,
+															   action->targetList,
+															   NULL, itlist,
+															   linitial_int(splan->resultRelations),
+															   rtoffset,
+															   NUM_EXEC_TLIST(plan));
+
+							/* Fix quals too. */
+							action->qual = (Node *) fix_join_expr(root,
+																  (List *) action->qual,
+																  NULL, itlist,
+																  linitial_int(splan->resultRelations),
+																  rtoffset,
+																  NUM_EXEC_QUAL(plan));
+						}
 					}
 				}
 

@@ -1658,7 +1658,8 @@ typedef struct MergeAction
 	OverridingKind override;	/* OVERRIDING clause */
 	Node	   *qual;			/* transformed WHEN AND conditions */
 	CmdType		commandType;	/* INSERT/UPDATE/DELETE/DO NOTHING */
-	List	   *targetList;		/* the target list (of ResTarget) */
+	List	   *targetList;		/* the target list (of TargetEntry) */
+	List	   *updateColnos;	/* target attribute numbers of an UPDATE */
 } MergeAction;
 
 /* ----------------------

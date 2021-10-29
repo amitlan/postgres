@@ -277,7 +277,7 @@ extern ModifyTablePath *create_modifytable_path(PlannerInfo *root,
 												List *withCheckOptionLists, List *returningLists,
 												List *rowMarks, OnConflictExpr *onconflict,
 												List *mergeSourceTargetList,
-												List *mergeActionList, int epqParam);
+												List *mergeActionLists, int epqParam);
 extern LimitPath *create_limit_path(PlannerInfo *root, RelOptInfo *rel,
 									Path *subpath,
 									Node *limitOffset, Node *limitCount,

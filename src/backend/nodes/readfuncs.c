@@ -1721,7 +1721,7 @@ _readModifyTable(void)
 	READ_UINT_FIELD(exclRelRTI);
 	READ_NODE_FIELD(exclRelTlist);
 	READ_NODE_FIELD(mergeSourceTargetList);
-	READ_NODE_FIELD(mergeActionList);
+	READ_NODE_FIELD(mergeActionLists);
 
 	READ_DONE();
 }
