@@ -912,6 +912,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 						break;
 					case CMD_UPDATE:
 						updateColnos = extract_update_targetlist_colnos(action->targetList);
+						updateColnos = adjust_partition_colnos(updateColnos, leaf_part_rri);
 						relstate->rmas_proj =
 							ExecBuildUpdateProjection(action->targetList,
 													  true,

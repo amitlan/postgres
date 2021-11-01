@@ -356,7 +356,7 @@ lmerge_matched:
 						epqslot = EvalPlanQual(epqstate,
 											   resultRelInfo->ri_RelationDesc,
 											   resultRelInfo->ri_RangeTableIndex,
-											   resultRelInfo->ri_mergeTuple);
+											   resultRelInfo->ri_newTupleSlot);
 
 						if (!TupIsNull(epqslot))
 						{
