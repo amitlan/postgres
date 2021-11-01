@@ -1254,7 +1254,6 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_RootResultRelInfo = partition_root_rri;
 
 	/* FIXME -- merge stuff */
-	resultRelInfo->ri_mergeTargetRTI = 0;
 	resultRelInfo->ri_matchedMergeAction = NIL;
 	resultRelInfo->ri_notMatchedMergeAction = NIL;
 	resultRelInfo->ri_mergeTuple = NULL;

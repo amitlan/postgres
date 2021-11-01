@@ -2932,8 +2932,6 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	Assert(operation != CMD_MERGE || node->mergeTargetRelation > 0);
 	Assert(operation == CMD_MERGE || node->mergeTargetRelation == 0);
 
-	resultRelInfo->ri_mergeTargetRTI = node->mergeTargetRelation;
-
 	i = 0;
 	foreach(l, node->resultRelations)
 	{

@@ -353,17 +353,10 @@ lmerge_matched:
 					{
 						TupleTableSlot *epqslot;
 
-						/*
-						 * Since we generate a JOIN query with a target table
-						 * RTE different than the result relation RTE, we must
-						 * pass in the RTI of the relation used in the join
-						 * query and not the one from result relation.
-						 */
-						Assert(resultRelInfo->ri_mergeTargetRTI > 0);
 						epqslot = EvalPlanQual(epqstate,
 											   resultRelInfo->ri_RelationDesc,
-											   GetEPQRangeTableIndex(resultRelInfo),
-											   relaction->rmas_mergeslot);
+											   resultRelInfo->ri_RangeTableIndex,
+											   resultRelInfo->ri_mergeTuple);
 
 						if (!TupIsNull(epqslot))
 						{
@@ -600,14 +593,10 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 			MergeAction *action = (MergeAction *) lfirst(l);
 			MergeActionState *action_state;
 			RelMergeActionState *relstate;
-			TupleDesc	tupdesc;
 			List	  **list;
 
 			action_state = makeNode(MergeActionState);
 			action_state->mas_action = action;
-
-			/* create tupdesc for this action's projection */
-			tupdesc = ExecTypeFromTL((List *) action->targetList);
 
 			mtstate->mt_mergeState->actionStates =
 				lappend(mtstate->mt_mergeState->actionStates, action_state);
@@ -620,9 +609,6 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 			relstate->rmas_global = action_state;
 			relstate->rmas_whenqual = ExecInitQual((List *) action->qual,
 											   &mtstate->ps);
-			relstate->rmas_mergeslot =
-				ExecInitExtraTupleSlot(mtstate->ps.state, tupdesc,
-									   &TTSOpsVirtual);
 
 			/*
 			 * We create two lists - one for WHEN MATCHED actions and one for WHEN

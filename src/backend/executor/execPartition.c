@@ -892,24 +892,13 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 				MergeActionState *mastate = lfirst_node(MergeActionState, lc);
 				MergeAction *action = mastate->mas_action;
 				RelMergeActionState *relstate;
-				List	   *conv_tl;
 				List	   *conv_qual;
-				TupleDesc	tupdesc;
 				List	   *updateColnos;
 				List	  **list;
-
-				conv_tl = map_partition_varattnos((List *) action->targetList,
-												  firstVarno,
-												  partrel, firstResultRel);
-				tupdesc = ExecTypeFromTL(conv_tl);
-				/* XXX gotta pfree conv_tl and tupdesc? */
 
 				/* Generate the action's state for this relation */
 				relstate = makeNode(RelMergeActionState);
 				relstate->rmas_global = mastate;
-
-				relstate->rmas_mergeslot =
-					ExecInitExtraTupleSlot(mtstate->ps.state, tupdesc, &TTSOpsVirtual);
 
 				switch (action->commandType)
 				{
@@ -955,15 +944,6 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 				*list = lappend(*list, relstate);
 			}
 		}
-
-		/*
-		 * get_partition_dispatch_recurse() and expand_partitioned_rtentry()
-		 * fetch the leaf OIDs in the same order. So we can safely derive the
-		 * index of the merge target relation corresponding to this partition
-		 * by simply adding partidx + 1 to the root's merge target relation.
-		 */
-		leaf_part_rri->ri_mergeTargetRTI = node->mergeTargetRelation +
-			partidx + 1;
 	}
 	MemoryContextSwitchTo(oldcxt);
 
