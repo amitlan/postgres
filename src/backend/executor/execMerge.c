@@ -450,6 +450,8 @@ ExecMergeNotMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 					EState *estate, TupleTableSlot *slot)
 {
 	ExprContext *econtext = mtstate->ps.ps_ExprContext;
+	ResultRelInfo *rootRelInfo = mtstate->rootResultRelInfo;
+	TupleTableSlot *insert_slot;
 	List	   *actionStates = NIL;
 	ListCell   *l;
 
@@ -492,24 +494,40 @@ ExecMergeNotMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 		switch (commandType)
 		{
 			case CMD_INSERT:
-
-				if (mtstate->mt_partition_tuple_routing)
-					resultRelInfo = ExecFindPartition(mtstate,
-													  resultRelInfo,
-													  mtstate->mt_partition_tuple_routing,
-													  slot,
-													  estate);
+				/*
+				 * Project the tuple matching the insert target table's
+				 * tuple descriptor.
+				 */
+				insert_slot = ExecProject(action->rmas_proj);
 
 				/*
-				 * We set up the projection earlier, so all we do here is
-				 * Project, no need for any other tasks prior to the
-				 * ExecInsert.
+				 * If the MERGE targets a partitioned table, and the given
+				 * target relation appears to be a child relation, the insert
+				 * must be performed on the root relation to ensure that the
+				 * inserted tuple is routed to the correct partition.
 				 */
-				ExecProject(action->rmas_proj);
+				if (resultRelInfo != rootRelInfo &&
+					rootRelInfo->ri_RelationDesc->rd_rel->relkind ==
+					RELKIND_PARTITIONED_TABLE);
+				{
+					/*
+					 * The projection emitted a tuple matching the child
+					 * table's descriptor, though the insert now expects to
+					 * be passed to match the root partitioned table's, so
+					 * convert if needed.
+					 */
+					TupleConversionMap *map =
+						ExecGetChildToRootMap(resultRelInfo);
+
+					if (map)
+						insert_slot = execute_attr_map_slot(map->attrMap,
+															insert_slot,
+															mtstate->mt_root_tuple_slot);
+					resultRelInfo = rootRelInfo;
+				}
 
 				(void) ExecInsert(mtstate, resultRelInfo,
-								  resultRelInfo->ri_newTupleSlot,
-								  slot,
+								  insert_slot, slot,
 								  estate, action->rmas_global,
 								  mtstate->canSetTag);
 				InstrCountFiltered1(&mtstate->ps, 1);
@@ -529,6 +547,7 @@ void
 ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 {
 	ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
+	ResultRelInfo *rootRelInfo = mtstate->rootResultRelInfo;
 	ResultRelInfo *resultRelInfo;
 	ExprContext *econtext;
 	ListCell   *lc;
@@ -626,12 +645,29 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 												resultRelInfo->ri_newTupleSlot,
 												&mtstate->ps,
 												relationDesc);
-
-					if (resultRelInfo->ri_RelationDesc->rd_rel->relkind ==
-						RELKIND_PARTITIONED_TABLE)
+					/*
+					 * If the MERGE targets a partitioned table, any INSERT
+					 * actions must be routed through it, not the child
+					 * relations. Initialize the routing struct and the root
+					 * table's "new" tuple slot for that, if not already
+					 * done.
+					 */
+					if (rootRelInfo->ri_RelationDesc->rd_rel->relkind ==
+						RELKIND_PARTITIONED_TABLE &&
+						mtstate->mt_partition_tuple_routing == NULL)
+					{
+						/*
+						 * Note that the slot is managed as a standalone slot
+						 * belonging to ModifyTableState, so we pass NULL
+						 * for the 2nd argument.
+						 */
+						mtstate->mt_root_tuple_slot =
+							table_slot_create(rootRelInfo->ri_RelationDesc,
+											  NULL);
 						mtstate->mt_partition_tuple_routing =
 							ExecSetupPartitionTupleRouting(estate,
-														   resultRelInfo->ri_RelationDesc);
+														   rootRelInfo->ri_RelationDesc);
+					}
 
 					mtstate->mt_merge_subcommands |= MERGE_INSERT;
 					break;
