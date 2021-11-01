@@ -223,7 +223,7 @@ _copyModifyTable(const ModifyTable *from)
 	COPY_SCALAR_FIELD(exclRelRTI);
 	COPY_NODE_FIELD(exclRelTlist);
 	COPY_NODE_FIELD(mergeSourceTargetList);
-	COPY_NODE_FIELD(mergeActionList);
+	COPY_NODE_FIELD(mergeActionLists);
 
 	return newnode;
 }
@@ -2315,6 +2315,7 @@ _copyMergeAction(const MergeAction *from)
 	COPY_SCALAR_FIELD(override);
 	COPY_NODE_FIELD(qual);
 	COPY_NODE_FIELD(targetList);
+	COPY_NODE_FIELD(updateColnos);
 
 	return newnode;
 }

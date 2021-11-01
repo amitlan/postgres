@@ -424,7 +424,7 @@ _outModifyTable(StringInfo str, const ModifyTable *node)
 	WRITE_UINT_FIELD(exclRelRTI);
 	WRITE_NODE_FIELD(exclRelTlist);
 	WRITE_NODE_FIELD(mergeSourceTargetList);
-	WRITE_NODE_FIELD(mergeActionList);
+	WRITE_NODE_FIELD(mergeActionLists);
 }
 
 static void
@@ -2223,7 +2223,7 @@ _outModifyTablePath(StringInfo str, const ModifyTablePath *node)
 	WRITE_NODE_FIELD(onconflict);
 	WRITE_INT_FIELD(epqParam);
 	WRITE_NODE_FIELD(mergeSourceTargetList);
-	WRITE_NODE_FIELD(mergeActionList);
+	WRITE_NODE_FIELD(mergeActionLists);
 }
 
 static void

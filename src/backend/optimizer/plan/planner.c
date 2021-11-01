@@ -1734,6 +1734,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			List	   *updateColnosLists = NIL;
 			List	   *withCheckOptionLists = NIL;
 			List	   *returningLists = NIL;
+			List	   *mergeActionLists = NIL;
 			List	   *rowMarks;
 
 			if (bms_membership(root->all_result_relids) == BMS_MULTIPLE)
@@ -1761,8 +1762,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					/* Build per-target-rel lists needed by ModifyTable */
 					resultRelations = lappend_int(resultRelations,
 												  resultRelation);
-					if (parse->commandType == CMD_UPDATE ||
-						parse->commandType == CMD_MERGE)
+					if (parse->commandType == CMD_UPDATE)
 					{
 						List	   *update_colnos = root->update_colnos;
 
@@ -1801,6 +1801,46 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 						returningLists = lappend(returningLists,
 												 returningList);
 					}
+					if (parse->mergeActionList)
+					{
+						ListCell *l;
+						List	 *mergeActionList = NIL;
+
+						/*
+						 * Copy MergeActions and translate stuff that
+						 * reference attribute numbers.
+						 * XXX: maybe targetList qualifies for translation
+						 * too because resnos must correspond to the
+						 * relation on which a given action is performed
+						 * but only inserts use the target list and
+						 * ExecMerge() always redirects the inserts to
+						 * go through the root partitioned table for
+						 * tuple routing.  Though, regular inheritance
+						 * doesn't, so maybe think something after all.
+						 */
+						foreach(l, parse->mergeActionList)
+						{
+							MergeAction *action = lfirst(l),
+								*leaf_action = copyObject(action);
+
+							leaf_action->qual =
+								adjust_appendrel_attrs_multilevel(root,
+																  (Node *) action->qual,
+																  this_result_rel->relids,
+																  top_result_rel->relids);
+							if (leaf_action->commandType == CMD_UPDATE)
+								leaf_action->updateColnos =
+									adjust_inherited_attnums_multilevel(root,
+																		action->updateColnos,
+																		this_result_rel->relid,
+																		top_result_rel->relid);
+							mergeActionList = lappend(mergeActionList,
+													  leaf_action);
+						}
+
+						mergeActionLists = lappend(mergeActionLists,
+												   mergeActionList);
+					}
 				}
 
 				if (resultRelations == NIL)
@@ -1823,6 +1863,8 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 						withCheckOptionLists = list_make1(parse->withCheckOptions);
 					if (parse->returningList)
 						returningLists = list_make1(parse->returningList);
+					if (parse->mergeActionList)
+						mergeActionLists = list_make1(parse->mergeActionList);
 				}
 			}
 			else
@@ -1835,6 +1877,8 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					withCheckOptionLists = list_make1(parse->withCheckOptions);
 				if (parse->returningList)
 					returningLists = list_make1(parse->returningList);
+				if (parse->mergeActionList)
+					mergeActionLists = list_make1(parse->mergeActionList);
 			}
 
 			/*
@@ -1873,7 +1917,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 										rowMarks,
 										parse->onConflict,
 										parse->mergeSourceTargetList,
-										parse->mergeActionList,
+										mergeActionLists,
 										assign_special_exec_param(root));
 		}
 

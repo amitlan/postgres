@@ -240,7 +240,7 @@ typedef struct ModifyTable
 	Index		exclRelRTI;		/* RTI of the EXCLUDED pseudo relation */
 	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
 	List	   *mergeSourceTargetList;
-	List	   *mergeActionList;	/* actions for MERGE */
+	List	   *mergeActionLists;	/* per-target-table lists of actions for MERGE */
 } ModifyTable;
 
 struct PartitionPruneInfo;		/* forward reference to struct below */

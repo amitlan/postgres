@@ -450,6 +450,8 @@ ExecMergeNotMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 					EState *estate, TupleTableSlot *slot)
 {
 	ExprContext *econtext = mtstate->ps.ps_ExprContext;
+	ResultRelInfo *rootRelInfo = mtstate->rootResultRelInfo;
+	TupleTableSlot *insert_slot;
 	List	   *actionStates = NIL;
 	ListCell   *l;
 
@@ -492,24 +494,40 @@ ExecMergeNotMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 		switch (commandType)
 		{
 			case CMD_INSERT:
-
-				if (mtstate->mt_partition_tuple_routing)
-					resultRelInfo = ExecFindPartition(mtstate,
-													  resultRelInfo,
-													  mtstate->mt_partition_tuple_routing,
-													  slot,
-													  estate);
+				/*
+				 * Project the tuple matching the insert target table's
+				 * tuple descriptor.
+				 */
+				insert_slot = ExecProject(action->rmas_proj);
 
 				/*
-				 * We set up the projection earlier, so all we do here is
-				 * Project, no need for any other tasks prior to the
-				 * ExecInsert.
+				 * If the MERGE targets a partitioned table, and the given
+				 * target relation appears to be a child relation, the insert
+				 * must be performed on the root relation to ensure that the
+				 * inserted tuple is routed to the correct partition.
 				 */
-				ExecProject(action->rmas_proj);
+				if (resultRelInfo != rootRelInfo &&
+					rootRelInfo->ri_RelationDesc->rd_rel->relkind ==
+					RELKIND_PARTITIONED_TABLE);
+				{
+					/*
+					 * The projection emitted a tuple matching the child
+					 * table's descriptor, though the insert now expects to
+					 * be passed to match the root partitioned table's, so
+					 * convert if needed.
+					 */
+					TupleConversionMap *map =
+						ExecGetChildToRootMap(resultRelInfo);
+
+					if (map)
+						insert_slot = execute_attr_map_slot(map->attrMap,
+															insert_slot,
+															mtstate->mt_root_tuple_slot);
+					resultRelInfo = rootRelInfo;
+				}
 
 				(void) ExecInsert(mtstate, resultRelInfo,
-								  resultRelInfo->ri_newTupleSlot,
-								  slot,
+								  insert_slot, slot,
 								  estate, action->rmas_global,
 								  mtstate->canSetTag);
 				InstrCountFiltered1(&mtstate->ps, 1);
@@ -529,12 +547,13 @@ void
 ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 {
 	ModifyTable *node = (ModifyTable *) mtstate->ps.plan;
-	TupleDesc	relationDesc = RelationGetDescr(mtstate->resultRelInfo->ri_RelationDesc);
-	ResultRelInfo *resultRelInfo = mtstate->resultRelInfo;
+	ResultRelInfo *rootRelInfo = mtstate->rootResultRelInfo;
+	ResultRelInfo *resultRelInfo;
 	ExprContext *econtext;
 	ListCell   *lc;
+	int			i;
 
-	if (node->mergeActionList == NIL)
+	if (node->mergeActionLists == NIL)
 		return;
 
 	mtstate->mt_merge_subcommands = 0;
@@ -551,100 +570,127 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 	 */
 	mtstate->mt_mergeState = makeNode(MergeState);
 
-	/* initialize slot for MERGE fetches from this rel
-	 * XXX Can we use ExecInitUpdateProjection for this?
-	 */
-	resultRelInfo->ri_mergeTuple =
-		ExecInitExtraTupleSlot(mtstate->ps.state, relationDesc,
-							   &TTSOpsBufferHeapTuple);
-	resultRelInfo->ri_newTupleSlot =
-		table_slot_create(resultRelInfo->ri_RelationDesc,
-						  &estate->es_tupleTable);
-
 	/*
 	 * Create a MergeActionState for each action on the mergeActionList and
 	 * add it to either a list of matched actions or not-matched actions.
 	 */
-	foreach(lc, node->mergeActionList)
+	i = 0;
+	foreach(lc, node->mergeActionLists)
 	{
-		MergeAction *action = (MergeAction *) lfirst(lc);
-		MergeActionState *action_state;
-		RelMergeActionState *relstate;
-		TupleDesc	tupdesc;
-		List	  **list;
-		List	   *updateColnos;
+		List	   *mergeActionList = lfirst(lc);
+		TupleDesc	relationDesc;
+		ListCell   *l;
 
-		action_state = makeNode(MergeActionState);
-		action_state->mas_action = action;
+		resultRelInfo = mtstate->resultRelInfo + i;
+		i++;
+		relationDesc = RelationGetDescr(resultRelInfo->ri_RelationDesc);
 
-		/* create tupdesc for this action's projection */
-		tupdesc = ExecTypeFromTL((List *) action->targetList);
-
-		mtstate->mt_mergeState->actionStates =
-			lappend(mtstate->mt_mergeState->actionStates, action_state);
-
-		/*
-		 * Build action merge state for this rel.  (For partitions, equivalent
-		 * code exists in ExecInitPartitionInfo.)
+		/* initialize slot for MERGE fetches from this rel
+		 * XXX Can we use ExecInitUpdateProjection for this?
 		 */
-		relstate = makeNode(RelMergeActionState);
-		relstate->rmas_global = action_state;
-		relstate->rmas_whenqual = ExecInitQual((List *) action->qual,
-											   &mtstate->ps);
-		relstate->rmas_mergeslot =
-			ExecInitExtraTupleSlot(mtstate->ps.state, tupdesc,
-								   &TTSOpsVirtual);
+		resultRelInfo->ri_mergeTuple =
+			ExecInitExtraTupleSlot(mtstate->ps.state, relationDesc,
+								   &TTSOpsBufferHeapTuple);
+		resultRelInfo->ri_newTupleSlot =
+			table_slot_create(resultRelInfo->ri_RelationDesc,
+							  &estate->es_tupleTable);
 
-		/*
-		 * We create two lists - one for WHEN MATCHED actions and one for WHEN
-		 * NOT MATCHED actions - and stick the MergeActionState into the
-		 * appropriate list.
-		 */
-		if (action_state->mas_action->matched)
-			list = &resultRelInfo->ri_matchedMergeAction;
-		else
-			list = &resultRelInfo->ri_notMatchedMergeAction;
-		*list = lappend(*list, relstate);
-
-		switch (action->commandType)
+		foreach(l, mergeActionList)
 		{
-			case CMD_INSERT:
-				ExecCheckPlanOutput(resultRelInfo->ri_RelationDesc,
+			MergeAction *action = (MergeAction *) lfirst(l);
+			MergeActionState *action_state;
+			RelMergeActionState *relstate;
+			TupleDesc	tupdesc;
+			List	  **list;
+
+			action_state = makeNode(MergeActionState);
+			action_state->mas_action = action;
+
+			/* create tupdesc for this action's projection */
+			tupdesc = ExecTypeFromTL((List *) action->targetList);
+
+			mtstate->mt_mergeState->actionStates =
+				lappend(mtstate->mt_mergeState->actionStates, action_state);
+
+			/*
+			 * Build action merge state for this rel.  (For partitions, equivalent
+			 * code exists in ExecInitPartitionInfo.)
+			 */
+			relstate = makeNode(RelMergeActionState);
+			relstate->rmas_global = action_state;
+			relstate->rmas_whenqual = ExecInitQual((List *) action->qual,
+											   &mtstate->ps);
+			relstate->rmas_mergeslot =
+				ExecInitExtraTupleSlot(mtstate->ps.state, tupdesc,
+									   &TTSOpsVirtual);
+
+			/*
+			 * We create two lists - one for WHEN MATCHED actions and one for WHEN
+			 * NOT MATCHED actions - and stick the MergeActionState into the
+			 * appropriate list.
+			 */
+			if (action_state->mas_action->matched)
+				list = &resultRelInfo->ri_matchedMergeAction;
+			else
+				list = &resultRelInfo->ri_notMatchedMergeAction;
+			*list = lappend(*list, relstate);
+
+			switch (action->commandType)
+			{
+				case CMD_INSERT:
+					ExecCheckPlanOutput(rootRelInfo->ri_RelationDesc,
 									action->targetList);
-				relstate->rmas_proj =
-					ExecBuildProjectionInfo(action->targetList, econtext,
-											resultRelInfo->ri_newTupleSlot,
-											&mtstate->ps,
-											relationDesc);
+					relstate->rmas_proj =
+						ExecBuildProjectionInfo(action->targetList, econtext,
+												resultRelInfo->ri_newTupleSlot,
+												&mtstate->ps,
+												relationDesc);
+					/*
+					 * If the MERGE targets a partitioned table, any INSERT
+					 * actions must be routed through it, not the child
+					 * relations. Initialize the routing struct and the root
+					 * table's "new" tuple slot for that, if not already
+					 * done.
+					 */
+					if (rootRelInfo->ri_RelationDesc->rd_rel->relkind ==
+						RELKIND_PARTITIONED_TABLE &&
+						mtstate->mt_partition_tuple_routing == NULL)
+					{
+						/*
+						 * Note that the slot is managed as a standalone slot
+						 * belonging to ModifyTableState, so we pass NULL
+						 * for the 2nd argument.
+						 */
+						mtstate->mt_root_tuple_slot =
+							table_slot_create(rootRelInfo->ri_RelationDesc,
+											  NULL);
+						mtstate->mt_partition_tuple_routing =
+							ExecSetupPartitionTupleRouting(estate,
+														   rootRelInfo->ri_RelationDesc);
+					}
 
-				if (resultRelInfo->ri_RelationDesc->rd_rel->relkind ==
-					RELKIND_PARTITIONED_TABLE)
-					mtstate->mt_partition_tuple_routing =
-						ExecSetupPartitionTupleRouting(estate,
-													   resultRelInfo->ri_RelationDesc);
-
-				mtstate->mt_merge_subcommands |= MERGE_INSERT;
-				break;
-			case CMD_UPDATE:
-				updateColnos = extract_update_targetlist_colnos(action->targetList);
-				relstate->rmas_proj =
+					mtstate->mt_merge_subcommands |= MERGE_INSERT;
+					break;
+				case CMD_UPDATE:
+					relstate->rmas_proj =
 					ExecBuildUpdateProjection(action->targetList,
 											  true,
-											  updateColnos,
+											  action->updateColnos,
 											  RelationGetDescr(resultRelInfo->ri_RelationDesc),
 											  econtext,
 											  resultRelInfo->ri_newTupleSlot,
 											  &mtstate->ps);
-				mtstate->mt_merge_subcommands |= MERGE_UPDATE;
-				break;
-			case CMD_DELETE:
-				mtstate->mt_merge_subcommands |= MERGE_DELETE;
-				break;
-			case CMD_NOTHING:
-				break;
-			default:
-				elog(ERROR, "unknown operation");
-				break;
+					mtstate->mt_merge_subcommands |= MERGE_UPDATE;
+					break;
+				case CMD_DELETE:
+					mtstate->mt_merge_subcommands |= MERGE_DELETE;
+					break;
+				case CMD_NOTHING:
+					break;
+				default:
+					elog(ERROR, "unknown operation");
+					break;
+			}
 		}
 	}
 }

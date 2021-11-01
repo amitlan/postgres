@@ -150,8 +150,10 @@ preprocess_targetlist(PlannerInfo *root)
 			if (action->commandType == CMD_INSERT)
 				action->targetList = expand_insert_targetlist(action->targetList,
 															  target_relation);
+			else if (action->commandType == CMD_UPDATE)
+				action->updateColnos =
+					extract_update_targetlist_colnos(action->targetList);
 		}
-
 	}
 
 	/*
