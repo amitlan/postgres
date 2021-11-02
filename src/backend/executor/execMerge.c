@@ -271,9 +271,6 @@ lmerge_matched:
 				break;
 
 			case CMD_DELETE:
-				/* FIXME crash here is because expand_single_inheritance_entry
-				 * doesn't see that the resultRelInfo is in root->all_result_relids.
-				 */
 				slot = ExecDelete(mtstate, resultRelInfo,
 								  tupleid, NULL,
 								  slot, epqstate, estate,
