@@ -563,6 +563,9 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 	/*
 	 * Create a MergeActionState for each action on the mergeActionList and
 	 * add it to either a list of matched actions or not-matched actions.
+	 *
+	 * Similar logic appears in ExecInitPartitionInfo(), so if changing
+	 * anything here, do so there too.
 	 */
 	i = 0;
 	foreach(lc, node->mergeActionLists)
