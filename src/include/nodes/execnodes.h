@@ -394,23 +394,11 @@ typedef struct MergeActionState
 {
 	NodeTag		type;
 
-	MergeAction *mas_action;	/* associated MergeAction node */
-} MergeActionState;
-
-/*
- * RelMergeActionState
- *
- * Per-relation info for a MERGE action.
- */
-typedef struct RelMergeActionState
-{
-	NodeTag		type;
-
-	MergeActionState *rmas_global;	/* XXX better name? */
-	ProjectionInfo *rmas_proj;	/* projection of the action's targetlist for
+	MergeAction	   *mas_action;	/* associated MergeAction node */
+	ProjectionInfo *mas_proj;	/* projection of the action's targetlist for
 								 * this rel */
-	ExprState  *rmas_whenqual;	/* WHEN AND conditions */
-} RelMergeActionState;
+	ExprState	   *mas_whenqual;	/* WHEN AND conditions */
+} MergeActionState;
 
 /*
  * ResultRelInfo
@@ -555,8 +543,8 @@ typedef struct ResultRelInfo
 	struct CopyMultiInsertBuffer *ri_CopyMultiInsertBuffer;
 
 	TupleTableSlot *ri_mergeTuple;	/* for EPQ during MERGE */
-	List	   *ri_matchedMergeAction;	/* of RelMergeActionState */
-	List	   *ri_notMatchedMergeAction;	/* of RelMergeActionState */
+	List	   *ri_matchedMergeAction;	/* of MergeActionState */
+	List	   *ri_notMatchedMergeAction;	/* of MergeActionState */
 } ResultRelInfo;
 
 /* ----------------
@@ -1216,13 +1204,6 @@ typedef struct ProjectSetState
 	MemoryContext argcontext;	/* context for SRF arguments */
 } ProjectSetState;
 
-typedef struct MergeState
-{
-	NodeTag		type;
-	/* List of MergeActionState actions */
-	List	   *actionStates;
-} MergeState;
-
 /* ----------------
  *	 ModifyTableState information
  * ----------------
@@ -1272,9 +1253,6 @@ typedef struct ModifyTableState
 
 	/* controls transition table population for INSERT...ON CONFLICT UPDATE */
 	struct TransitionCaptureState *mt_oc_transition_capture;
-
-	/* State for MERGE */
-	MergeState *mt_mergeState;
 
 	/* Flags showing which subcommands are present INS/UPD/DEL/DO NOTHING */
 	int			mt_merge_subcommands;

@@ -212,8 +212,8 @@ lmerge_matched:
 
 	foreach(l, resultRelInfo->ri_matchedMergeAction)
 	{
-		RelMergeActionState *relaction = (RelMergeActionState *) lfirst(l);
-		CmdType		commandType = relaction->rmas_global->mas_action->commandType;
+		MergeActionState *relaction = (MergeActionState *) lfirst(l);
+		CmdType		commandType = relaction->mas_action->commandType;
 
 		/*
 		 * Test condition, if any
@@ -222,7 +222,7 @@ lmerge_matched:
 		 * (no need to check separately since ExecQual() will return true if
 		 * there are no conditions to evaluate).
 		 */
-		if (!ExecQual(relaction->rmas_whenqual, econtext))
+		if (!ExecQual(relaction->mas_whenqual, econtext))
 			continue;
 
 		/*
@@ -255,7 +255,7 @@ lmerge_matched:
 				 * Project, no need for any other tasks prior to the
 				 * ExecUpdate.
 				 */
-				ExecProject(relaction->rmas_proj);
+				ExecProject(relaction->mas_proj);
 
 				/*
 				 * We don't call ExecFilterJunk() because the projected tuple
@@ -267,7 +267,7 @@ lmerge_matched:
 								  resultRelInfo->ri_newTupleSlot,
 								  slot, epqstate, estate,
 								  &tuple_updated, &tmfd,
-								  relaction->rmas_global, mtstate->canSetTag);
+								  relaction, mtstate->canSetTag);
 				break;
 
 			case CMD_DELETE:
@@ -278,7 +278,7 @@ lmerge_matched:
 								  mtstate->canSetTag,
 								  false /* changingPart */ ,
 								  &tmfd,
-								  relaction->rmas_global,
+								  relaction,
 								  &tuple_deleted, NULL /* epqslot */ );
 
 				break;
@@ -467,8 +467,8 @@ ExecMergeNotMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 
 	foreach(l, actionStates)
 	{
-		RelMergeActionState *action = (RelMergeActionState *) lfirst(l);
-		CmdType		commandType = action->rmas_global->mas_action->commandType;
+		MergeActionState *action = (MergeActionState *) lfirst(l);
+		CmdType		commandType = action->mas_action->commandType;
 
 		/*
 		 * Test condition, if any
@@ -477,7 +477,7 @@ ExecMergeNotMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 		 * (no need to check separately since ExecQual() will return true if
 		 * there are no conditions to evaluate).
 		 */
-		if (!ExecQual(action->rmas_whenqual, econtext))
+		if (!ExecQual(action->mas_whenqual, econtext))
 			continue;
 
 		/* Perform stated action */
@@ -488,7 +488,7 @@ ExecMergeNotMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 				 * Project the tuple matching the insert target table's
 				 * tuple descriptor.
 				 */
-				insert_slot = ExecProject(action->rmas_proj);
+				insert_slot = ExecProject(action->mas_proj);
 
 				/*
 				 * If the MERGE targets a partitioned table, and the given
@@ -518,7 +518,7 @@ ExecMergeNotMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 
 				(void) ExecInsert(mtstate, resultRelInfo,
 								  insert_slot, slot,
-								  estate, action->rmas_global,
+								  estate, action,
 								  mtstate->canSetTag);
 				InstrCountFiltered1(&mtstate->ps, 1);
 				break;
@@ -553,14 +553,6 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 	econtext = mtstate->ps.ps_ExprContext;
 
 	/*
-	 * initialize state node to empty.
-	 *
-	 * FIXME mt_mergeState is now useless redirection. Remove it and just do
-	 * mtstate->mt_mergeActionStates
-	 */
-	mtstate->mt_mergeState = makeNode(MergeState);
-
-	/*
 	 * Create a MergeActionState for each action on the mergeActionList and
 	 * add it to either a list of matched actions or not-matched actions.
 	 *
@@ -592,23 +584,16 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 		{
 			MergeAction *action = (MergeAction *) lfirst(l);
 			MergeActionState *action_state;
-			RelMergeActionState *relstate;
 			List	  **list;
-
-			action_state = makeNode(MergeActionState);
-			action_state->mas_action = action;
-
-			mtstate->mt_mergeState->actionStates =
-				lappend(mtstate->mt_mergeState->actionStates, action_state);
 
 			/*
 			 * Build action merge state for this rel.  (For partitions, equivalent
 			 * code exists in ExecInitPartitionInfo.)
 			 */
-			relstate = makeNode(RelMergeActionState);
-			relstate->rmas_global = action_state;
-			relstate->rmas_whenqual = ExecInitQual((List *) action->qual,
-											   &mtstate->ps);
+			action_state = makeNode(MergeActionState);
+			action_state->mas_action = action;
+			action_state->mas_whenqual = ExecInitQual((List *) action->qual,
+													   &mtstate->ps);
 
 			/*
 			 * We create two lists - one for WHEN MATCHED actions and one for WHEN
@@ -619,14 +604,14 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 				list = &resultRelInfo->ri_matchedMergeAction;
 			else
 				list = &resultRelInfo->ri_notMatchedMergeAction;
-			*list = lappend(*list, relstate);
+			*list = lappend(*list, action_state);
 
 			switch (action->commandType)
 			{
 				case CMD_INSERT:
 					ExecCheckPlanOutput(rootRelInfo->ri_RelationDesc,
-									action->targetList);
-					relstate->rmas_proj =
+										action->targetList);
+					action_state->mas_proj =
 						ExecBuildProjectionInfo(action->targetList, econtext,
 												resultRelInfo->ri_newTupleSlot,
 												&mtstate->ps,
@@ -658,7 +643,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 					mtstate->mt_merge_subcommands |= MERGE_INSERT;
 					break;
 				case CMD_UPDATE:
-					relstate->rmas_proj =
+					action_state->mas_proj =
 					ExecBuildUpdateProjection(action->targetList,
 											  true,
 											  action->updateColnos,

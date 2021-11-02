@@ -883,17 +883,18 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 			/* Make a copy for this relation to be safe.  */
 			MergeAction *action = copyObject(lfirst(lc));
 			MergeActionState *action_state;
-			RelMergeActionState *relstate;
-			List	   *conv_qual;
-			List	   *updateColnos;
 			List	  **list;
 
+			/* Generate the action's state for this relation */
 			action_state = makeNode(MergeActionState);
 			action_state->mas_action = action;
 
-			/* Generate the action's state for this relation */
-			relstate = makeNode(RelMergeActionState);
-			relstate->rmas_global = action_state;
+			/* And put the action in the appropriate list */
+			if (action->matched)
+				list = &leaf_part_rri->ri_matchedMergeAction;
+			else
+				list = &leaf_part_rri->ri_notMatchedMergeAction;
+			*list = lappend(*list, action_state);
 
 			switch (action->commandType)
 			{
@@ -903,7 +904,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 					 * when "first" result relation initialized and it is
 					 * same for all result relations.
 					 */
-					relstate->rmas_proj =
+					action_state->mas_proj =
 						ExecBuildProjectionInfo(action->targetList, econtext,
 												leaf_part_rri->ri_newTupleSlot,
 												&mtstate->ps,
@@ -918,7 +919,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 						action->updateColnos =
 							adjust_partition_colnos_using_map(action->updateColnos,
 															  part_attmap);
-					relstate->rmas_proj =
+					action_state->mas_proj =
 						ExecBuildUpdateProjection(action->targetList,
 												  true,
 												  action->updateColnos,
@@ -942,16 +943,8 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 									part_attmap,
 									RelationGetForm(partrel)->reltype,
 									&found_whole_row);
-			relstate->rmas_whenqual = ExecInitQual(action->qual,
-												   &mtstate->ps);
-
-
-			/* And put the action in the appropriate list */
-			if (action->matched)
-				list = &leaf_part_rri->ri_matchedMergeAction;
-			else
-				list = &leaf_part_rri->ri_notMatchedMergeAction;
-			*list = lappend(*list, relstate);
+			action_state->mas_whenqual = ExecInitQual(action->qual,
+													  &mtstate->ps);
 		}
 	}
 	MemoryContextSwitchTo(oldcxt);
