@@ -420,7 +420,7 @@ transformMergeStmt(ParseState *pstate, MergeStmt *stmt)
 
 		/*
 		 * Set namespace for the specific action. This must be done before
-		 * analyzing the WHEN quals and the action targetlisst.
+		 * analyzing the WHEN quals and the action targetlist.
 		 */
 		setNamespaceForMergeWhen(pstate, mergeWhenClause);
 

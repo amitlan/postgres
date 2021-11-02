@@ -2564,11 +2564,13 @@ ExecModifyTable(PlanState *pstate)
 			if (isNull)
 			{
 				/*
-				 * XXX For MERGE, any unmatched tuples will naturally have
-				 * InvalidOid for the "tableoid" column (since the tuple does
-				 * not exist in any partition).  In all other cases this is an
-				 * error, but we need to do ExecMerge.  Also note that we use
-				 * the node's toplevel resultRelInfo.
+				 * For MERGE, any unmatched tuples will naturally have
+				 * InvalidOid for the "tableoid" column (since no tuple exists
+				 * in any target partition).  In non-MERGE cases this is an
+				 * error, but for MERGE we have to handle possible WHEN NOT
+				 * MATCHED clauses, so do that.
+				 *
+				 * Also note that we use the node's toplevel resultRelInfo.
 				 */
 				if (operation == CMD_MERGE)
 				{
