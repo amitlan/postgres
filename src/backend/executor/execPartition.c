@@ -872,7 +872,6 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 			leaf_part_rri->ri_mergeTuple = firstResultRelInfo->ri_mergeTuple;
 			leaf_part_rri->ri_matchedMergeAction = firstResultRelInfo->ri_matchedMergeAction;
 			leaf_part_rri->ri_notMatchedMergeAction = firstResultRelInfo->ri_notMatchedMergeAction;
-			elog(WARNING, "this might need work");
 		}
 		else
 		{
