@@ -141,7 +141,8 @@ preprocess_targetlist(PlannerInfo *root)
 		/*
 		 * For MERGE, handle targetlist of each MergeAction separately. Give
 		 * the same treatment to MergeAction->targetList as we would have given
-		 * to a regular INSERT.  We don't know to do anything for UPDATE.
+		 * to a regular INSERT.  For UPDATE, collect the column numbers being
+		 * modified.
 		 */
 		foreach(l, parse->mergeActionList)
 		{
