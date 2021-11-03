@@ -63,8 +63,6 @@ transformMergeJoinClause(ParseState *pstate, Node *merge,
 	List	   *namespace;
 	Node	   *n;
 	int			mergeSourceRTE;
-	Var		   *var;
-	TargetEntry *te;
 
 	/*
 	 * Transform our ficticious join of the target and the source tables, and
@@ -129,14 +127,6 @@ transformMergeJoinClause(ParseState *pstate, Node *merge,
 	 * is added to transformFromClauseItem, so consider removing it.
 	 */
 	*mergeSourceTargetList = expandNSItemAttrs(pstate, top_nsitem, 0, false, -1);
-
-	/*
-	 * Add a whole-row-Var entry to support references to "source.*".
-	 */
-	var = makeWholeRowVar(right_nsitem->p_rte, right_nsitem->p_rtindex, 0, false);
-	te = makeTargetEntry((Expr *) var, list_length(*mergeSourceTargetList) + 1,
-						 NULL, true);
-	*mergeSourceTargetList = lappend(*mergeSourceTargetList, te);
 
 	return mergeSourceRTE;
 }
