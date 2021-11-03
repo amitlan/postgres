@@ -919,9 +919,6 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 													  leaf_part_rri->ri_newTupleSlot,
 													  NULL);
 						break;
-					case CMD_DELETE:
-						elog(WARNING, "hoping nothing needed here");
-						break;
 
 					default:
 						elog(ERROR, "unknown action in MERGE WHEN clause");
