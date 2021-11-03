@@ -39,14 +39,14 @@ ON t.tid = s.sid
 WHEN MATCHED THEN
 	DELETE
 ;
-                QUERY PLAN                
-------------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Merge on target t
    ->  Merge Join
-         Merge Cond: (t_1.tid = s.sid)
+         Merge Cond: (t.tid = s.sid)
          ->  Sort
-               Sort Key: t_1.tid
-               ->  Seq Scan on target t_1
+               Sort Key: t.tid
+               ->  Seq Scan on target t
          ->  Sort
                Sort Key: s.sid
                ->  Seq Scan on source s
@@ -303,14 +303,14 @@ ON t.tid = s.sid
 WHEN MATCHED THEN
 	UPDATE SET balance = 0
 ;
-                QUERY PLAN                
-------------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Merge on target t
    ->  Hash Join
-         Hash Cond: (s.sid = t_1.tid)
+         Hash Cond: (s.sid = t.tid)
          ->  Seq Scan on source s
          ->  Hash
-               ->  Seq Scan on target t_1
+               ->  Seq Scan on target t
 (6 rows)
 
 EXPLAIN (COSTS OFF)
@@ -320,14 +320,14 @@ ON t.tid = s.sid
 WHEN MATCHED THEN
 	DELETE
 ;
-                QUERY PLAN                
-------------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Merge on target t
    ->  Hash Join
-         Hash Cond: (s.sid = t_1.tid)
+         Hash Cond: (s.sid = t.tid)
          ->  Seq Scan on source s
          ->  Hash
-               ->  Seq Scan on target t_1
+               ->  Seq Scan on target t
 (6 rows)
 
 EXPLAIN (COSTS OFF)
@@ -336,14 +336,14 @@ USING source AS s
 ON t.tid = s.sid
 WHEN NOT MATCHED THEN
 	INSERT VALUES (4, NULL);
-                QUERY PLAN                
-------------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Merge on target t
    ->  Hash Left Join
-         Hash Cond: (s.sid = t_1.tid)
+         Hash Cond: (s.sid = t.tid)
          ->  Seq Scan on source s
          ->  Hash
-               ->  Seq Scan on target t_1
+               ->  Seq Scan on target t
 (6 rows)
 
 ;
