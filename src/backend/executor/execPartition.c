@@ -34,8 +34,6 @@
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
 
-/* This include suggests that code requiring it should be elsewhere */
-#include "optimizer/prep.h"
 
 /*-----------------------
  * PartitionTupleRouting - Encapsulates all information required to
@@ -911,8 +909,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 													RelationGetDescr(partrel));
 						break;
 					case CMD_UPDATE:
-						updateColnos = extract_update_targetlist_colnos(action->targetList);
-						updateColnos = adjust_partition_colnos(updateColnos, leaf_part_rri);
+						updateColnos = adjust_partition_colnos(action->updateColnos, leaf_part_rri);
 						relstate->rmas_proj =
 							ExecBuildUpdateProjection(action->targetList,
 													  true,
