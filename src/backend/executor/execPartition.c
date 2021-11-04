@@ -937,14 +937,15 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 			}
 
 			/* found_whole_row intentionally ignored. */
-			action->qual = (List *)
-				map_variable_attnos((Node *) action->qual,
+			action->qual =
+				map_variable_attnos(action->qual,
 									firstVarno, 0,
 									part_attmap,
 									RelationGetForm(partrel)->reltype,
 									&found_whole_row);
-			action_state->mas_whenqual = ExecInitQual(action->qual,
-													  &mtstate->ps);
+			action_state->mas_whenqual =
+				ExecInitQual(make_ands_implicit((Expr *) action->qual),
+							 &mtstate->ps);
 		}
 	}
 	MemoryContextSwitchTo(oldcxt);
