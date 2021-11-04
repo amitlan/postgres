@@ -493,17 +493,12 @@ transformMergeStmt(ParseState *pstate, MergeStmt *stmt)
 					 * needing insert permissions.
 					 */
 					rte = pstate->p_target_nsitem->p_rte;
-					icols = list_head(icolumns);
-					attnos = list_head(attrnos);
-					foreach(lc, exprList)
+					forthree(lc, exprList, icols, icolumns, attnos, attrnos)
 					{
 						Expr	   *expr = (Expr *) lfirst(lc);
-						ResTarget  *col;
-						AttrNumber	attr_num;
+						ResTarget  *col = lfirst_node(ResTarget, icols);
+						AttrNumber	attr_num = (AttrNumber) lfirst_int(attnos);
 						TargetEntry *tle;
-
-						col = lfirst_node(ResTarget, icols);
-						attr_num = (AttrNumber) lfirst_int(attnos);
 
 						tle = makeTargetEntry(expr,
 											  attr_num,
@@ -514,9 +509,6 @@ transformMergeStmt(ParseState *pstate, MergeStmt *stmt)
 						rte->insertedCols =
 							bms_add_member(rte->insertedCols,
 										   attr_num - FirstLowInvalidHeapAttributeNumber);
-
-						icols = lnext(icolumns, icols);
-						attnos = lnext(attrnos, attnos);
 					}
 				}
 				break;
