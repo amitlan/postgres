@@ -232,15 +232,17 @@ get_row_security_policies(Query *root, RangeTblEntry *rte, int rt_index,
 						   hasSubLinks);
 
 	/*
-	 * Similar to above, during an UPDATE or DELETE, if SELECT rights are also
-	 * required (eg: when a RETURNING clause exists, or the user has provided
-	 * a WHERE clause which involves columns from the relation), we collect up
-	 * CMD_SELECT policies and add them via add_security_quals first.
+	 * Similar to above, during an UPDATE, DELETE, or MERGE, if SELECT rights
+	 * are also required (eg: when a RETURNING clause exists, or the user has
+	 * provided a WHERE clause which involves columns from the relation), we
+	 * collect up CMD_SELECT policies and add them via add_security_quals
+	 * first.
 	 *
 	 * This way, we filter out any records which are not visible through an
 	 * ALL or SELECT USING policy.
 	 */
-	if ((commandType == CMD_UPDATE || commandType == CMD_DELETE) &&
+	if ((commandType == CMD_UPDATE || commandType == CMD_DELETE ||
+		 commandType == CMD_MERGE) &&
 		rte->requiredPerms & ACL_SELECT)
 	{
 		List	   *select_permissive_policies;
@@ -385,10 +387,7 @@ get_row_security_policies(Query *root, RangeTblEntry *rte, int rt_index,
 	 * and set them up so that we can enforce the appropriate policy depending
 	 * on the final action we take.
 	 *
-	 * We don't fetch the SELECT policies since they are correctly applied to
-	 * the root->mergeTarget_relation. The target rows are selected after
-	 * joining the mergeTarget_relation and the source relation and hence it's
-	 * enough to apply SELECT policies to the mergeTarget_relation.
+	 * We already fetched the SELECT policies above.
 	 *
 	 * We don't push the UPDATE/DELETE USING quals to the RTE because we don't
 	 * really want to apply them while scanning the relation since we don't
