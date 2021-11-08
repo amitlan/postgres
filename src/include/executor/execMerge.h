@@ -25,4 +25,7 @@ extern void ExecMerge(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 
 extern void ExecInitMerge(ModifyTableState *mtstate, EState *estate);
 
+extern void ExecInitMergeProjection(ModifyTableState *mtstate,
+									ResultRelInfo *resultRelInfo);
+
 #endif							/* NODEMERGE_H */

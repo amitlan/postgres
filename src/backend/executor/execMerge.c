@@ -570,15 +570,9 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 		i++;
 		relationDesc = RelationGetDescr(resultRelInfo->ri_RelationDesc);
 
-		/* initialize slot for MERGE fetches from this rel
-		 * XXX Can we use ExecInitUpdateProjection for this?
-		 */
-		resultRelInfo->ri_oldTupleSlot =
-			ExecInitExtraTupleSlot(mtstate->ps.state, relationDesc,
-								   &TTSOpsBufferHeapTuple);
-		resultRelInfo->ri_newTupleSlot =
-			table_slot_create(resultRelInfo->ri_RelationDesc,
-							  &estate->es_tupleTable);
+		/* initialize slot for MERGE fetches from this rel */
+		if (unlikely(!resultRelInfo->ri_projectNewInfoValid))
+			ExecInitMergeProjection(mtstate, resultRelInfo);
 
 		foreach(l, mergeActionList)
 		{
@@ -664,4 +658,26 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 			}
 		}
 	}
+}
+
+/*
+ * Initializes the tuple slots in a ResultRelInfo for any MERGE action.
+ *
+ * This mimics ExecInitInsertProjection / ExecInitUpdateProjection
+ */
+void
+ExecInitMergeProjection(ModifyTableState *mtstate,
+						ResultRelInfo *resultRelInfo)
+{
+	EState     *estate = mtstate->ps.state;
+
+	Assert(!resultRelInfo->ri_projectNewInfoValid);
+
+	resultRelInfo->ri_oldTupleSlot =
+		table_slot_create(resultRelInfo->ri_RelationDesc,
+						  &estate->es_tupleTable);
+	resultRelInfo->ri_newTupleSlot =
+		table_slot_create(resultRelInfo->ri_RelationDesc,
+						  &estate->es_tupleTable);
+	resultRelInfo->ri_projectNewInfoValid = true;
 }

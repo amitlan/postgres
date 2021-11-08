@@ -18,6 +18,7 @@
 #include "catalog/partition.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
+#include "executor/execMerge.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
 #include "foreign/fdwapi.h"
@@ -873,10 +874,9 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 			part_attmap =
 				build_attrmap_by_name(RelationGetDescr(partrel),
 									  RelationGetDescr(firstResultRel));
-		leaf_part_rri->ri_oldTupleSlot =
-			ExecInitExtraTupleSlot(mtstate->ps.state,
-								   RelationGetDescr(partrel),
-								   &TTSOpsBufferHeapTuple);
+
+		if (unlikely(!leaf_part_rri->ri_projectNewInfoValid))
+			ExecInitMergeProjection(mtstate, leaf_part_rri);
 
 		foreach(lc, firstMergeActionList)
 		{
