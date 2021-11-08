@@ -190,7 +190,7 @@ ExecMergeMatched(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo,
 	 * Again, this target relation's slot is required only in the case of a
 	 * MATCHED tuple and UPDATE/DELETE actions.
 	 */
-	econtext->ecxt_scantuple = resultRelInfo->ri_mergeTuple;
+	econtext->ecxt_scantuple = resultRelInfo->ri_oldTupleSlot;
 	econtext->ecxt_innertuple = slot;
 	econtext->ecxt_outertuple = NULL;
 
@@ -207,7 +207,7 @@ lmerge_matched:
 	if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc,
 									   tupleid,
 									   SnapshotAny,
-									   resultRelInfo->ri_mergeTuple))
+									   resultRelInfo->ri_oldTupleSlot))
 		elog(ERROR, "failed to fetch the target tuple");
 
 	foreach(l, resultRelInfo->ri_matchedMergeAction)
@@ -241,7 +241,7 @@ lmerge_matched:
 			ExecWithCheckOptions(commandType == CMD_UPDATE ?
 								 WCO_RLS_MERGE_UPDATE_CHECK : WCO_RLS_MERGE_DELETE_CHECK,
 								 resultRelInfo,
-								 resultRelInfo->ri_mergeTuple,
+								 resultRelInfo->ri_oldTupleSlot,
 								 mtstate->ps.state);
 		}
 
@@ -573,7 +573,7 @@ ExecInitMerge(ModifyTableState *mtstate, EState *estate)
 		/* initialize slot for MERGE fetches from this rel
 		 * XXX Can we use ExecInitUpdateProjection for this?
 		 */
-		resultRelInfo->ri_mergeTuple =
+		resultRelInfo->ri_oldTupleSlot =
 			ExecInitExtraTupleSlot(mtstate->ps.state, relationDesc,
 								   &TTSOpsBufferHeapTuple);
 		resultRelInfo->ri_newTupleSlot =

@@ -1256,7 +1256,6 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	/* FIXME -- merge stuff */
 	resultRelInfo->ri_matchedMergeAction = NIL;
 	resultRelInfo->ri_notMatchedMergeAction = NIL;
-	resultRelInfo->ri_mergeTuple = NULL;
 
 	resultRelInfo->ri_RootToPartitionMap = NULL;	/* set by
 													 * ExecInitRoutingInfo */

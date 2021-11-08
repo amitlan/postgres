@@ -542,7 +542,6 @@ typedef struct ResultRelInfo
 	/* for use by copyfrom.c when performing multi-inserts */
 	struct CopyMultiInsertBuffer *ri_CopyMultiInsertBuffer;
 
-	TupleTableSlot *ri_mergeTuple;	/* for EPQ during MERGE */
 	List	   *ri_matchedMergeAction;	/* of MergeActionState */
 	List	   *ri_notMatchedMergeAction;	/* of MergeActionState */
 } ResultRelInfo;

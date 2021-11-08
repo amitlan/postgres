@@ -873,7 +873,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 			part_attmap =
 				build_attrmap_by_name(RelationGetDescr(partrel),
 									  RelationGetDescr(firstResultRel));
-		leaf_part_rri->ri_mergeTuple =
+		leaf_part_rri->ri_oldTupleSlot =
 			ExecInitExtraTupleSlot(mtstate->ps.state,
 								   RelationGetDescr(partrel),
 								   &TTSOpsBufferHeapTuple);

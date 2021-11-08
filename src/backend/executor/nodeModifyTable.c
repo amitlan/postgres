@@ -1584,7 +1584,7 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 		{
 			ExprContext *econtext = mtstate->ps.ps_ExprContext;
 
-			econtext->ecxt_scantuple = resultRelInfo->ri_mergeTuple;
+			econtext->ecxt_scantuple = resultRelInfo->ri_oldTupleSlot;
 			econtext->ecxt_innertuple = epqslot;
 			econtext->ecxt_outertuple = NULL;
 
