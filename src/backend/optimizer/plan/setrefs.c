@@ -1052,7 +1052,8 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				 */
 				if (splan->mergeActionLists != NIL)
 				{
-					ListCell *lc;
+					ListCell *lca,
+							 *lcr;
 
 					/*
 					 * Fix the targetList of individual action nodes so that
@@ -1072,9 +1073,11 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 
 					itlist = build_tlist_index(subplan->targetlist);
 
-					foreach(lc, splan->mergeActionLists)
+					forboth(lca, splan->mergeActionLists,
+							lcr, splan->resultRelations)
 					{
-						List *mergeActionList = lfirst(lc);
+						List *mergeActionList = lfirst(lca);
+						Index	resultrel = lfirst_int(lcr);
 
 						foreach(l, mergeActionList)
 						{
@@ -1084,7 +1087,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 							action->targetList = fix_join_expr(root,
 															   action->targetList,
 															   NULL, itlist,
-															   linitial_int(splan->resultRelations),
+															   resultrel,
 															   rtoffset,
 															   NUM_EXEC_TLIST(plan));
 
@@ -1092,7 +1095,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 							action->qual = (Node *) fix_join_expr(root,
 																  (List *) action->qual,
 																  NULL, itlist,
-																  linitial_int(splan->resultRelations),
+																  resultrel,
 																  rtoffset,
 																  NUM_EXEC_QUAL(plan));
 						}

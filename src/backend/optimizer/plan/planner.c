@@ -1805,14 +1805,6 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 						/*
 						 * Copy MergeActions and translate stuff that
 						 * reference attribute numbers.
-						 * XXX: maybe targetList qualifies for translation
-						 * too because resnos must correspond to the
-						 * relation on which a given action is performed
-						 * but only inserts use the target list and
-						 * ExecMerge() always redirects the inserts to
-						 * go through the root partitioned table for
-						 * tuple routing.  Though, regular inheritance
-						 * doesn't, so maybe think something after all.
 						 */
 						foreach(l, parse->mergeActionList)
 						{
@@ -1822,6 +1814,11 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 							leaf_action->qual =
 								adjust_appendrel_attrs_multilevel(root,
 																  (Node *) action->qual,
+																  this_result_rel->relids,
+																  top_result_rel->relids);
+							leaf_action->targetList = (List *)
+								adjust_appendrel_attrs_multilevel(root,
+																  (Node *) action->targetList,
 																  this_result_rel->relids,
 																  top_result_rel->relids);
 							if (leaf_action->commandType == CMD_UPDATE)

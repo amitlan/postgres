@@ -16,9 +16,11 @@ step merge_status:
 step c2: COMMIT;
 step merge_status: <... completed>
 step select1: SELECT * FROM target;
-key            balance        status         val            
+key|balance|status|val                           
+---+-------+------+------------------------------
+  1|    170|s2    |setup updated by update1 when1
+(1 row)
 
-1              170            s2             setup updated by update1 when1
 step c1: COMMIT;
 
 starting permutation: update2 merge_status c2 select1 c1
@@ -37,9 +39,11 @@ step merge_status:
 step c2: COMMIT;
 step merge_status: <... completed>
 step select1: SELECT * FROM target;
-key            balance        status         val            
+key|balance|status|val                           
+---+-------+------+------------------------------
+  1|    160|s3    |setup updated by update2 when2
+(1 row)
 
-1              160            s3             setup updated by update2 when2
 step c1: COMMIT;
 
 starting permutation: update3 merge_status c2 select1 c1
@@ -58,9 +62,11 @@ step merge_status:
 step c2: COMMIT;
 step merge_status: <... completed>
 step select1: SELECT * FROM target;
-key            balance        status         val            
+key|balance|status|val                           
+---+-------+------+------------------------------
+  1|    160|s4    |setup updated by update3 when3
+(1 row)
 
-1              160            s4             setup updated by update3 when3
 step c1: COMMIT;
 
 starting permutation: update5 merge_status c2 select1 c1
@@ -79,9 +85,11 @@ step merge_status:
 step c2: COMMIT;
 step merge_status: <... completed>
 step select1: SELECT * FROM target;
-key            balance        status         val            
+key|balance|status|val                     
+---+-------+------+------------------------
+  1|    160|s5    |setup updated by update5
+(1 row)
 
-1              160            s5             setup updated by update5
 step c1: COMMIT;
 
 starting permutation: update_bal1 merge_bal c2 select1 c1
@@ -100,7 +108,9 @@ step merge_bal:
 step c2: COMMIT;
 step merge_bal: <... completed>
 step select1: SELECT * FROM target;
-key            balance        status         val            
+key|balance|status|val                               
+---+-------+------+----------------------------------
+  1|    100|s1    |setup updated by update_bal1 when1
+(1 row)
 
-1              100            s1             setup updated by update_bal1 when1
 step c1: COMMIT;
