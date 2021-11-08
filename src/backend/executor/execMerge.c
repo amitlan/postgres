@@ -31,9 +31,6 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 
-/* This include suggests that code requiring it should be elsewhere */
-#include "optimizer/prep.h"
-
 static bool ExecMergeMatched(ModifyTableState *mtstate,
 							 ResultRelInfo *resultRelInfo,
 							 EState *estate,
