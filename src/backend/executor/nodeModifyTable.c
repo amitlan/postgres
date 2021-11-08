@@ -1578,17 +1578,28 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 		/*
 		 * If running as part of an MERGE update, use the projection given in
 		 * the provided MergeActionState to emit the tuple to retry the update
-		 * with.
+		 * with -- but be sure to start with the most recent version of tuple.
 		 */
 		else if (actionState)
 		{
 			ExprContext *econtext = mtstate->ps.ps_ExprContext;
+			TupleTableSlot *oldSlot;
+
+			/* Fetch the most recent version of old tuple. */
+			oldSlot = resultRelInfo->ri_oldTupleSlot;
+			if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc,
+											   tupleid,
+											   SnapshotAny,
+											   oldSlot))
+				elog(ERROR, "failed to fetch tuple being updated");
 
 			econtext->ecxt_scantuple = resultRelInfo->ri_oldTupleSlot;
 			econtext->ecxt_innertuple = epqslot;
 			econtext->ecxt_outertuple = NULL;
 
 			*retry_slot = ExecProject(actionState->mas_proj);
+			/* XXX I don't understand why this is needed */
+			ExecMaterializeSlot(*retry_slot);
 			return false;
 		}
 		else
