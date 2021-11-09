@@ -944,8 +944,7 @@ ExecInitPartitionInfo(ModifyTableState *mtstate, EState *estate,
 									RelationGetForm(partrel)->reltype,
 									&found_whole_row);
 			action_state->mas_whenqual =
-				ExecInitQual(make_ands_implicit((Expr *) action->qual),
-							 &mtstate->ps);
+				ExecInitQual((List *) action->qual, &mtstate->ps);
 		}
 	}
 	MemoryContextSwitchTo(oldcxt);
