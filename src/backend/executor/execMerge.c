@@ -345,57 +345,106 @@ lmerge_matched:
 					 */
 					if (!ItemPointerEquals(tupleid, &tmfd.ctid))
 					{
-						TupleTableSlot *epqslot;
+						Relation	resultRelationDesc = resultRelInfo->ri_RelationDesc;
+						TupleTableSlot *epqslot,
+									   *inputslot;
+						TM_Result	result;
+						int			lockmode = ExecUpdateLockMode(estate, resultRelInfo);
 
-						epqslot = EvalPlanQual(epqstate,
-											   resultRelInfo->ri_RelationDesc,
-											   resultRelInfo->ri_RangeTableIndex,
-											   resultRelInfo->ri_newTupleSlot);
+						inputslot = EvalPlanQualSlot(epqstate, resultRelationDesc,
+													 resultRelInfo->ri_RangeTableIndex);
 
-						if (!TupIsNull(epqslot))
+						result = table_tuple_lock(resultRelationDesc, tupleid,
+												  estate->es_snapshot,
+												  inputslot, estate->es_output_cid,
+												  lockmode, LockWaitBlock,
+												  TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
+												  &tmfd);
+						switch (result)
 						{
-							(void) ExecGetJunkAttribute(epqslot,
-														resultRelInfo->ri_RowIdAttNo,
-														&isNull);
+							case TM_Ok:
+								epqslot = EvalPlanQual(epqstate,
+													   resultRelationDesc,
+													   resultRelInfo->ri_RangeTableIndex,
+													   inputslot);
 
-							/*
-							 * A non-NULL ctid means that we are still dealing
-							 * with MATCHED case. But we must retry from the
-							 * start with the updated tuple to ensure that the
-							 * first qualifying WHEN MATCHED action is
-							 * executed.
-							 *
-							 * We don't use the new slot returned by
-							 * EvalPlanQual because we anyways re-install the
-							 * new target tuple in econtext->ecxt_scantuple
-							 * before re-evaluating WHEN AND conditions and
-							 * re-projecting the update targetlists. The
-							 * source side tuple does not change and hence we
-							 * can safely continue to use the old slot.
-							 */
-							if (!isNull)
-							{
+								if (!TupIsNull(epqslot))
+								{
+									(void) ExecGetJunkAttribute(epqslot,
+																resultRelInfo->ri_RowIdAttNo,
+																&isNull);
+
+									/*
+									 * A non-NULL ctid means that we are still dealing
+									 * with MATCHED case. But we must retry from the
+									 * start with the updated tuple to ensure that the
+									 * first qualifying WHEN MATCHED action is
+									 * executed.
+									 *
+									 * We don't use the new slot returned by
+									 * EvalPlanQual because we anyways re-install the
+									 * new target tuple in econtext->ecxt_scantuple
+									 * before re-evaluating WHEN AND conditions and
+									 * re-projecting the update targetlists. The
+									 * source side tuple does not change and hence we
+									 * can safely continue to use the old slot.
+									 */
+									if (!isNull)
+									{
+										/*
+										 * When a tuple was updated and migrate to
+										 * another partition concurrently, the current
+										 * MERGE implementation can't follow.  There's
+										 * probably a better way to handle this case,
+										 * but it'd require recognizing the relation
+										 * to which the tuple moved, and setting
+										 * our current resultRelInfo to that.
+										 */
+										if (ItemPointerIndicatesMovedPartitions(&tmfd.ctid))
+											ereport(ERROR,
+													(errmsg("tuple to be deleted was already moved to another partition due to concurrent update")));
+
+										/*
+										 * Must update *tupleid to the TID of the
+										 * newer tuple found in the update chain.
+										 */
+										*tupleid = tmfd.ctid;
+										slot = epqslot;
+										goto lmerge_matched;
+									}
+								}
+
+							case TM_Deleted:
+								/* tuple already deleted; nothing to do */
+								return NULL;
+
+							case TM_SelfModified:
+
 								/*
-								 * When a tuple was updated and migrate to
-								 * another partition concurrently, the current
-								 * MERGE implementation can't follow.  There's
-								 * probably a better way to handle this case,
-								 * but it'd require recognizing the relation
-								 * to which the tuple moved, and setting
-								 * our current resultRelInfo to that.
+								 * This can be reached when following an update
+								 * chain from a tuple updated by another session,
+								 * reaching a tuple that was already updated in
+								 * this transaction. If previously modified by
+								 * this command, ignore the redundant update,
+								 * otherwise error out.
+								 *
+								 * See also TM_SelfModified response to
+								 * table_tuple_update() above.
 								 */
-								if (ItemPointerIndicatesMovedPartitions(&tmfd.ctid))
+								if (tmfd.cmax != estate->es_output_cid)
 									ereport(ERROR,
-											(errmsg("tuple to be deleted was already moved to another partition due to concurrent update")));
+											(errcode(ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION),
+											 errmsg("tuple to be updated or deleted was already modified by an operation triggered by the current command"),
+											 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
+									return NULL;
 
-								/*
-								 * Must update *tupleid to the TID of the
-								 * newer tuple found in the update chain.
-								 */
-								*tupleid = tmfd.ctid;
-								goto lmerge_matched;
-							}
+							default:
+								/* see table_tuple_lock call in ExecDelete() */
+								elog(ERROR, "unexpected table_tuple_lock status: %u",
+									 result);
+								return NULL;
 						}
+
 					}
 
 					/*

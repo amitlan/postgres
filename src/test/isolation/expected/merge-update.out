@@ -189,12 +189,11 @@ step pa_merge2a:
 step c1: COMMIT;
 step pa_merge2a: <... completed>
 step pa_select2: SELECT * FROM pa_target;
-key|val                         
----+----------------------------
-  1|initial updated by pa_merge1
-  1|pa_merge2a                  
-  2|initial                     
-(3 rows)
+key|val                                               
+---+--------------------------------------------------
+  2|initial                                           
+  2|initial updated by pa_merge1 updated by pa_merge2a
+(2 rows)
 
 step c2: COMMIT;
 
@@ -219,14 +218,9 @@ step pa_merge2a:
  <waiting ...>
 step c1: COMMIT;
 step pa_merge2a: <... completed>
+ERROR:  tuple to be locked was already moved to another partition due to concurrent update
 step pa_select2: SELECT * FROM pa_target;
-key|val                         
----+----------------------------
-  1|pa_merge2a                  
-  2|initial                     
-  2|initial updated by pa_merge2
-(3 rows)
-
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
 step c2: COMMIT;
 
 starting permutation: pa_merge2 c1 pa_merge2a pa_select2 c2
