@@ -65,6 +65,16 @@ step "pa_merge2"
   WHEN MATCHED THEN
     UPDATE set key = t.key + 1, val = t.val || ' updated by ' || s.val;
 }
+step "pa_merge3"
+{
+  MERGE INTO pa_target t
+  USING (SELECT 1 as key, 'pa_merge2' as val) s
+  ON s.key = t.key
+  WHEN NOT MATCHED THEN
+	INSERT VALUES (s.key, s.val)
+  WHEN MATCHED THEN
+    UPDATE set val = 'prefix ' || t.val;
+}
 step "c1" { COMMIT; }
 step "a1" { ABORT; }
 
@@ -113,6 +123,17 @@ step "pa_merge2a"
   WHEN MATCHED THEN
 	UPDATE set key = t.key + 1, val = t.val || ' updated by ' || s.val;
 }
+# MERGE proceeds only if 'val' unchanged
+step "pa_merge2b_when"
+{
+  MERGE INTO pa_target t
+  USING (SELECT 1 as key, 'pa_merge2b_when' as val) s
+  ON s.key = t.key
+  WHEN NOT MATCHED THEN
+	INSERT VALUES (s.key, s.val)
+  WHEN MATCHED AND t.val like 'initial%' THEN
+	UPDATE set key = t.key + 1, val = t.val || ' updated by ' || s.val;
+}
 step "select2" { SELECT * FROM target; }
 step "pa_select2" { SELECT * FROM pa_target; }
 step "c2" { COMMIT; }
@@ -131,3 +152,5 @@ permutation "merge1" "merge2c" "c1" "select2" "c2"
 permutation "pa_merge1" "pa_merge2a" "c1" "pa_select2" "c2"
 permutation "pa_merge2" "pa_merge2a" "c1" "pa_select2" "c2" # fails
 permutation "pa_merge2" "c1" "pa_merge2a" "pa_select2" "c2" # succeeds
+permutation "pa_merge3" "pa_merge2b_when" "c1" "pa_select2" "c2" # WHEN not satisfied by updated tuple
+permutation "pa_merge1" "pa_merge2b_when" "c1" "pa_select2" "c2" # WHEN satisfied by updated tuple
