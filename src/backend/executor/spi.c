@@ -1577,6 +1577,7 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 {
 	CachedPlanSource *plansource;
 	CachedPlan *cplan;
+	CachedPlanExtra *cplan_extra;
 	List	   *stmt_list;
 	char	   *query_string;
 	Snapshot	snapshot;
@@ -1657,7 +1658,11 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 	 */
 
 	/* Replan if needed, and increment plan refcount for portal */
-	cplan = GetCachedPlan(plansource, paramLI, NULL, _SPI_current->queryEnv);
+	cplan = GetCachedPlan(plansource, paramLI, NULL, _SPI_current->queryEnv,
+						  &cplan_extra);
+	Assert(cplan_extra == NULL ||
+		   (list_length(cplan->stmt_list) ==
+			list_length(cplan_extra->part_prune_results_list)));
 	stmt_list = cplan->stmt_list;
 
 	if (!plan->saved)
@@ -1684,6 +1689,9 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 					  plansource->commandTag,
 					  stmt_list,
 					  cplan);
+
+	if (cplan_extra)
+		PortalSaveCachedPlanExtra(portal, cplan_extra);
 
 	/*
 	 * Set up options for portal.  Default SCROLL type is chosen the same way
@@ -2067,6 +2075,7 @@ SPI_plan_get_cached_plan(SPIPlanPtr plan)
 {
 	CachedPlanSource *plansource;
 	CachedPlan *cplan;
+	CachedPlanExtra *cplan_extra = NULL;
 	SPICallbackArg spicallbackarg;
 	ErrorContextCallback spierrcontext;
 
@@ -2092,8 +2101,12 @@ SPI_plan_get_cached_plan(SPIPlanPtr plan)
 	/* Get the generic plan for the query */
 	cplan = GetCachedPlan(plansource, NULL,
 						  plan->saved ? CurrentResourceOwner : NULL,
-						  _SPI_current->queryEnv);
+						  _SPI_current->queryEnv,
+						  &cplan_extra);
 	Assert(cplan == plansource->gplan);
+	Assert(cplan_extra == NULL ||
+		   (list_length(cplan->stmt_list) ==
+			list_length(cplan_extra->part_prune_results_list)));
 
 	/* Pop the error context stack */
 	error_context_stack = spierrcontext.previous;
@@ -2399,6 +2412,7 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 	SPICallbackArg spicallbackarg;
 	ErrorContextCallback spierrcontext;
 	CachedPlan *cplan = NULL;
+	CachedPlanExtra *cplan_extra = NULL;
 	ListCell   *lc1;
 
 	/*
@@ -2549,8 +2563,12 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 		 * plan, the refcount must be backed by the plan_owner.
 		 */
 		cplan = GetCachedPlan(plansource, options->params,
-							  plan_owner, _SPI_current->queryEnv);
+							  plan_owner, _SPI_current->queryEnv,
+							  &cplan_extra);
 
+		Assert(cplan_extra == NULL ||
+			   (list_length(cplan->stmt_list) ==
+				list_length(cplan_extra->part_prune_results_list)));
 		stmt_list = cplan->stmt_list;
 
 		/*
@@ -2592,9 +2610,14 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 		foreach(lc2, stmt_list)
 		{
 			PlannedStmt *stmt = lfirst_node(PlannedStmt, lc2);
+			List	   *part_prune_results = NIL;
 			bool		canSetTag = stmt->canSetTag;
 			DestReceiver *dest;
 
+			if (cplan_extra)
+				part_prune_results = list_nth_node(List,
+												   cplan_extra->part_prune_results_list,
+												   foreach_current_index(lc2));
 			/*
 			 * Reset output state.  (Note that if a non-SPI receiver is used,
 			 * _SPI_current->processed will stay zero, and that's what we'll
@@ -2663,7 +2686,7 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 				else
 					snap = InvalidSnapshot;
 
-				qdesc = CreateQueryDesc(stmt,
+				qdesc = CreateQueryDesc(stmt, part_prune_results,
 										plansource->query_string,
 										snap, crosscheck_snapshot,
 										dest,

@@ -82,7 +82,9 @@ typedef struct PlannedStmt
 	List	   *permInfos;		/* list of RTEPermissionInfo nodes for rtable
 								 * entries needing one */
 
-	Bitmapset  *minLockRelids;	/* Indexes of all range table entries; for
+	Bitmapset  *minLockRelids;	/* Indexes of all range table entries except
+								 * those of leaf partitions scanned by
+								 * prunable subplans; for
 								 * AcquireExecutorLocks()'s perusal */
 
 	/* rtable indexes of target relations for INSERT/UPDATE/DELETE/MERGE */
@@ -1575,6 +1577,33 @@ typedef struct PartitionPruneStepCombine
 	List	   *source_stepids;
 } PartitionPruneStepCombine;
 
+/*----------------
+ * PartitionPruneResult
+ *
+ * The result of performing ExecPartitionDoInitialPruning() on a given
+ * PartitionPruneInfo.
+ *
+ * root_parent_relids is same as PartitionPruneInfo.root_parent_relids.  It's
+ * there for cross-checking in ExecInitPartitionPruning() that the
+ * PartitionPruneResult and the PartitionPruneInfo at a given index in
+ * EState.es_part_prune_results and EState.es_part_prune_infos, respectively,
+ * belong to the same parent plan node.
+ *
+ * valid_subplans_offs contains the indexes of subplans remaining after
+ * performing initial pruning by calling ExecFindMatchingSubPlans() on the
+ * PartitionPruneInfo.
+ *
+ * This is used to store the result of initial partition pruning that is
+ * peformed before the execution has started, such as in
+ * CachedPlanLockPartitions().
+ */
+typedef struct PartitionPruneResult
+{
+	NodeTag		type;
+
+	Bitmapset	   *root_parent_relids;
+	Bitmapset	   *valid_subplan_offs;
+} PartitionPruneResult;
 
 /*
  * Plan invalidation info

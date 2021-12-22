@@ -304,6 +304,22 @@ PortalDefineQuery(Portal portal,
 }
 
 /*
+ * Copies the given CachedPlanExtra struct into the portal.
+ */
+void
+PortalSaveCachedPlanExtra(Portal portal, CachedPlanExtra *extra)
+{
+	MemoryContext	oldcxt = MemoryContextSwitchTo(portal->portalContext);
+
+	Assert(portal->cplan_extra == NULL && extra != NULL);
+	portal->cplan_extra = (CachedPlanExtra *)
+		palloc(sizeof(CachedPlanExtra));
+	portal->cplan_extra->part_prune_results_list =
+		copyObject(extra->part_prune_results_list);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
  * PortalReleaseCachedPlan
  *		Release a portal's reference to its cached plan, if any.
  */

@@ -798,6 +798,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 {
 	CmdType		operation = queryDesc->operation;
 	PlannedStmt *plannedstmt = queryDesc->plannedstmt;
+	List	   *part_prune_results = queryDesc->part_prune_results;
 	Plan	   *plan = plannedstmt->planTree;
 	List	   *rangeTable = plannedstmt->rtable;
 	EState	   *estate = queryDesc->estate;
@@ -819,6 +820,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 
 	estate->es_plannedstmt = plannedstmt;
 	estate->es_part_prune_infos = plannedstmt->partPruneInfos;
+	estate->es_part_prune_results = part_prune_results;
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.

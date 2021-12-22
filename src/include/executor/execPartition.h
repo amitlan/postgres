@@ -129,5 +129,10 @@ extern PartitionPruneState *ExecInitPartitionPruning(PlanState *planstate,
 													 Bitmapset *root_parent_relids,
 													 Bitmapset **initially_valid_subplans);
 extern Bitmapset *ExecFindMatchingSubPlans(PartitionPruneState *prunestate,
-										   bool initial_prune);
+										   bool initial_prune,
+										   Bitmapset **scan_leafpart_rtis);
+extern Bitmapset *ExecPartitionDoInitialPruning(PlannedStmt *plannedstmt,
+								ParamListInfo params,
+								PartitionPruneInfo *pruneinfo,
+								Bitmapset **scan_leafpart_rtis);
 #endif							/* EXECPARTITION_H */

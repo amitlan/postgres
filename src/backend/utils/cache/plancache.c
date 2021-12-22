@@ -59,6 +59,7 @@
 #include "access/transam.h"
 #include "catalog/namespace.h"
 #include "executor/executor.h"
+#include "executor/execPartition.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
@@ -99,14 +100,18 @@ static dlist_head cached_expression_list = DLIST_STATIC_INIT(cached_expression_l
 static void ReleaseGenericPlan(CachedPlanSource *plansource);
 static List *RevalidateCachedQuery(CachedPlanSource *plansource,
 								   QueryEnvironment *queryEnv);
-static bool CheckCachedPlan(CachedPlanSource *plansource);
+static bool CheckCachedPlan(CachedPlanSource *plansource, bool *hasUnlockedParts);
 static CachedPlan *BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 								   ParamListInfo boundParams, QueryEnvironment *queryEnv);
 static bool choose_custom_plan(CachedPlanSource *plansource,
 							   ParamListInfo boundParams);
 static double cached_plan_cost(CachedPlan *plan, bool include_planner);
 static Query *QueryListGetPrimaryStmt(List *stmts);
-static void AcquireExecutorLocks(List *stmt_list, bool acquire);
+static bool AcquireExecutorLocks(List *stmt_list, bool acquire);
+static bool CachedPlanLockPartitions(CachedPlanSource *plansource,
+						 ParamListInfo boundParams,
+						 ResourceOwner owner,
+						 CachedPlanExtra **extra);
 static void AcquirePlannerLocks(List *stmt_list, bool acquire);
 static void ScanQueryForLocks(Query *parsetree, bool acquire);
 static bool ScanQueryWalker(Node *node, bool *acquire);
@@ -783,16 +788,23 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
 }
 
 /*
- * CheckCachedPlan: see if the CachedPlanSource's generic plan is valid.
+ * CheckCachedPlan: see if the CachedPlanSource's generic plan is valid and
+ * set *hasUnlockedParts if any PlannedStmt contains "initially" prunable
+ * subnodes; partitions are not locked till initial pruning is done.
  *
  * Caller must have already called RevalidateCachedQuery to verify that the
  * querytree is up to date.
  *
- * On a "true" return, we have acquired the locks needed to run the plan.
+ * On a "true" return, we have acquired the minimal set of locks needed to run
+ * the plan, that is, excluding partitions that are subject to being pruned
+ * before execution.  The caller must lock partitions after pruning those and
+ * locking the ones that remain before actually telling the world that the
+ * plan is "valid".
+ *
  * (We must do this for the "true" result to be race-condition-free.)
  */
 static bool
-CheckCachedPlan(CachedPlanSource *plansource)
+CheckCachedPlan(CachedPlanSource *plansource, bool *hasUnlockedParts)
 {
 	CachedPlan *plan = plansource->gplan;
 
@@ -826,7 +838,7 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		 */
 		Assert(plan->refcount > 0);
 
-		AcquireExecutorLocks(plan->stmt_list, true);
+		*hasUnlockedParts = AcquireExecutorLocks(plan->stmt_list, true);
 
 		/*
 		 * If plan was transient, check to see if TransactionXmin has
@@ -848,7 +860,7 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		}
 
 		/* Oops, the race case happened.  Release useless locks. */
-		AcquireExecutorLocks(plan->stmt_list, false);
+		(void) AcquireExecutorLocks(plan->stmt_list, false);
 	}
 
 	/*
@@ -1120,14 +1132,17 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
 }
 
 /*
- * GetCachedPlan: get a cached plan from a CachedPlanSource.
+ * GetCachedPlan: get a cached plan from a CachedPlanSource
  *
  * This function hides the logic that decides whether to use a generic
  * plan or a custom plan for the given parameters: the caller does not know
  * which it will get.
  *
  * On return, the plan is valid and we have sufficient locks to begin
- * execution.
+ * execution.  If the plan is a generic plan containing prunable partitions,
+ * the locks on partitions are taken after the pruning and the result of that
+ * pruning is saved in *extra->part_prune_results_list for the caller to pass
+ * to the executor, along with plan->stmt_list.
  *
  * On return, the refcount of the plan has been incremented; a later
  * ReleaseCachedPlan() call is expected.  If "owner" is not NULL then
@@ -1139,11 +1154,15 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
  */
 CachedPlan *
 GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
-			  ResourceOwner owner, QueryEnvironment *queryEnv)
+			  ResourceOwner owner, QueryEnvironment *queryEnv,
+			  CachedPlanExtra **extra)
 {
 	CachedPlan *plan = NULL;
 	List	   *qlist;
 	bool		customplan;
+
+	Assert(extra != NULL);
+	*extra = NULL;
 
 	/* Assert caller is doing things in a sane order */
 	Assert(plansource->magic == CACHEDPLANSOURCE_MAGIC);
@@ -1160,7 +1179,11 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 
 	if (!customplan)
 	{
-		if (CheckCachedPlan(plansource))
+		bool	hasUnlockedParts = false;
+
+		if (CheckCachedPlan(plansource, &hasUnlockedParts) &&
+			hasUnlockedParts &&
+			CachedPlanLockPartitions(plansource, boundParams, owner, extra))
 		{
 			/* We want a generic plan, and we already have a valid one */
 			plan = plansource->gplan;
@@ -1280,6 +1303,147 @@ ReleaseCachedPlan(CachedPlan *plan, ResourceOwner owner)
 		if (!plan->is_oneshot)
 			MemoryContextDelete(plan->context);
 	}
+}
+
+/*
+ * For each PlannedStmt in the generic plan, do the "initial" partition pruning
+ * if needed and lock only partitions that survive.
+ *
+ * On return, (*extra)->part_prune_results_list will contain an element for
+ * each PlannedStmt in the generic plan's stmt_list, which is a NIL if the
+ * PlannedStmt does not contain any PartitionPruneInfos requiring initial
+ * pruning or a List of PartitionPruneResult containing elements corresponding
+ * to the PartitionPruneInfos in PlannedStmt.partPruneInfos.
+ */
+static bool
+CachedPlanLockPartitions(CachedPlanSource *plansource,
+						 ParamListInfo boundParams,
+						 ResourceOwner owner,
+						 CachedPlanExtra **extra)
+{
+	CachedPlan *plan = plansource->gplan;
+	List	   *part_prune_results_list = NIL;
+	List	   *lockedRelids_per_stmt = NIL;
+	ListCell   *lc1,
+			   *lc2;
+	MemoryContext oldcontext,
+			tmpcontext;
+
+	/*
+	 * Won't be here without CheckCachedPlan() having validated a generic
+	 * plan.
+	 */
+	Assert(plansource->gplan != NULL);
+
+	/*
+	 * Create a temporary context for memory allocations required while
+	 * executing partition pruning steps.
+	 */
+	tmpcontext = AllocSetContextCreate(CurrentMemoryContext,
+									   "CachedPlanLockPartitions() working data",
+									   ALLOCSET_DEFAULT_SIZES);
+	oldcontext = MemoryContextSwitchTo(tmpcontext);
+	foreach(lc1, plan->stmt_list)
+	{
+		PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc1);
+		Bitmapset  *lockPartRelids = NULL;
+		int			rti;
+		List	   *part_prune_results = NIL;
+		Bitmapset  *lockedRelids = NULL;
+
+		if (plannedstmt->commandType == CMD_UTILITY)
+		{
+			/*
+			 * Ignore utility statements, because AcquireExecutorLocks on the
+			 * parent CachedPlan would have dealt with these.  Though, do let
+			 * the caller know that no pruning is applicable to this statement.
+			 */
+			part_prune_results_list = lappend(part_prune_results_list, NIL);
+			lockedRelids_per_stmt = lappend(lockedRelids_per_stmt, NULL);
+			continue;
+		}
+
+		/* Figure out the partitions that would need to be locked. */
+		if (plannedstmt->containsInitialPruning)
+		{
+			foreach(lc2, plannedstmt->partPruneInfos)
+			{
+				PartitionPruneInfo *pruneinfo = lfirst_node(PartitionPruneInfo, lc2);
+				PartitionPruneResult *pruneresult = makeNode(PartitionPruneResult);
+
+				pruneresult->root_parent_relids =
+					bms_copy(pruneinfo->root_parent_relids);
+				pruneresult->valid_subplan_offs =
+					ExecPartitionDoInitialPruning(plannedstmt, boundParams,
+												  pruneinfo,
+												  &lockPartRelids);
+				part_prune_results = lappend(part_prune_results, pruneresult);
+			}
+		}
+
+		/* Lock 'em. */
+		rti = -1;
+		while ((rti = bms_next_member(lockPartRelids, rti)) > 0)
+		{
+			RangeTblEntry *rte = rt_fetch(rti, plannedstmt->rtable);
+
+			Assert(rte->rtekind == RTE_RELATION);
+
+			/*
+			 * Acquire the appropriate type of lock on each relation OID. Note
+			 * that we don't actually try to open the rel, and hence will not
+			 * fail if it's been dropped entirely --- we'll just transiently
+			 * acquire a non-conflicting lock.
+			 */
+			LockRelationOid(rte->relid, rte->rellockmode);
+			lockedRelids = bms_add_member(lockedRelids, rti);
+		}
+
+		part_prune_results_list = lappend(part_prune_results_list,
+										  part_prune_results);
+		lockedRelids_per_stmt = lappend(lockedRelids_per_stmt,
+										lockedRelids);
+	}
+
+	/*
+	 * If the plan is still valid, set *extra, returning in it a copy the
+	 * pruning results obtained above allocated in the caller's context.
+	 */
+	MemoryContextSwitchTo(oldcontext);
+	if (plan->is_valid)
+	{
+		*extra = (CachedPlanExtra *) palloc(sizeof(CachedPlanExtra));
+		(*extra)->part_prune_results_list = copyObject(part_prune_results_list);
+	}
+	else
+	{
+		/*
+		 * Release the now useless locks.  Note that this is the same as what
+		 * CheckCachedPlan() does when the locks taken by
+		 * AcquireExecutorLocks() causes the plan to be invalidated.
+		 */
+		forboth(lc1, plan->stmt_list, lc2, lockedRelids_per_stmt)
+		{
+			PlannedStmt *plannedstmt = lfirst(lc1);
+			Bitmapset *lockedRelids = lfirst(lc2);
+			int		rti;
+
+			if (plannedstmt->commandType == CMD_UTILITY)
+				continue;
+			rti = -1;
+			while ((rti = bms_next_member(lockedRelids, rti)) > 0)
+			{
+				RangeTblEntry *rte = rt_fetch(rti, plannedstmt->rtable);
+
+				Assert(rte->rtekind == RTE_RELATION);
+				UnlockRelationOid(rte->relid, rte->rellockmode);
+			}
+		}
+	}
+
+	/* Clear up the temporary context. */
+	MemoryContextDelete(tmpcontext);
+	return plan->is_valid;
 }
 
 /*
@@ -1738,11 +1902,16 @@ QueryListGetPrimaryStmt(List *stmts)
 /*
  * AcquireExecutorLocks: acquire locks needed for execution of a cached plan;
  * or release them if acquire is false.
+ *
+ * If some PlannedStmt(s) contain "initially prunable" partitions, they are not
+ * locked here. Instead, the caller is informed of their existence so that it
+ * can lock them after doing the initial pruning.
  */
-static void
+static bool
 AcquireExecutorLocks(List *stmt_list, bool acquire)
 {
 	ListCell   *lc1;
+	bool		hasUnlockedParts = false;
 
 	foreach(lc1, stmt_list)
 	{
@@ -1763,9 +1932,16 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 
 			Assert(plannedstmt->minLockRelids == NULL);
 			if (query)
-				ScanQueryForLocks(query, acquire);
+				ScanQueryForLocks(query, true);
 			continue;
 		}
+
+		/*
+		 * If partitions can be pruned before execution, defer their locking to
+		 * the caller.
+		 */
+		if (plannedstmt->containsInitialPruning)
+			hasUnlockedParts = true;
 
 		allLockRelids = plannedstmt->minLockRelids;
 		rti = -1;
@@ -1788,6 +1964,8 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 				UnlockRelationOid(rte->relid, rte->rellockmode);
 		}
 	}
+
+	return hasUnlockedParts;
 }
 
 /*

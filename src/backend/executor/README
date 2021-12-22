@@ -63,7 +63,36 @@ if the executor determines that an entire subplan is not required due to
 execution time partition pruning determining that no matching records will be
 found there.  This currently only occurs for Append and MergeAppend nodes.  In
 this case the non-required subplans are ignored and the executor state's
-subnode array will become out of sequence to the plan's subplan list.
+subnode array will become out of sequence to the plan's subplan list.  Note
+that this is referred to as "initial" pruning, because it needs to occur only
+once during the execution startup, and uses a set of pruning steps called
+initial pruning steps (see PartitionedRelPruneInfo.initial_pruning_steps).
+
+Actually, "initial" pruning may occur even before the execution startup in
+in some cases.  For example, when a cached generic plan is validated for
+execution, which works by locking all the relations that will be scanned by
+that plan during execution.  If the generic plan contains plan nodes that have
+prunable child subnodes, then this validation locking is performed after
+pruning child subnodes that need not be scanned during execution, that is,
+using initial pruning steps.  When such a generic plan is forwarded for
+execution, it must be accompanied by the set of PartitionPruneResult nodes that
+contain the result of that pruning, which basically consists of a bitmapset of
+child subnode indexes that survived the pruning and thus whose relations would
+have been locked for execution.  This is important, because, unlike the
+plan-time pruning and actual executor-startup pruning, this does not actually
+remove the pruned subnodes from the plan tree, but only marks them as being
+pruned.  So, the executor code (core or third party), especially one that runs
+before ExecutorStart() and thus looks at bare Plan trees (not PlanState trees)
+must beware of plan nodes that may actually have been pruned and thus subject
+to being invalidated by concurrent schema changes.  For plan nodes that can
+have prunable child subnodes and thus contain a PartitionPruneInfo, such code
+must always check if the corresponding PartitionPruneResult exists
+in EState.es_part_prune_results at given part_prune_index and use that to
+decide which subplans are valid for execution instead of redoing the pruning.
+Note that that is not just a performance optimization but also necessary to
+avoid possibly ending up considering a different set of child subnodes as valid
+than the set CachedPlanLockPartitions() would have locked the relations of, if
+the pruning steps produce a different result when executed multiple times.
 
 Each Plan node may have expression trees associated with it, to represent
 its target list, qualification conditions, etc.  These trees are also

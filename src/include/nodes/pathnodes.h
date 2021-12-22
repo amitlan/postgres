@@ -134,8 +134,8 @@ typedef struct PlannerGlobal
 	bool		containsInitialPruning;
 
 	/*
-	 * Indexes of all range table entries; for AcquireExecutorLocks()'s
-	 * perusal.
+	 * Indexes of all range table entries except those of leaf partitions
+	 * scanned by prunable subplans; for AcquireExecutorLocks() perusal.
 	 */
 	Bitmapset  *minLockRelids;
 
