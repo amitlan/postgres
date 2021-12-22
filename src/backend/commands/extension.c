@@ -776,7 +776,7 @@ execute_sql_string(const char *sql)
 			{
 				QueryDesc  *qdesc;
 
-				qdesc = CreateQueryDesc(stmt,
+				qdesc = CreateQueryDesc(stmt, NIL,
 										sql,
 										GetActiveSnapshot(), NULL,
 										dest, NULL, NULL, 0);
