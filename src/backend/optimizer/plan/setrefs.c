@@ -372,6 +372,7 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 	{
 		PartitionPruneInfo *pruneinfo = lfirst(lc);
 		ListCell   *l;
+		Bitmapset  *leafpart_rtis = NULL;
 
 		pruneinfo->root_parent_relids =
 			offset_relid_set(pruneinfo->root_parent_relids, rtoffset);
@@ -383,16 +384,51 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 			foreach(l2, prune_infos)
 			{
 				PartitionedRelPruneInfo *pinfo = lfirst(l2);
+				int		i;
 
 				/* RT index of the table to which the pinfo belongs. */
 				pinfo->rtindex += rtoffset;
+
+				/* Also of the leaf partitions that might be scanned. */
+				for (i = 0; i < pinfo->nparts; i++)
+				{
+					if (pinfo->rti_map[i] > 0 && pinfo->subplan_map[i] >= 0)
+					{
+						pinfo->rti_map[i] += rtoffset;
+						leafpart_rtis = bms_add_member(leafpart_rtis,
+													   pinfo->rti_map[i]);
+					}
+				}
 			}
 
+		}
+
+		if (pruneinfo->needs_init_pruning)
+		{
+			glob->containsInitialPruning = true;
+
+			/*
+			 * Delete the leaf partition RTIs from the set of relations to be
+			 * locked by AcquireExecutorLocks().  The actual set of leaf
+			 * partitions to be locked is computed by
+			 * CachedPlanLockPartitions().
+			 */
+			glob->minLockRelids = bms_del_members(glob->minLockRelids,
+												  leafpart_rtis);
 		}
 
 		glob->partPruneInfos = lappend(glob->partPruneInfos, pruneinfo);
 		glob->containsInitialPruning |= pruneinfo->needs_init_pruning;
 	}
+
+	/*
+	 * It seems worth doing a bms_copy() on glob->minLockRelids if we deleted
+	 * bits from it above to get rid of any empty tail bits.  It seems better
+	 * for the loop over this set in AcquireExecutorLocks() to not have to go
+	 * through those useless bit words.
+	 */
+	if (glob->containsInitialPruning)
+		glob->minLockRelids = bms_copy(glob->minLockRelids);
 
 	return result;
 }

@@ -1598,6 +1598,7 @@ exec_bind_message(StringInfo input_message)
 	int16	   *rformats = NULL;
 	CachedPlanSource *psrc;
 	CachedPlan *cplan;
+	CachedPlanExtra *cplan_extra = NULL;
 	Portal		portal;
 	char	   *query_string;
 	char	   *saved_stmt_name;
@@ -1972,7 +1973,10 @@ exec_bind_message(StringInfo input_message)
 	 * will be generated in MessageContext.  The plan refcount will be
 	 * assigned to the Portal, so it will be released at portal destruction.
 	 */
-	cplan = GetCachedPlan(psrc, params, NULL, NULL);
+	cplan = GetCachedPlan(psrc, params, NULL, NULL, &cplan_extra);
+	Assert(cplan_extra == NULL ||
+		   (list_length(cplan->stmt_list) ==
+			list_length(cplan_extra->part_prune_results_list)));
 
 	/*
 	 * Now we can define the portal.
@@ -1986,6 +1990,9 @@ exec_bind_message(StringInfo input_message)
 					  psrc->commandTag,
 					  cplan->stmt_list,
 					  cplan);
+
+	if (cplan_extra)
+		PortalSaveCachedPlanExtra(portal, cplan_extra);
 
 	/* Done with the snapshot used for parameter I/O and parsing/planning */
 	if (snapshot_set)

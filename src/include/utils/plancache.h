@@ -161,6 +161,14 @@ typedef struct CachedPlan
 } CachedPlan;
 
 /*
+ * Additional information to pass the executor when executing a CachedPlan.
+ */
+typedef struct CachedPlanExtra
+{
+	List	   *part_prune_results_list;
+} CachedPlanExtra;
+
+/*
  * CachedExpression is a low-overhead mechanism for caching the planned form
  * of standalone scalar expressions.  While such expressions are not usually
  * subject to cache invalidation events, that can happen, for example because
@@ -220,7 +228,8 @@ extern List *CachedPlanGetTargetList(CachedPlanSource *plansource,
 extern CachedPlan *GetCachedPlan(CachedPlanSource *plansource,
 								 ParamListInfo boundParams,
 								 ResourceOwner owner,
-								 QueryEnvironment *queryEnv);
+								 QueryEnvironment *queryEnv,
+								 CachedPlanExtra **extra);
 extern void ReleaseCachedPlan(CachedPlan *plan, ResourceOwner owner);
 
 extern bool CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,

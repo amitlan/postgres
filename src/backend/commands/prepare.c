@@ -154,6 +154,7 @@ ExecuteQuery(ParseState *pstate,
 {
 	PreparedStatement *entry;
 	CachedPlan *cplan;
+	CachedPlanExtra *cplan_extra = NULL;
 	List	   *plan_list;
 	ParamListInfo paramLI = NULL;
 	EState	   *estate = NULL;
@@ -193,7 +194,11 @@ ExecuteQuery(ParseState *pstate,
 									   entry->plansource->query_string);
 
 	/* Replan if needed, and increment plan refcount for portal */
-	cplan = GetCachedPlan(entry->plansource, paramLI, NULL, NULL);
+	cplan = GetCachedPlan(entry->plansource, paramLI, NULL, NULL,
+						  &cplan_extra);
+	Assert(cplan_extra == NULL ||
+		   (list_length(cplan->stmt_list) ==
+			list_length(cplan_extra->part_prune_results_list)));
 	plan_list = cplan->stmt_list;
 
 	/*
@@ -206,6 +211,9 @@ ExecuteQuery(ParseState *pstate,
 					  entry->plansource->commandTag,
 					  plan_list,
 					  cplan);
+
+	if (cplan_extra)
+		PortalSaveCachedPlanExtra(portal, cplan_extra);
 
 	/*
 	 * For CREATE TABLE ... AS EXECUTE, we must verify that the prepared
@@ -575,6 +583,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	PreparedStatement *entry;
 	const char *query_string;
 	CachedPlan *cplan;
+	CachedPlanExtra *cplan_extra = NULL;
 	List	   *plan_list;
 	ListCell   *p;
 	ParamListInfo paramLI = NULL;
@@ -619,7 +628,11 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 
 	/* Replan if needed, and acquire a transient refcount */
 	cplan = GetCachedPlan(entry->plansource, paramLI,
-						  CurrentResourceOwner, queryEnv);
+						  CurrentResourceOwner, queryEnv,
+						  &cplan_extra);
+	Assert(cplan_extra == NULL ||
+		   (list_length(cplan->stmt_list) ==
+			list_length(cplan_extra->part_prune_results_list)));
 
 	INSTR_TIME_SET_CURRENT(planduration);
 	INSTR_TIME_SUBTRACT(planduration, planstart);
@@ -637,10 +650,17 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	foreach(p, plan_list)
 	{
 		PlannedStmt *pstmt = lfirst_node(PlannedStmt, p);
+		List *part_prune_results = NIL;
+
+		if (cplan_extra)
+			part_prune_results = list_nth_node(List,
+											   cplan_extra->part_prune_results_list,
+											   foreach_current_index(p));
 
 		if (pstmt->commandType != CMD_UTILITY)
-			ExplainOnePlan(pstmt, into, es, query_string, paramLI, queryEnv,
-						   &planduration, (es->buffers ? &bufusage : NULL));
+			ExplainOnePlan(pstmt, part_prune_results, into, es, query_string,
+						   paramLI, queryEnv, &planduration,
+						   (es->buffers ? &bufusage : NULL));
 		else
 			ExplainOneUtility(pstmt->utilityStmt, into, es, query_string,
 							  paramLI, queryEnv);
