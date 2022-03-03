@@ -779,6 +779,16 @@ JumbleExpr(JumbleState *jstate, Node *node)
 				APP_JUMB(ctor->unique);
 			}
 			break;
+		case T_JsonIsPredicate:
+			{
+				JsonIsPredicate *pred = (JsonIsPredicate *) node;
+
+				JumbleExpr(jstate, (Node *) pred->expr);
+				JumbleExpr(jstate, (Node *) pred->format);
+				APP_JUMB(pred->item_type);
+				APP_JUMB(pred->unique_keys);
+			}
+			break;
 		case T_List:
 			foreach(temp, (List *) node)
 			{
