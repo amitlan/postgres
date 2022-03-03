@@ -1251,6 +1251,7 @@ JsonConstructorType
 JsonEncoding
 JsonExpr
 JsonExprOp
+JsonExprState
 JsonFormat
 JsonFormatType
 JsonFunc
