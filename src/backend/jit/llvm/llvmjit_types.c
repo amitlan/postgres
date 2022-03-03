@@ -134,6 +134,7 @@ void	   *referenced_functions[] =
 	ExecEvalXmlExpr,
 	ExecEvalJsonConstructor,
 	ExecEvalJsonIsPredicate,
+	ExecEvalJson,
 	MakeExpandedObjectReadOnlyInternal,
 	slot_getmissingattrs,
 	slot_getsomeattrs_int,

@@ -28,6 +28,7 @@
 #include "catalog/pg_type.h"
 #include "executor/executor.h"
 #include "executor/functions.h"
+#include "executor/execExpr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -53,6 +54,7 @@
 #include "utils/fmgroids.h"
 #include "utils/json.h"
 #include "utils/jsonb.h"
+#include "utils/jsonpath.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -406,31 +408,28 @@ contain_mutable_functions_walker(Node *node, void *context)
 		/* Check all subnodes */
 	}
 
+	if (IsA(node, JsonExpr))
+	{
+		JsonExpr   *jexpr = castNode(JsonExpr, node);
+		Const	   *cnst;
+
+		if (!IsA(jexpr->path_spec, Const))
+			return true;
+
+		cnst = castNode(Const, jexpr->path_spec);
+
+		Assert(cnst->consttype == JSONPATHOID);
+		if (cnst->constisnull)
+			return false;
+
+		return jspIsMutable(DatumGetJsonPathP(cnst->constvalue),
+							jexpr->passing_names, jexpr->passing_values);
+	}
+
 	if (IsA(node, NextValueExpr))
 	{
 		/* NextValueExpr is volatile */
 		return true;
-	}
-
-	if (IsA(node, JsonConstructorExpr))
-	{
-		const JsonConstructorExpr *ctor = (JsonConstructorExpr *) node;
-		ListCell   *lc;
-		bool		is_jsonb =
-		ctor->returning->format->format_type == JS_FORMAT_JSONB;
-
-		/* Check argument_type => json[b] conversions */
-		foreach(lc, ctor->args)
-		{
-			Oid			typid = exprType(lfirst(lc));
-
-			if (is_jsonb ?
-				!to_jsonb_is_immutable(typid) :
-				!to_json_is_immutable(typid))
-				return true;
-		}
-
-		/* Check all subnodes */
 	}
 
 	/*

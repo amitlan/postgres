@@ -22,6 +22,8 @@ struct ExprEvalStep;
 struct SubscriptingRefState;
 struct ScalarArrayOpExprHashTable;
 struct JsonConstructorExprState;
+struct JsonbValue;
+struct JsonExprState;
 
 /* Bits in ExprState->flags (see also execnodes.h for public flag bits): */
 /* expression's interpreter has been initialized */
@@ -241,6 +243,7 @@ typedef enum ExprEvalOp
 	EEOP_SUBPLAN,
 	EEOP_JSON_CONSTRUCTOR,
 	EEOP_IS_JSON,
+	EEOP_JSONEXPR,
 
 	/* aggregation related nodes */
 	EEOP_AGG_STRICT_DESERIALIZE,
@@ -682,6 +685,12 @@ typedef struct ExprEvalStep
 			JsonIsPredicate *pred;	/* original expression node */
 		}			is_json;
 
+		/* for EEOP_JSONEXPR */
+		struct
+		{
+			struct JsonExprState *jsestate;
+		}			jsonexpr;
+
 	}			d;
 } ExprEvalStep;
 
@@ -741,6 +750,49 @@ typedef struct JsonConstructorExprState
 	int			nargs;
 } JsonConstructorExprState;
 
+/* EEOP_JSONEXPR state, too big to inline */
+typedef struct JsonExprState
+{
+	JsonExpr   *jsexpr;			/* original expression node */
+
+	struct
+	{
+		FmgrInfo	func;		/* typinput function for output type */
+		Oid			typioparam;
+	}			input;			/* I/O info for output type */
+
+	NullableDatum
+			   *formatted_expr, /* formatted context item value */
+			   *res_expr,		/* result item */
+			   *coercion_expr,	/* input for JSON item coercion */
+			   *pathspec;		/* path specification value */
+
+	ExprState  *result_expr;	/* coerced to output type */
+	ExprState  *default_on_empty;	/* ON EMPTY DEFAULT expression */
+	ExprState  *default_on_error;	/* ON ERROR DEFAULT expression */
+	List	   *args;			/* passing arguments */
+
+	void	   *cache;			/* cache for json_populate_type() */
+
+	struct JsonCoercionsState
+	{
+		struct JsonCoercionState
+		{
+			JsonCoercion *coercion; /* coercion expression */
+			ExprState  *estate; /* coercion expression state */
+		}			null,
+					string,
+		numeric    ,
+					boolean,
+					date,
+					time,
+					timetz,
+					timestamp,
+					timestamptz,
+					composite;
+	}			coercions;		/* states for coercion from SQL/JSON item
+								 * types directly to the output type */
+} JsonExprState;
 
 /* functions in execExpr.c */
 extern void ExprEvalPushStep(ExprState *es, const ExprEvalStep *s);
@@ -800,6 +852,12 @@ extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
 extern void ExecEvalJsonConstructor(ExprState *state, ExprEvalStep *op,
 									ExprContext *econtext);
+extern void ExecEvalJson(ExprState *state, ExprEvalStep *op,
+						 ExprContext *econtext);
+extern Datum ExecPrepareJsonItemCoercion(struct JsonbValue *item,
+										 JsonReturning *returning,
+										 struct JsonCoercionsState *coercions,
+										 struct JsonCoercionState **pjcstate);
 
 extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
 							 ExprContext *aggcontext);
