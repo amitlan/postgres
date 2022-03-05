@@ -17791,7 +17791,8 @@ $.* ? (@ like_regex "^\\d+$")
          <function>json</function> (
          <replaceable>expression</replaceable>
          <optional> <literal>FORMAT JSON</literal> <optional> <literal>ENCODING UTF8</literal> </optional></optional>
-         <optional> { <literal>WITH</literal> | <literal>WITHOUT</literal> } <literal>UNIQUE</literal> <optional> <literal>KEYS</literal> </optional></optional>)
+         <optional> { <literal>WITH</literal> | <literal>WITHOUT</literal> } <literal>UNIQUE</literal> <optional> <literal>KEYS</literal> </optional></optional>
+         <optional> <literal>RETURNING</literal> <replaceable>json_data_type</replaceable> </optional>)
         </para>
         <para>
          The <replaceable>expression</replaceable> can be any text type or a
@@ -17806,13 +17807,18 @@ $.* ? (@ like_regex "^\\d+$")
          <literal>json('{"a":123, "b":[true,"foo"], "a":"bar"}')</literal>
          <returnvalue>{"a":123, "b":[true,"foo"], "a":"bar"}</returnvalue>
         </para>
+        <para>
+         <literal>json('{"a":123,"b":[true,"foo"],"a":"bar"}' returning jsonb)</literal>
+         <returnvalue>{"a": "bar", "b": [true, "foo"]}</returnvalue>
+        </para>
        </entry>
       </row>
       <row>
        <entry role="func_table_entry">
         <para role="func_signature">
         <indexterm><primary>json_scalar</primary></indexterm>
-        <function>json_scalar</function> (<replaceable>expression</replaceable>)
+        <function>json_scalar</function> (<replaceable>expression</replaceable>
+        <optional> <literal>RETURNING</literal> <replaceable>json_data_type</replaceable> </optional>)
        </para>
        <para>
         Returns a JSON scalar value representing
