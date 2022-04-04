@@ -1283,6 +1283,7 @@ JsonPathMutableContext
 JsonPathParseItem
 JsonPathParseResult
 JsonPathPredicateCallback
+JsonPathSpec
 JsonPathString
 JsonPathVarCallback
 JsonPathVariableEvalContext
@@ -1290,6 +1291,14 @@ JsonQuotes
 JsonReturning
 JsonScalarExpr
 JsonSemAction
+JsonTable
+JsonTableColumn
+JsonTableColumnType
+JsonTableContext
+JsonTableJoinState
+JsonTableParent
+JsonTableScanState
+JsonTableSibling
 JsonTokenType
 JsonTransformStringValuesAction
 JsonTypeCategory
@@ -2710,6 +2719,7 @@ TableFunc
 TableFuncRoutine
 TableFuncScan
 TableFuncScanState
+TableFuncType
 TableInfo
 TableLikeClause
 TableSampleClause

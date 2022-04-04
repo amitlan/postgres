@@ -678,15 +678,25 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 					json_object_aggregate_constructor
 					json_array_aggregate_constructor
 					json_path_specification
+					json_table
+					json_table_column_definition
+					json_table_ordinality_column_definition
+					json_table_regular_column_definition
+					json_table_formatted_column_definition
+					json_table_exists_column_definition
+					json_table_nested_columns
 
 %type <list>		json_name_and_value_list
 					json_value_expr_list
 					json_array_aggregate_order_by_clause_opt
 					json_arguments
 					json_passing_clause_opt
+					json_table_columns_clause
+					json_table_column_definition_list
 
 %type <str>			json_table_path_name
 					json_as_path_name_clause_opt
+					json_table_column_path_specification_clause_opt
 
 %type <ival>		json_encoding
 					json_encoding_clause_opt
@@ -700,6 +710,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 					json_behavior_true
 					json_behavior_false
 					json_behavior_unknown
+					json_behavior_empty
 					json_behavior_empty_array
 					json_behavior_empty_object
 					json_behavior_default
@@ -707,6 +718,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 					json_query_behavior
 					json_exists_error_behavior
 					json_exists_error_clause_opt
+					json_table_error_behavior
+					json_table_error_clause_opt
 
 %type <on_behavior> json_value_on_behavior_clause_opt
 					json_query_on_behavior_clause_opt
@@ -781,7 +794,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	INTERSECT INTERVAL INTO INVOKER IS ISNULL ISOLATION
 
 	JOIN JSON JSON_ARRAY JSON_ARRAYAGG JSON_EXISTS JSON_OBJECT JSON_OBJECTAGG
-	JSON_QUERY JSON_SCALAR JSON_SERIALIZE JSON_VALUE
+	JSON_QUERY JSON_SCALAR JSON_SERIALIZE JSON_TABLE JSON_VALUE
 
 	KEY KEYS KEEP
 
@@ -792,8 +805,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	MAPPING MATCH MATCHED MATERIALIZED MAXVALUE MERGE METHOD
 	MINUTE_P MINVALUE MODE MONTH_P MOVE
 
-	NAME_P NAMES NATIONAL NATURAL NCHAR NEW NEXT NFC NFD NFKC NFKD NO NONE
-	NORMALIZE NORMALIZED
+	NAME_P NAMES NATIONAL NATURAL NCHAR NESTED NEW NEXT NFC NFD NFKC NFKD NO
+	NONE NORMALIZE NORMALIZED
 	NOT NOTHING NOTIFY NOTNULL NOWAIT NULL_P NULLIF
 	NULLS_P NUMERIC
 
@@ -801,7 +814,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	ORDER ORDINALITY OTHERS OUT_P OUTER_P
 	OVER OVERLAPS OVERLAY OVERRIDING OWNED OWNER
 
-	PARALLEL PARAMETER PARSER PARTIAL PARTITION PASSING PASSWORD
+	PARALLEL PARAMETER PARSER PARTIAL PARTITION PASSING PASSWORD PATH
 	PLACING PLANS POLICY
 	POSITION PRECEDING PRECISION PRESERVE PREPARE PREPARED PRIMARY
 	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROCEDURES PROGRAM PUBLICATION
@@ -904,7 +917,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
  */
 %nonassoc	UNBOUNDED		/* ideally would have same precedence as IDENT */
 %nonassoc	ERROR_P EMPTY_P DEFAULT ABSENT /* JSON error/empty behavior */
-%nonassoc	FALSE_P KEEP OMIT PASSING TRUE_P UNKNOWN UNIQUE JSON
+%nonassoc	FALSE_P KEEP OMIT PASSING TRUE_P UNKNOWN UNIQUE JSON COLUMNS
 %nonassoc	IDENT PARTITION RANGE ROWS GROUPS PRECEDING FOLLOWING CUBE ROLLUP
 %left		Op OPERATOR		/* multi-character ops and user-defined operators */
 %left		'+' '-'
@@ -928,6 +941,10 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
  * left-associativity among the JOIN rules themselves.
  */
 %left		JOIN CROSS LEFT FULL RIGHT INNER_P NATURAL
+
+%nonassoc	json_table_column
+%nonassoc	NESTED
+%left		PATH
 
 %nonassoc	empty_json_unique
 %left		WITHOUT WITH_LA_UNIQUE
@@ -13392,6 +13409,19 @@ table_ref:	relation_expr opt_alias_clause
 					$2->alias = $4;
 					$$ = (Node *) $2;
 				}
+			| json_table opt_alias_clause
+				{
+					JsonTable *jt = castNode(JsonTable, $1);
+					jt->alias = $2;
+					$$ = (Node *) jt;
+				}
+			| LATERAL_P json_table opt_alias_clause
+				{
+					JsonTable *jt = castNode(JsonTable, $2);
+					jt->alias = $3;
+					jt->lateral = true;
+					$$ = (Node *) jt;
+				}
 		;
 
 
@@ -13959,6 +13989,8 @@ xmltable_column_option_el:
 				{ $$ = makeDefElem("is_not_null", (Node *) makeBoolean(true), @1); }
 			| NULL_P
 				{ $$ = makeDefElem("is_not_null", (Node *) makeBoolean(false), @1); }
+			| PATH b_expr
+				{ $$ = makeDefElem("path", $2, @1); }
 		;
 
 xml_namespace_list:
@@ -16596,6 +16628,10 @@ json_behavior_unknown:
 			UNKNOWN		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_UNKNOWN, NULL); }
 		;
 
+json_behavior_empty:
+			EMPTY_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_EMPTY_OBJECT, NULL); }
+		;
+
 json_behavior_empty_array:
 			EMPTY_P ARRAY	{ $$ = makeJsonBehavior(JSON_BEHAVIOR_EMPTY_ARRAY, NULL); }
 			/* non-standard, for Oracle compatibility only */
@@ -16708,6 +16744,153 @@ json_query_on_behavior_clause_opt:
 									{ $$.on_empty = NULL; $$.on_error = $1; }
 			|  /* EMPTY */
 									{ $$.on_empty = NULL; $$.on_error = NULL; }
+		;
+
+json_table:
+			JSON_TABLE '('
+				json_api_common_syntax
+				json_table_columns_clause
+				json_table_error_clause_opt
+			')'
+				{
+					JsonTable *n = makeNode(JsonTable);
+					n->common = (JsonCommon *) $3;
+					n->columns = $4;
+					n->on_error = $5;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+		;
+
+json_table_columns_clause:
+			COLUMNS '('	json_table_column_definition_list ')' { $$ = $3; }
+		;
+
+json_table_column_definition_list:
+			json_table_column_definition
+				{ $$ = list_make1($1); }
+			| json_table_column_definition_list ',' json_table_column_definition
+				{ $$ = lappend($1, $3); }
+		;
+
+json_table_column_definition:
+			json_table_ordinality_column_definition		%prec json_table_column
+			| json_table_regular_column_definition 		%prec json_table_column
+			| json_table_formatted_column_definition	%prec json_table_column
+			| json_table_exists_column_definition		%prec json_table_column
+			| json_table_nested_columns
+		;
+
+json_table_ordinality_column_definition:
+			ColId FOR ORDINALITY
+				{
+					JsonTableColumn *n = makeNode(JsonTableColumn);
+					n->coltype = JTC_FOR_ORDINALITY;
+					n->name = $1;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+		;
+
+json_table_regular_column_definition:
+			ColId Typename
+			json_table_column_path_specification_clause_opt
+			json_wrapper_clause_opt
+			json_quotes_clause_opt
+			json_value_on_behavior_clause_opt
+				{
+					JsonTableColumn *n = makeNode(JsonTableColumn);
+					n->coltype = JTC_REGULAR;
+					n->name = $1;
+					n->typeName = $2;
+					n->format = makeJsonFormat(JS_FORMAT_DEFAULT, JS_ENC_DEFAULT, -1);
+					n->wrapper = $4; /* JSW_NONE */
+					n->omit_quotes = $5; /* false */
+					n->pathspec = $3;
+					n->on_empty = $6.on_empty;
+					n->on_error = $6.on_error;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+		;
+
+json_table_exists_column_definition:
+			ColId Typename
+			EXISTS json_table_column_path_specification_clause_opt
+			json_exists_error_clause_opt
+				{
+					JsonTableColumn *n = makeNode(JsonTableColumn);
+					n->coltype = JTC_EXISTS;
+					n->name = $1;
+					n->typeName = $2;
+					n->format = makeJsonFormat(JS_FORMAT_DEFAULT, JS_ENC_DEFAULT, -1);
+					n->wrapper = JSW_NONE;
+					n->omit_quotes = false;
+					n->pathspec = $4;
+					n->on_empty = NULL;
+					n->on_error = $5;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+		;
+
+json_table_error_behavior:
+			json_behavior_error
+			| json_behavior_empty
+		;
+
+json_table_error_clause_opt:
+			json_table_error_behavior ON ERROR_P	{ $$ = $1; }
+			| /* EMPTY */							{ $$ = NULL; }
+		;
+
+json_table_column_path_specification_clause_opt:
+			PATH Sconst								{ $$ = $2; }
+			| /* EMPTY */ %prec json_table_column	{ $$ = NULL; }
+		;
+
+json_table_formatted_column_definition:
+			ColId Typename FORMAT json_representation
+			json_table_column_path_specification_clause_opt
+			json_wrapper_clause_opt
+			json_quotes_clause_opt
+			json_query_on_behavior_clause_opt
+				{
+					JsonTableColumn *n = makeNode(JsonTableColumn);
+					n->coltype = JTC_FORMATTED;
+					n->name = $1;
+					n->typeName = $2;
+					n->format = castNode(JsonFormat, $4);
+					n->pathspec = $5;
+					n->wrapper = $6;
+					if (n->wrapper != JSW_NONE && $7 != JS_QUOTES_UNSPEC)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used"),
+								 parser_errposition(@7)));
+					n->omit_quotes = $7 == JS_QUOTES_OMIT;
+					n->on_empty = $8.on_empty;
+					n->on_error = $8.on_error;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+		;
+
+json_table_nested_columns:
+			NESTED path_opt Sconst json_table_columns_clause
+				{
+					JsonTableColumn *n = makeNode(JsonTableColumn);
+					n->coltype = JTC_NESTED;
+					n->pathspec = $3;
+					n->columns = $4;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+		;
+
+path_opt:
+			PATH									{ }
+			| /* EMPTY */							{ }
 		;
 
 json_returning_clause_opt:
@@ -17561,6 +17744,7 @@ unreserved_keyword:
 			| MOVE
 			| NAME_P
 			| NAMES
+			| NESTED
 			| NEW
 			| NEXT
 			| NFC
@@ -17595,6 +17779,7 @@ unreserved_keyword:
 			| PARTITION
 			| PASSING
 			| PASSWORD
+			| PATH
 			| PLANS
 			| POLICY
 			| PRECEDING
@@ -17758,6 +17943,7 @@ col_name_keyword:
 			| JSON_QUERY
 			| JSON_SCALAR
 			| JSON_SERIALIZE
+			| JSON_TABLE
 			| JSON_VALUE
 			| LEAST
 			| NATIONAL
@@ -18126,6 +18312,7 @@ bare_label_keyword:
 			| JSON_QUERY
 			| JSON_SCALAR
 			| JSON_SERIALIZE
+			| JSON_TABLE
 			| JSON_VALUE
 			| KEEP
 			| KEY
@@ -18165,6 +18352,7 @@ bare_label_keyword:
 			| NATIONAL
 			| NATURAL
 			| NCHAR
+			| NESTED
 			| NEW
 			| NEXT
 			| NFC
@@ -18209,6 +18397,7 @@ bare_label_keyword:
 			| PARTITION
 			| PASSING
 			| PASSWORD
+			| PATH
 			| PLACING
 			| PLANS
 			| POLICY

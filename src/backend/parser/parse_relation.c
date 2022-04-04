@@ -2040,7 +2040,8 @@ addRangeTableEntryForTableFunc(ParseState *pstate,
 	Assert(list_length(tf->coltypmods) == list_length(tf->colnames));
 	Assert(list_length(tf->colcollations) == list_length(tf->colnames));
 
-	refname = alias ? alias->aliasname : pstrdup("xmltable");
+	refname = alias ? alias->aliasname :
+		pstrdup(tf->functype == TFT_XMLTABLE ? "xmltable" : "json_table");
 
 	rte->rtekind = RTE_TABLEFUNC;
 	rte->relid = InvalidOid;
