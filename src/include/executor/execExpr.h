@@ -858,6 +858,10 @@ extern Datum ExecPrepareJsonItemCoercion(struct JsonbValue *item,
 										 JsonReturning *returning,
 										 struct JsonCoercionsState *coercions,
 										 struct JsonCoercionState **pjcstate);
+extern Datum ExecEvalExprPassingCaseValue(ExprState *estate,
+										  ExprContext *econtext, bool *isnull,
+										  Datum caseval_datum,
+										  bool caseval_isnull);
 
 extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
 							 ExprContext *aggcontext);
