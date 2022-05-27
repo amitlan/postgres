@@ -1791,11 +1791,13 @@ adjust_partition_colnos_using_map(List *colnos, AttrMap *attrMap)
 PartitionPruneState *
 ExecInitPartitionPruning(PlanState *planstate,
 						 int n_total_subplans,
-						 PartitionPruneInfo *pruneinfo,
+						 int part_prune_index,
 						 Bitmapset **initially_valid_subplans)
 {
 	PartitionPruneState *prunestate;
 	EState	   *estate = planstate->state;
+	PartitionPruneInfo *pruneinfo = list_nth(estate->es_part_prune_infos,
+											 part_prune_index);
 
 	/* We may need an expression context to evaluate partition exprs */
 	ExecAssignExprContext(estate, planstate);
