@@ -286,6 +286,8 @@ static JsonPathExecResult appendBoolResult(JsonPathExecContext *cxt,
 										   JsonPathItem *jsp, JsonValueList *found, JsonPathBool res);
 static void getJsonPathItem(JsonPathExecContext *cxt, JsonPathItem *item,
 							JsonbValue *value);
+static int	EvalJsonPathVar(void *vars, char *varName, int varNameLen,
+							JsonbValue *val, JsonbValue *baseObject);
 static void getJsonPathVariable(JsonPathExecContext *cxt,
 								JsonPathItem *variable, JsonbValue *value);
 static int	getJsonPathVariableFromJsonb(void *varsJsonb, char *varName,
@@ -2170,6 +2172,72 @@ getJsonPathItem(JsonPathExecContext *cxt, JsonPathItem *item,
 		default:
 			elog(ERROR, "unexpected jsonpath item type");
 	}
+}
+
+/*
+ * Evaluate a JSON path variable caching computed value.
+ */
+int
+EvalJsonPathVar(void *cxt, char *varName, int varNameLen,
+				JsonbValue *val, JsonbValue *baseObject)
+{
+	JsonPathVariableEvalContext *var = NULL;
+	List	   *vars = cxt;
+	ListCell   *lc;
+	int			id = 1;
+
+	if (!varName)
+		return list_length(vars);
+
+	foreach(lc, vars)
+	{
+		var = lfirst(lc);
+
+		if (!strncmp(var->name, varName, varNameLen))
+			break;
+
+		var = NULL;
+		id++;
+	}
+
+	if (!var)
+		return -1;
+
+	/*
+	 * When belonging to a JsonExpr, path variables are computed with the
+	 * JsonExpr's ExprState (var->estate is NULL), so don't need to be computed
+	 * here.  In some other cases, such as when the path variables belonging
+	 * to a JsonTable instead, those variables must be evaluated on their own,
+	 * without the enclosing JsonExpr itself needing to be evaluated, so must
+	 * be handled here.
+	 */
+	if (var->estate && !var->evaluated)
+	{
+		MemoryContext oldcxt = var->mcxt ?
+		MemoryContextSwitchTo(var->mcxt) : NULL;
+
+		Assert(var->econtext != NULL);
+		var->value = ExecEvalExpr(var->estate, var->econtext, &var->isnull);
+		var->evaluated = true;
+
+		if (oldcxt)
+			MemoryContextSwitchTo(oldcxt);
+	}
+	else
+	{
+		Assert(var->evaluated);
+	}
+
+	if (var->isnull)
+	{
+		val->type = jbvNull;
+		return 0;
+	}
+
+	JsonItemFromDatum(var->value, var->typid, var->typmod, val);
+
+	*baseObject = *val;
+	return id;
 }
 
 /*

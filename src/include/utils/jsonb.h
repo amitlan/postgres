@@ -69,8 +69,10 @@ typedef enum
 
 /* Convenience macros */
 #define DatumGetJsonbP(d)	((Jsonb *) PG_DETOAST_DATUM(d))
+#define DatumGetJsonbValueP(d)	((JsonbValue *) DatumGetPointer(d))
 #define DatumGetJsonbPCopy(d)	((Jsonb *) PG_DETOAST_DATUM_COPY(d))
 #define JsonbPGetDatum(p)	PointerGetDatum(p)
+#define JsonbValuePGetDatum(p)	PointerGetDatum(p)
 #define PG_GETARG_JSONB_P(x)	DatumGetJsonbP(PG_GETARG_DATUM(x))
 #define PG_GETARG_JSONB_P_COPY(x)	DatumGetJsonbPCopy(PG_GETARG_DATUM(x))
 #define PG_RETURN_JSONB_P(x)	PG_RETURN_POINTER(x)

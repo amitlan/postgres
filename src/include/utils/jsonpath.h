@@ -280,9 +280,6 @@ extern Datum JsonPathQuery(Datum jb, JsonPath *jp, JsonWrapper wrapper,
 extern JsonbValue *JsonPathValue(Datum jb, JsonPath *jp, bool *empty,
 								 bool *error, List *vars);
 
-extern int	EvalJsonPathVar(void *vars, char *varName, int varNameLen,
-							JsonbValue *val, JsonbValue *baseObject);
-
 extern PGDLLIMPORT const TableFuncRoutine JsonbTableRoutine;
 
 #endif

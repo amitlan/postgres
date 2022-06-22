@@ -901,7 +901,11 @@ max_parallel_hazard_walker(Node *node, max_parallel_hazard_context *context)
 	{
 		JsonExpr   *jsexpr = (JsonExpr *) node;
 
-		if (ExecEvalJsonNeedsSubTransaction(jsexpr, NULL))
+		/*
+		 * XXX - don't really know why it makes sense to ignore the coercion
+		 * part here.
+		 */
+		if (ExecEvalJsonNeedsSubTransaction(jsexpr, false))
 		{
 			context->max_hazard = PROPARALLEL_UNSAFE;
 			return true;

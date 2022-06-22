@@ -158,6 +158,15 @@ static TupleDesc get_cached_rowtype(Oid type_id, int32 typmod,
 									bool *changed);
 static void ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
 							   ExprContext *econtext, bool checkisnull);
+static Datum ExecEvalJsonBehavior(JsonBehavior *behavior, bool *is_null);
+typedef Datum (*JsonFunc) (ExprEvalStep *op, ExprContext *econtext,
+						   Datum item, bool *resnull, void *p, bool *error);
+static Datum ExecEvalJsonExprSubtrans(JsonFunc func, ExprEvalStep *op,
+						 ExprContext *econtext,
+						 Datum res, bool *resnull,
+						 void *p, bool *error, bool subtrans);
+static Datum ExecEvalJsonCoercion(ExprEvalStep *op, ExprContext *econtext,
+						 Datum res, bool *isNull, void *p, bool *error);
 
 /* fast-path evaluation functions */
 static Datum ExecJustInnerVar(ExprState *state, ExprContext *econtext, bool *isnull);
@@ -490,7 +499,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_SUBPLAN,
 		&&CASE_EEOP_JSON_CONSTRUCTOR,
 		&&CASE_EEOP_IS_JSON,
-		&&CASE_EEOP_JSONEXPR,
+		&&CASE_EEOP_JSONEXPR_SKIP,
+		&&CASE_EEOP_JSONEXPR_PATH,
+		&&CASE_EEOP_JSONEXPR_BEHAVIOR,
+		&&CASE_EEOP_JSONEXPR_COERCION,
+		&&CASE_EEOP_JSON_ITEM_COERCION,
 		&&CASE_EEOP_AGG_STRICT_DESERIALIZE,
 		&&CASE_EEOP_AGG_DESERIALIZE,
 		&&CASE_EEOP_AGG_STRICT_INPUT_CHECK_ARGS,
@@ -1841,11 +1854,35 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_JSONEXPR)
+		EEO_CASE(EEOP_JSONEXPR_PATH)
 		{
 			/* too complex for an inline implementation */
 			ExecEvalJson(state, op, econtext);
 			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_JSONEXPR_SKIP)
+		{
+			/* too complex for an inline implementation */
+			EEO_JUMP(ExecEvalJsonExprSkip(state, op));
+		}
+
+		EEO_CASE(EEOP_JSONEXPR_BEHAVIOR)
+		{
+			/* too complex for an inline implementation */
+			EEO_JUMP(ExecEvalJsonExprBehavior(state, op));
+		}
+
+		EEO_CASE(EEOP_JSONEXPR_COERCION)
+		{
+			/* too complex for an inline implementation */
+			EEO_JUMP(ExecEvalJsonExprCoercion(state, op, econtext));
+		}
+
+		EEO_CASE(EEOP_JSON_ITEM_COERCION)
+		{
+			/* too complex for an inline implementation */
+			EEO_JUMP(ExecEvalJsonExprItemCoercion(state, op));
 		}
 
 		EEO_CASE(EEOP_LAST)
@@ -4704,8 +4741,7 @@ ExecEvalJsonConstructor(ExprState *state, ExprEvalStep *op,
  * Evaluate a JSON error/empty behavior result.
  */
 static Datum
-ExecEvalJsonBehavior(ExprContext *econtext, JsonBehavior *behavior,
-					 ExprState *default_estate, bool *is_null)
+ExecEvalJsonBehavior(JsonBehavior *behavior, bool *is_null)
 {
 	*is_null = false;
 
@@ -4730,7 +4766,9 @@ ExecEvalJsonBehavior(ExprContext *econtext, JsonBehavior *behavior,
 			return (Datum) 0;
 
 		case JSON_BEHAVIOR_DEFAULT:
-			return ExecEvalExpr(default_estate, econtext, is_null);
+			/* Always handled in the caller. */
+			Assert(false);
+			return (Datum) 0;
 
 		default:
 			elog(ERROR, "unrecognized SQL/JSON behavior %d", behavior->btype);
@@ -4742,16 +4780,17 @@ ExecEvalJsonBehavior(ExprContext *econtext, JsonBehavior *behavior,
  * Evaluate a coercion of a JSON item to the target type.
  */
 static Datum
-ExecEvalJsonExprCoercion(ExprEvalStep *op, ExprContext *econtext,
-						 Datum res, bool *isNull, void *p, bool *error)
+ExecEvalJsonCoercion(ExprEvalStep *op, ExprContext *econtext,
+					 Datum res, bool *isNull, void *p, bool *error)
 {
-	ExprState  *estate = p;
-	JsonExprState *jsestate;
+	JsonExprState *jsestate = op->d.jsonexpr_coercion.jsestate;
+	JsonExprPostEvalState *post_eval = &jsestate->post_eval;
+	ExprState  *estate = post_eval->coercion;
+
+	post_eval->coercion_error = false;
 
 	if (estate)					/* coerce using specified expression */
 		return ExecEvalExpr(estate, econtext, isNull);
-
-	jsestate = op->d.jsonexpr.jsestate;
 
 	if (jsestate->jsexpr->op != JSON_EXISTS_OP)
 	{
@@ -4766,7 +4805,7 @@ ExecEvalJsonExprCoercion(ExprEvalStep *op, ExprContext *econtext,
 			/* strip quotes and call typinput function */
 			char	   *str = *isNull ? NULL : JsonbUnquote(jb);
 
-			return InputFunctionCall(&jsestate->input.func, str,
+			return InputFunctionCall(jsestate->input.finfo, str,
 									 jsestate->input.typioparam,
 									 jexpr->returning->typmod);
 		}
@@ -4774,73 +4813,85 @@ ExecEvalJsonExprCoercion(ExprEvalStep *op, ExprContext *econtext,
 			return json_populate_type(res, JSONBOID,
 									  jexpr->returning->typid,
 									  jexpr->returning->typmod,
-									  &jsestate->cache,
+									  &post_eval->cache,
 									  econtext->ecxt_per_query_memory,
 									  isNull);
 	}
 
-	if (jsestate->result_expr)
+	/* Coerce with jexpr->result_coercion if there's one */
+	if (jsestate->result_coercion)
 	{
-		jsestate->res_expr->value = res;
-		jsestate->res_expr->isnull = *isNull;
-
-		res = ExecEvalExpr(jsestate->result_expr, econtext, isNull);
+		*op->resvalue = res;
+		*op->resnull = *isNull;
+		return ExecEvalExpr(jsestate->result_coercion, econtext, isNull);
 	}
 
 	return res;
 }
 
 /*
- * Evaluate a JSON path variable caching computed value.
+ * Return a coercion among those given in 'coercions' for given
+ * JSON item.
  */
-int
-EvalJsonPathVar(void *cxt, char *varName, int varNameLen,
-				JsonbValue *val, JsonbValue *baseObject)
+JsonCoercion *
+ExecGetJsonItemCoercion(JsonbValue *item, JsonItemCoercions *coercions)
 {
-	JsonPathVariableEvalContext *var = NULL;
-	List	   *vars = cxt;
-	ListCell   *lc;
-	int			id = 1;
-
-	if (!varName)
-		return list_length(vars);
-
-	foreach(lc, vars)
+	if (item->type == jbvBinary &&
+		JsonContainerIsScalar(item->val.binary.data))
 	{
-		var = lfirst(lc);
+		JsonbValue	buf;
+		bool		res PG_USED_FOR_ASSERTS_ONLY;
 
-		if (!strncmp(var->name, varName, varNameLen))
+		res = JsonbExtractScalar(item->val.binary.data, &buf);
+		item = &buf;
+		Assert(res);
+	}
+
+	/* get coercion state reference and datum of the corresponding SQL type */
+	switch (item->type)
+	{
+		case jbvNull:
+			return coercions->null;
+
+		case jbvString:
+			return coercions->string;
+
+		case jbvNumeric:
+			return coercions->numeric;
+
+		case jbvBool:
+			return coercions->boolean;
+
+		case jbvDatetime:
+			switch (item->val.datetime.typid)
+			{
+				case DATEOID:
+					return coercions->date;
+				case TIMEOID:
+					return coercions->time;
+				case TIMETZOID:
+					return coercions->timetz;
+				case TIMESTAMPOID:
+					return coercions->timestamp;
+				case TIMESTAMPTZOID:
+					return coercions->timestamptz;
+				default:
+					elog(ERROR, "unexpected jsonb datetime type oid %u",
+						 item->val.datetime.typid);
+			}
 			break;
 
-		var = NULL;
-		id++;
+		case jbvArray:
+		case jbvObject:
+		case jbvBinary:
+			return coercions->composite;
+
+		default:
+			elog(ERROR, "unexpected jsonb value type %d", item->type);
 	}
 
-	if (!var)
-		return -1;
-
-	if (!var->evaluated)
-	{
-		MemoryContext oldcxt = var->mcxt ?
-		MemoryContextSwitchTo(var->mcxt) : NULL;
-
-		var->value = ExecEvalExpr(var->estate, var->econtext, &var->isnull);
-		var->evaluated = true;
-
-		if (oldcxt)
-			MemoryContextSwitchTo(oldcxt);
-	}
-
-	if (var->isnull)
-	{
-		val->type = jbvNull;
-		return 0;
-	}
-
-	JsonItemFromDatum(var->value, var->typid, var->typmod, val);
-
-	*baseObject = *val;
-	return id;
+	Assert(false);
+	return NULL;
 }
 
 /*
@@ -4848,14 +4899,14 @@ EvalJsonPathVar(void *cxt, char *varName, int varNameLen,
  * corresponding SQL type and a pointer to the coercion state.
  */
 Datum
-ExecPrepareJsonItemCoercion(JsonbValue *item,
-							JsonReturning *returning,
-							struct JsonCoercionsState *coercions,
-							struct JsonCoercionState **pcoercion)
+ExecPrepareJsonItemCoercion(Datum itemval,
+							JsonItemCoercionsState *coercions,
+							JsonItemCoercionState **pcoercion)
 {
-	struct JsonCoercionState *coercion;
+	JsonbValue *item = DatumGetJsonbValueP(itemval);
+	JsonItemCoercionState *coercion;
 	Datum		res;
-	JsonbValue	buf;
+	JsonbValue 	buf;
 
 	if (item->type == jbvBinary &&
 		JsonContainerIsScalar(item->val.binary.data))
@@ -4934,9 +4985,6 @@ ExecPrepareJsonItemCoercion(JsonbValue *item,
 	return res;
 }
 
-typedef Datum (*JsonFunc) (ExprEvalStep *op, ExprContext *econtext,
-						   Datum item, bool *resnull, void *p, bool *error);
-
 static Datum
 ExecEvalJsonExprSubtrans(JsonFunc func, ExprEvalStep *op,
 						 ExprContext *econtext,
@@ -5007,7 +5055,6 @@ typedef struct
 {
 	JsonPath   *path;
 	bool	   *error;
-	bool		coercionInSubtrans;
 } ExecEvalJsonExprContext;
 
 static Datum
@@ -5018,16 +5065,17 @@ ExecEvalJsonExpr(ExprEvalStep *op, ExprContext *econtext,
 	ExecEvalJsonExprContext *cxt = pcxt;
 	JsonPath   *path = cxt->path;
 	JsonExprState *jsestate = op->d.jsonexpr.jsestate;
+	JsonExprPreEvalState *pre_eval = &jsestate->pre_eval;
+	JsonExprPostEvalState *post_eval = &jsestate->post_eval;
 	JsonExpr   *jexpr = jsestate->jsexpr;
-	ExprState  *estate = NULL;
-	bool		empty = false;
+	bool	   *empty = &post_eval->empty;
 	Datum		res = (Datum) 0;
 
 	switch (jexpr->op)
 	{
 		case JSON_QUERY_OP:
-			res = JsonPathQuery(item, path, jexpr->wrapper, &empty, error,
-								jsestate->args);
+			res = JsonPathQuery(item, path, jexpr->wrapper, empty, error,
+								pre_eval->args);
 			if (error && *error)
 			{
 				*resnull = true;
@@ -5038,17 +5086,20 @@ ExecEvalJsonExpr(ExprEvalStep *op, ExprContext *econtext,
 
 		case JSON_VALUE_OP:
 			{
-				struct JsonCoercionState *jcstate;
-				JsonbValue *jbv = JsonPathValue(item, path, &empty, error,
-												jsestate->args);
+				JsonCoercion *coercion;
+				JsonbValue *jbv = JsonPathValue(item, path, empty, error,
+												pre_eval->args);
 
 				if (error && *error)
+				{
+					*resnull = true;
 					return (Datum) 0;
+				}
 
 				if (!jbv)		/* NULL or empty */
 					break;
 
-				Assert(!empty);
+				Assert(!*empty);
 
 				*resnull = false;
 
@@ -5061,19 +5112,17 @@ ExecEvalJsonExpr(ExprEvalStep *op, ExprContext *econtext,
 					break;
 				}
 
-				/* Use coercion from SQL/JSON item type to the output type */
-				res = ExecPrepareJsonItemCoercion(jbv,
-												  jsestate->jsexpr->returning,
-												  &jsestate->coercions,
-												  &jcstate);
-
-				if (jcstate->coercion &&
-					(jcstate->coercion->via_io ||
-					 jcstate->coercion->via_populate))
+				/*
+				 * Error out if no cast exists to coerce SQL/JSON item to the
+				 * the output type
+				 */
+				coercion = ExecGetJsonItemCoercion(jbv, jsestate->jsexpr->coercions);
+				if (coercion && (coercion->via_io || coercion->via_populate))
 				{
 					if (error)
 					{
 						*error = true;
+						*resnull = true;
 						return (Datum) 0;
 					}
 
@@ -5085,32 +5134,42 @@ ExecEvalJsonExpr(ExprEvalStep *op, ExprContext *econtext,
 							(errcode(ERRCODE_SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE),
 							 errmsg("SQL/JSON item cannot be cast to target type")));
 				}
-				else if (!jcstate->estate)
-					return res; /* no coercion */
-
-				/* coerce using specific expression */
-				estate = jcstate->estate;
-				jsestate->coercion_expr->value = res;
-				jsestate->coercion_expr->isnull = *resnull;
+				else
+				{
+					/*
+					 * Coerce using a specific coercion (JsonItemCoercion).
+					 * Note we are passing the JsonbValue as is, without
+					 * converting it to Jsonb, because
+					 * ExecPrepareJsonItemCoercion() expects the JSON item
+					 * to be in that format.
+					 */
+					res = JsonbValuePGetDatum(jbv);
+					post_eval->coercion = jsestate->coercions;
+				}
 				break;
 			}
 
 		case JSON_EXISTS_OP:
 			{
 				bool		exists = JsonPathExists(item, path,
-													jsestate->args,
+													pre_eval->args,
 													error);
 
 				*resnull = error && *error;
 				res = BoolGetDatum(exists);
 
-				if (!jsestate->result_expr)
+				if (jexpr->result_coercion == NULL)
+				{
+					/* No coercion needed */
+					post_eval->coercion_done = true;
 					return res;
-
-				/* coerce using result expression */
-				estate = jsestate->result_expr;
-				jsestate->res_expr->value = res;
-				jsestate->res_expr->isnull = *resnull;
+				}
+				else
+				{
+					/* coerce using result expression */
+					Assert(jsestate->result_coercion);
+					post_eval->coercion = jsestate->result_coercion;
+				}
 				break;
 			}
 
@@ -5123,7 +5182,11 @@ ExecEvalJsonExpr(ExprEvalStep *op, ExprContext *econtext,
 			return (Datum) 0;
 	}
 
-	if (empty)
+	/*
+	 * If the ON EMPTY behavior is to cause an error, do so here.  Other
+	 * behaviors will be handled by the caller.
+	 */
+	if (*empty)
 	{
 		Assert(jexpr->on_empty);	/* it is not JSON_EXISTS */
 
@@ -5139,29 +5202,13 @@ ExecEvalJsonExpr(ExprEvalStep *op, ExprContext *econtext,
 					(errcode(ERRCODE_NO_SQL_JSON_ITEM),
 					 errmsg("no SQL/JSON item")));
 		}
-
-		if (jexpr->on_empty->btype == JSON_BEHAVIOR_DEFAULT)
-
-			/*
-			 * Execute DEFAULT expression as a coercion expression, because
-			 * its result is already coerced to the target type.
-			 */
-			estate = jsestate->default_on_empty;
-		else
-			/* Execute ON EMPTY behavior */
-			res = ExecEvalJsonBehavior(econtext, jexpr->on_empty,
-									   jsestate->default_on_empty,
-									   resnull);
 	}
 
-	return ExecEvalJsonExprSubtrans(ExecEvalJsonExprCoercion, op, econtext,
-									res, resnull, estate, error,
-									cxt->coercionInSubtrans);
+	return res;
 }
 
 bool
-ExecEvalJsonNeedsSubTransaction(JsonExpr *jsexpr,
-								struct JsonCoercionsState *coercions)
+ExecEvalJsonNeedsSubTransaction(JsonExpr *jsexpr, bool consider_coerce)
 {
 	if (jsexpr->on_error->btype == JSON_BEHAVIOR_ERROR)
 		return false;
@@ -5169,10 +5216,153 @@ ExecEvalJsonNeedsSubTransaction(JsonExpr *jsexpr,
 	if (jsexpr->op == JSON_EXISTS_OP && !jsexpr->result_coercion)
 		return false;
 
-	if (!coercions)
+	if (!consider_coerce)
 		return true;
 
 	return false;
+}
+
+/* Skip calling ExecEvalJson() on a JsonExpr? */
+int
+ExecEvalJsonExprSkip(ExprState *state, ExprEvalStep *op)
+{
+	JsonExprState *jsestate = op->d.jsonexpr_skip.jsestate;
+
+	/*
+	 * Skip if either of the input expressions has turned out to be NULL,
+	 * though do execute domain checks for NULLs, which are handled by the
+	 * coercion step.
+	 */
+	if (jsestate->pre_eval.formatted_expr.isnull ||
+		jsestate->pre_eval.pathspec.isnull)
+	{
+		*op->resvalue = 0;
+		*op->resnull = true;
+		Assert(jsestate->post_eval.coercion == NULL);
+		/* A signal to the coercion step to not use a sub-trancaction. */
+		jsestate->post_eval.coercion_error = true;
+		return op->d.jsonexpr_skip.jump_coercion;
+	}
+
+	/*
+	 * Go evaluate the PASSING args if any and subsequently JSON path
+	 * itself.
+	 */
+	return op->d.jsonexpr_skip.jump_passing_args;
+}
+
+int
+ExecEvalJsonExprBehavior(ExprState *state, ExprEvalStep *op)
+{
+	JsonExprState *jsestate = op->d.jsonexpr_behavior.jsestate;
+	JsonExprPostEvalState *post_eval = &jsestate->post_eval;
+	JsonBehavior *behavior = NULL;
+	int		jump_to;
+	bool	error = (post_eval->error || post_eval->coercion_error);
+
+	/*
+	 * Set if the coercion step, if will run afterwards, should use a sub-
+	 * transaction to be aborted on error instead of throwing the error.
+	 * Don't use a sub-transaction if coercing the ON ERROR expression,
+	 * though.
+	 *
+	 * XXX - doesn't that violate ON ERROR behavior?  Actually, that is
+	 * how it behaved even before this expression eval logic rewrite!
+	 */
+	post_eval->coercion_use_subtrans =
+				(jsestate->coercionNeedSubtrans && !error);
+
+	/*
+	 * If no error or the JSON item is not empty, directly go to the coercion
+	 * step to coerce the item as is, or skip the coercion step if the item is
+	 * already coerced by ExecEvalJson().
+	 */
+	if (!error && !post_eval->empty)
+		return !post_eval->coercion_done ?
+			op->d.jsonexpr_behavior.jump_coercion :
+			op->d.jsonexpr_behavior.jump_skip_coercion;
+
+	if (error)
+	{
+		behavior = jsestate->jsexpr->on_error;
+		jump_to = op->d.jsonexpr_behavior.jump_onerror_default;
+	}
+	else if (post_eval->empty)
+	{
+		behavior = jsestate->jsexpr->on_empty;
+		jump_to = op->d.jsonexpr_behavior.jump_onempty_default;
+	}
+
+	Assert(behavior);
+
+	/*
+	 * If a non-default behavior is specified, get the appropriate value and go
+	 * to the coercion step.
+	 */
+	if (behavior->btype != JSON_BEHAVIOR_DEFAULT)
+	{
+		*op->resvalue = ExecEvalJsonBehavior(behavior, op->resnull);
+
+		if (post_eval->coercion_error)
+		{
+			post_eval->coercion_done = false;
+			post_eval->coercion = NULL;
+		}
+
+		jump_to = op->d.jsonexpr_behavior.jump_coercion;
+	}
+
+	/*
+	 * Else evaluate the default ON ERROR or ON EMPTY expression, with no
+	 * coercion needed afterwards given that the expression is already
+	 * coerced appropriately in the parser.
+	 */
+
+	Assert(jump_to >= 0);
+	return jump_to;
+}
+
+/*
+ * Apply coercion to a JSON item using either JsonExpr.result_coercion or one
+ * of JsonExpr.coercions, possibly using a sub-transaction.
+ */
+int
+ExecEvalJsonExprCoercion(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	JsonExprState *jsestate = op->d.jsonexpr_coercion.jsestate;
+	JsonExprPostEvalState *post_eval = &jsestate->post_eval;
+
+	*op->resvalue =
+		ExecEvalJsonExprSubtrans(ExecEvalJsonCoercion, op, econtext,
+								 *op->resvalue, op->resnull, NULL,
+								 &post_eval->coercion_error,
+								 post_eval->coercion_use_subtrans);
+	if (post_eval->coercion_error)
+		return op->d.jsonexpr_coercion.jump_coercion_error;
+
+	return op->d.jsonexpr_coercion.jump_coercion_done;
+}
+
+/*
+ * Apply a coercion to a JSON item, choosing one among those present in
+ * JsonItemCoercions.
+ */
+int
+ExecEvalJsonExprItemCoercion(ExprState *state, ExprEvalStep *op)
+{
+	JsonItemCoercionsState *jcstate = op->d.jsonexpr_item_coercion.jcstate;
+	JsonItemCoercionState *cstate = NULL;
+
+	*op->resvalue =
+		ExecPrepareJsonItemCoercion(*op->resvalue, jcstate, &cstate);
+	if (cstate->coercion && cstate->coercion->expr)
+	{
+		Assert(cstate->jump_eval_expr >= 0);
+		return cstate->jump_eval_expr;
+	}
+
+	/* Skip over all of the steps added for this JsonItemCoercions. */
+	return op->d.jsonexpr_item_coercion.jump_skip_item_coercion;
 }
 
 /* ----------------------------------------------------------------
@@ -5184,64 +5374,30 @@ ExecEvalJson(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 {
 	ExecEvalJsonExprContext cxt;
 	JsonExprState *jsestate = op->d.jsonexpr.jsestate;
+	JsonExprPreEvalState *pre_eval = &jsestate->pre_eval;
+	JsonExprPostEvalState *post_eval = &jsestate->post_eval;
 	JsonExpr   *jexpr = jsestate->jsexpr;
 	Datum		item;
 	Datum		res = (Datum) 0;
 	JsonPath   *path;
-	ListCell   *lc;
-	bool		error = false;
-	bool		needSubtrans;
 	bool		throwErrors = jexpr->on_error->btype == JSON_BEHAVIOR_ERROR;
 
 	*op->resnull = true;		/* until we get a result */
 	*op->resvalue = (Datum) 0;
 
-	if (jsestate->formatted_expr->isnull || jsestate->pathspec->isnull)
-	{
-		/* execute domain checks for NULLs */
-		(void) ExecEvalJsonExprCoercion(op, econtext, res, op->resnull,
-										NULL, NULL);
+	item = pre_eval->formatted_expr.value;
+	path = DatumGetJsonPathP(pre_eval->pathspec.value);
 
-		Assert(*op->resnull);
-		return;
-	}
-
-	item = jsestate->formatted_expr->value;
-	path = DatumGetJsonPathP(jsestate->pathspec->value);
-
-	/* reset JSON path variable contexts */
-	foreach(lc, jsestate->args)
-	{
-		JsonPathVariableEvalContext *var = lfirst(lc);
-
-		var->econtext = econtext;
-		var->evaluated = false;
-	}
-
-	needSubtrans = ExecEvalJsonNeedsSubTransaction(jexpr, &jsestate->coercions);
+	/* Reset JsonExprPostEvalState for this evaluation. */
+	memset(post_eval, 0, sizeof(*post_eval));
 
 	cxt.path = path;
-	cxt.error = throwErrors ? NULL : &error;
-	cxt.coercionInSubtrans = !needSubtrans && !throwErrors;
-	Assert(!needSubtrans || cxt.error);
+	cxt.error = throwErrors ? NULL : &post_eval->error;
+	Assert(!jsestate->needSubtrans || cxt.error);
 
 	res = ExecEvalJsonExprSubtrans(ExecEvalJsonExpr, op, econtext, item,
 								   op->resnull, &cxt, cxt.error,
-								   needSubtrans);
-
-	if (error)
-	{
-		/* Execute ON ERROR behavior */
-		res = ExecEvalJsonBehavior(econtext, jexpr->on_error,
-								   jsestate->default_on_error,
-								   op->resnull);
-
-		/* result is already coerced in DEFAULT behavior case */
-		if (jexpr->on_error->btype != JSON_BEHAVIOR_DEFAULT)
-			res = ExecEvalJsonExprCoercion(op, econtext, res,
-										   op->resnull,
-										   NULL, NULL);
-	}
+								   jsestate->needSubtrans);
 
 	*op->resvalue = res;
 }
