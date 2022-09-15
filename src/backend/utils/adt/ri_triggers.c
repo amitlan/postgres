@@ -2731,7 +2731,9 @@ ri_LookupKeyInPkRel(struct RI_Plan *plan,
 		 * whether the pg_inherits row that marks it as detach-pending is
 		 * is visible to it or not, respectively.
 		 */
-		partdir = CreatePartitionDirectory(CurrentMemoryContext, true);
+		Assert(ActiveSnapshotSet());
+		partdir = CreatePartitionDirectory(CurrentMemoryContext,
+										   GetActiveSnapshot());
 		leaf_pk_rel = ExecGetLeafPartitionForKey(partdir,
 												 pk_rel, riinfo->nkeys,
 												 riinfo->pk_attnums,

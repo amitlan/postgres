@@ -34,6 +34,7 @@
 #include "utils/partcache.h"
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
+#include "utils/snapmgr.h"
 
 
 /*-----------------------
@@ -1096,17 +1097,24 @@ ExecInitPartitionDispatchInfo(EState *estate,
 	MemoryContext oldcxt;
 
 	/*
-	 * For data modification, it is better that executor does not include
-	 * partitions being detached, except when running in snapshot-isolation
-	 * mode.  This means that a read-committed transaction immediately gets a
+	 * For data modification, it is better that executor omits the partitions
+	 * being detached, except when running in snapshot-isolation mode.  This
+	 * means that a read-committed transaction immediately gets a
 	 * "no partition for tuple" error when a tuple is inserted into a
 	 * partition that's being detached concurrently, but a transaction in
 	 * repeatable-read mode can still use such a partition.
 	 */
 	if (estate->es_partition_directory == NULL)
+	{
+		Snapshot	omit_detached_snapshot = NULL;
+
+		Assert(ActiveSnapshotSet());
+		if (!IsolationUsesXactSnapshot())
+			omit_detached_snapshot = GetActiveSnapshot();
 		estate->es_partition_directory =
 			CreatePartitionDirectory(estate->es_query_cxt,
-									 !IsolationUsesXactSnapshot());
+									 omit_detached_snapshot);
+	}
 
 	oldcxt = MemoryContextSwitchTo(proute->memcxt);
 
@@ -2034,10 +2042,10 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 	int			i;
 	ExprContext *econtext = planstate->ps_ExprContext;
 
-	/* For data reading, executor always omits detached partitions */
+	/* For data reading, executor never omits detached partitions */
 	if (estate->es_partition_directory == NULL)
 		estate->es_partition_directory =
-			CreatePartitionDirectory(estate->es_query_cxt, false);
+			CreatePartitionDirectory(estate->es_query_cxt, NULL);
 
 	n_part_hierarchies = list_length(pruneinfo->prune_infos);
 	Assert(n_part_hierarchies > 0);
