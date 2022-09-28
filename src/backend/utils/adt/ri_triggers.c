@@ -435,17 +435,11 @@ RI_FKey_check(TriggerData *trigdata)
 							 &qkey, fk_rel, pk_rel);
 	}
 
-	/*
-	 * Now check that foreign key exists in PK table
-	 *
-	 * XXX detectNewRows must be true when a partitioned table is on the
-	 * referenced side.  The reason is that our snapshot must be fresh in
-	 * order for the hack in find_inheritance_children() to work.
-	 */
+	/* Now check that foreign key exists in PK table */
 	ri_PerformCheck(riinfo, &qkey, qplan,
 					fk_rel, pk_rel,
 					NULL, newslot,
-					pk_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE,
+					false,
 					CMD_SELECT);
 
 	table_close(pk_rel, RowShareLock);
@@ -2724,16 +2718,16 @@ ri_LookupKeyInPkRel(struct RI_Plan *plan,
 		PartitionDirectory partdir;
 
 		/*
-		 * Note that this relies on the latest snapshot having been pushed by
-		 * the caller to be the ActiveSnapshot.  The PartitionDesc machinery
+		 * Pass the latest snapshot for omit_detached_snapshot so that any
+		 * detach-pending partitions are correctly omitted or included from
+		 * the considerations of this lookup.  The PartitionDesc machinery
 		 * that runs as part of this will need to use the snapshot to determine
 		 * whether to omit or include any detach-pending partition based on the
 		 * whether the pg_inherits row that marks it as detach-pending is
 		 * is visible to it or not, respectively.
 		 */
-		Assert(ActiveSnapshotSet());
 		partdir = CreatePartitionDirectory(CurrentMemoryContext,
-										   GetActiveSnapshot());
+										   GetLatestSnapshot());
 		leaf_pk_rel = ExecGetLeafPartitionForKey(partdir,
 												 pk_rel, riinfo->nkeys,
 												 riinfo->pk_attnums,
