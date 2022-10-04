@@ -1154,7 +1154,6 @@ typedef struct RangeTblEntry
 	bool		lateral;		/* subquery, function, or values is LATERAL? */
 	bool		inh;			/* inheritance requested? */
 	bool		inFromCl;		/* present in FROM clause? */
-	Bitmapset  *extraUpdatedCols;	/* generated columns being updated */
 	List	   *securityQuals;	/* security barrier quals to apply, if any */
 } RangeTblEntry;
 

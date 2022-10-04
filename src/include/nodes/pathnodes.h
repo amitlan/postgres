@@ -422,6 +422,8 @@ struct PlannerInfo
 	 */
 	List	   *update_colnos;
 
+	Bitmapset  *extraUpdatedCols;
+
 	/*
 	 * Fields filled during create_plan() for use in setrefs.c
 	 */
@@ -2248,6 +2250,7 @@ typedef struct ModifyTablePath
 	bool		partColsUpdated;	/* some part key in hierarchy updated? */
 	List	   *resultRelations;	/* integer list of RT indexes */
 	List	   *updateColnosLists;	/* per-target-table update_colnos lists */
+	List	   *extraUpdatedColsBitmaps; /* per-target-table extraUpdatedCols bitmaps */
 	List	   *withCheckOptionLists;	/* per-target-table WCO lists */
 	List	   *returningLists; /* per-target-table RETURNING tlists */
 	List	   *rowMarks;		/* PlanRowMarks (non-locking only) */
