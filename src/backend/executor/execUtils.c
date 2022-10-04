@@ -1342,20 +1342,18 @@ ExecGetExtraUpdatedCols(ResultRelInfo *relinfo, EState *estate)
 {
 	if (relinfo->ri_RangeTableIndex != 0)
 	{
-		RangeTblEntry *rte = exec_rt_fetch(relinfo->ri_RangeTableIndex, estate);
-
-		return rte->extraUpdatedCols;
+		return relinfo->ri_extraUpdatedCols;
 	}
 	else if (relinfo->ri_RootResultRelInfo)
 	{
 		ResultRelInfo *rootRelInfo = relinfo->ri_RootResultRelInfo;
-		RangeTblEntry *rte = exec_rt_fetch(rootRelInfo->ri_RangeTableIndex, estate);
 		TupleConversionMap *map = ExecGetRootToChildMap(relinfo, estate);
 
 		if (map != NULL)
-			return execute_attr_map_cols(map->attrMap, rte->extraUpdatedCols);
+			return execute_attr_map_cols(map->attrMap,
+										 rootRelInfo->ri_extraUpdatedCols);
 		else
-			return rte->extraUpdatedCols;
+			return rootRelInfo->ri_extraUpdatedCols;
 	}
 	else
 		return NULL;

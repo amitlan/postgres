@@ -1747,6 +1747,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 			Index		rootRelation;
 			List	   *resultRelations = NIL;
 			List	   *updateColnosLists = NIL;
+			List	   *extraUpdatedColsBitmaps = NIL;
 			List	   *withCheckOptionLists = NIL;
 			List	   *returningLists = NIL;
 			List	   *mergeActionLists = NIL;
@@ -1780,15 +1781,25 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					if (parse->commandType == CMD_UPDATE)
 					{
 						List	   *update_colnos = root->update_colnos;
+						Bitmapset  *extraUpdatedCols = root->extraUpdatedCols;
 
 						if (this_result_rel != top_result_rel)
+						{
 							update_colnos =
 								adjust_inherited_attnums_multilevel(root,
 																	update_colnos,
 																	this_result_rel->relid,
 																	top_result_rel->relid);
+							extraUpdatedCols =
+								translate_col_privs_multilevel(root, this_result_rel,
+															   top_result_rel,
+															   extraUpdatedCols);
+						}
 						updateColnosLists = lappend(updateColnosLists,
 													update_colnos);
+						if (extraUpdatedCols)
+							extraUpdatedColsBitmaps = lappend(extraUpdatedColsBitmaps,
+															  extraUpdatedCols);
 					}
 					if (parse->withCheckOptions)
 					{
@@ -1870,7 +1881,11 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 					 */
 					resultRelations = list_make1_int(parse->resultRelation);
 					if (parse->commandType == CMD_UPDATE)
+					{
 						updateColnosLists = list_make1(root->update_colnos);
+						if (root->extraUpdatedCols)
+							extraUpdatedColsBitmaps = list_make1(root->extraUpdatedCols);
+					}
 					if (parse->withCheckOptions)
 						withCheckOptionLists = list_make1(parse->withCheckOptions);
 					if (parse->returningList)
@@ -1884,7 +1899,11 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 				/* Single-relation INSERT/UPDATE/DELETE/MERGE. */
 				resultRelations = list_make1_int(parse->resultRelation);
 				if (parse->commandType == CMD_UPDATE)
+				{
 					updateColnosLists = list_make1(root->update_colnos);
+					if (root->extraUpdatedCols)
+						extraUpdatedColsBitmaps = list_make1(root->extraUpdatedCols);
+				}
 				if (parse->withCheckOptions)
 					withCheckOptionLists = list_make1(parse->withCheckOptions);
 				if (parse->returningList)
@@ -1923,6 +1942,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 										root->partColsUpdated,
 										resultRelations,
 										updateColnosLists,
+										extraUpdatedColsBitmaps,
 										withCheckOptionLists,
 										returningLists,
 										rowMarks,
