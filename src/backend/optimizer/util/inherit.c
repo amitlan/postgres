@@ -40,6 +40,7 @@ static void expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 									   RangeTblEntry *parentrte,
 									   Index parentRTindex, Relation parentrel,
 									   Bitmapset *parent_updatedCols,
+									   Bitmapset *parent_extraUpdatedCols,
 									   PlanRowMark *top_parentrc, LOCKMODE lockmode);
 static void expand_single_inheritance_child(PlannerInfo *root,
 											RangeTblEntry *parentrte,
@@ -49,10 +50,6 @@ static void expand_single_inheritance_child(PlannerInfo *root,
 											Index *childRTindex_p);
 static Bitmapset *translate_col_privs(const Bitmapset *parent_privs,
 									  List *translated_vars);
-static Bitmapset *translate_col_privs_multilevel(PlannerInfo *root,
-												 RelOptInfo *rel,
-												 RelOptInfo *top_parent_rel,
-												 Bitmapset *top_parent_cols);
 static void expand_appendrel_subquery(PlannerInfo *root, RelOptInfo *rel,
 									  RangeTblEntry *rte, Index rti);
 
@@ -153,6 +150,7 @@ expand_inherited_rtentry(PlannerInfo *root, RelOptInfo *rel,
 		expand_partitioned_rtentry(root, rel, rte, rti,
 								   oldrelation,
 								   perminfo->updatedCols,
+								   root->extraUpdatedCols,
 								   oldrc, lockmode);
 	}
 	else
@@ -318,6 +316,7 @@ expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 						   RangeTblEntry *parentrte,
 						   Index parentRTindex, Relation parentrel,
 						   Bitmapset *parent_updatedCols,
+						   Bitmapset *parent_extraUpdatedCols,
 						   PlanRowMark *top_parentrc, LOCKMODE lockmode)
 {
 	PartitionDesc partdesc;
@@ -348,7 +347,7 @@ expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 	/*
 	 * There shouldn't be any generated columns in the partition key.
 	 */
-	Assert(!has_partition_attrs(parentrel, parentrte->extraUpdatedCols, NULL));
+	Assert(!has_partition_attrs(parentrel, parent_extraUpdatedCols, NULL));
 
 	/* Nothing further to do here if there are no partitions. */
 	if (partdesc->nparts == 0)
@@ -417,14 +416,18 @@ expand_partitioned_rtentry(PlannerInfo *root, RelOptInfo *relinfo,
 		{
 			AppendRelInfo *appinfo = root->append_rel_array[childRTindex];
 			Bitmapset  *child_updatedCols;
+			Bitmapset  *child_extraUpdatedCols;
 
 			child_updatedCols = translate_col_privs(parent_updatedCols,
 													appinfo->translated_vars);
+			child_extraUpdatedCols = translate_col_privs(parent_extraUpdatedCols,
+														 appinfo->translated_vars);
 
 			expand_partitioned_rtentry(root, childrelinfo,
 									   childrte, childRTindex,
 									   childrel,
 									   child_updatedCols,
+									   child_extraUpdatedCols,
 									   top_parentrc, lockmode);
 		}
 
@@ -566,13 +569,6 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 	childrte->alias = childrte->eref = makeAlias(parentrte->eref->aliasname,
 												 child_colnames);
 
-	/* Translate the bitmapset of generated columns being updated. */
-	if (childOID != parentOID)
-		childrte->extraUpdatedCols = translate_col_privs(parentrte->extraUpdatedCols,
-														 appinfo->translated_vars);
-	else
-		childrte->extraUpdatedCols = bms_copy(parentrte->extraUpdatedCols);
-
 	/*
 	 * Store the RTE and appinfo in the respective PlannerInfo arrays, which
 	 * the caller must already have allocated space for.
@@ -681,7 +677,7 @@ get_rel_all_updated_cols(PlannerInfo *root, RelOptInfo *rel)
 	perminfo = getRTEPermissionInfo(root->parse->rteperminfos, rte);
 
 	updatedCols = perminfo->updatedCols;
-	extraUpdatedCols = rte->extraUpdatedCols;
+	extraUpdatedCols = root->extraUpdatedCols;
 
 	/*
 	 * For "other" rels, we must look up the root parent relation mentioned in
@@ -927,7 +923,7 @@ apply_child_basequals(PlannerInfo *root, RelOptInfo *parentrel,
  * 		'top_parent_cols' to the columns numbers of a descendent relation
  * 		given by 'relid'
  */
-static Bitmapset *
+Bitmapset *
 translate_col_privs_multilevel(PlannerInfo *root, RelOptInfo *rel,
 							   RelOptInfo *top_parent_rel,
 							   Bitmapset *top_parent_cols)

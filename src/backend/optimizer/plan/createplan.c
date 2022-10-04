@@ -308,7 +308,7 @@ static ModifyTable *make_modifytable(PlannerInfo *root, Plan *subplan,
 									 Index nominalRelation, Index rootRelation,
 									 bool partColsUpdated,
 									 List *resultRelations,
-									 List *updateColnosLists,
+									 List *updateColnosLists, List *extraUpdatedColsBitmaps,
 									 List *withCheckOptionLists, List *returningLists,
 									 List *rowMarks, OnConflictExpr *onconflict,
 									 List *mergeActionLists, int epqParam);
@@ -2826,6 +2826,7 @@ create_modifytable_plan(PlannerInfo *root, ModifyTablePath *best_path)
 							best_path->partColsUpdated,
 							best_path->resultRelations,
 							best_path->updateColnosLists,
+							best_path->extraUpdatedColsBitmaps,
 							best_path->withCheckOptionLists,
 							best_path->returningLists,
 							best_path->rowMarks,
@@ -6982,7 +6983,7 @@ make_modifytable(PlannerInfo *root, Plan *subplan,
 				 Index nominalRelation, Index rootRelation,
 				 bool partColsUpdated,
 				 List *resultRelations,
-				 List *updateColnosLists,
+				 List *updateColnosLists, List *extraUpdatedColsBitmaps,
 				 List *withCheckOptionLists, List *returningLists,
 				 List *rowMarks, OnConflictExpr *onconflict,
 				 List *mergeActionLists, int epqParam)
@@ -7051,6 +7052,7 @@ make_modifytable(PlannerInfo *root, Plan *subplan,
 		node->exclRelTlist = onconflict->exclRelTlist;
 	}
 	node->updateColnosLists = updateColnosLists;
+	node->extraUpdatedColsBitmaps = extraUpdatedColsBitmaps;
 	node->withCheckOptionLists = withCheckOptionLists;
 	node->returningLists = returningLists;
 	node->rowMarks = rowMarks;

@@ -471,6 +471,9 @@ typedef struct ResultRelInfo
 	/* Have the projection and the slots above been initialized? */
 	bool		ri_projectNewInfoValid;
 
+	/* generated column attribute numbers */
+	Bitmapset   *ri_extraUpdatedCols;
+
 	/* triggers to be fired, if any */
 	TriggerDesc *ri_TrigDesc;
 
