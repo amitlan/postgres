@@ -328,6 +328,17 @@ outBitmapset(StringInfo str, const Bitmapset *bms)
 	appendStringInfoChar(str, ')');
 }
 
+/* Custom write routine for Node bitmapsets */
+static void
+_outBitmapset(StringInfo str, const Bitmapset *bms)
+{
+	Assert(IsA(bms, Bitmapset));
+	WRITE_NODE_TYPE("BITMAPSET");
+
+	outBitmapset(str, bms);
+}
+
+
 /*
  * Print the value of a Datum given its type.
  */

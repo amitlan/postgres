@@ -230,6 +230,10 @@ _readBitmapset(void)
 		result = bms_add_member(result, val);
 	}
 
+	/* Matches what _copyBitmapset() does. */
+	if (result)
+		result->type = T_Bitmapset;
+
 	return result;
 }
 
