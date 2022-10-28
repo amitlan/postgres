@@ -75,6 +75,12 @@ struct RelOptInfo;				/* avoid including pathnodes.h here */
  * partition as interleaved.  The interleaved_parts field is only ever set for
  * RELOPT_BASEREL and RELOPT_OTHER_MEMBER_REL, it is always left NULL for join
  * relations.
+ *
+ * For RANGE partitioned tables, we track the "width", which is the difference
+ * upper - lower if it happens to be the same value for all the existing
+ * partitions.  It is not tracked if the partition key has more than one
+ * and column or if the column is not of one of the supported types or if the
+ * default partition has been defined.
  */
 typedef struct PartitionBoundInfoData
 {
@@ -93,7 +99,26 @@ typedef struct PartitionBoundInfoData
 								 * if there isn't one */
 	int			default_index;	/* Index of the default partition; -1 if there
 								 * isn't one */
+
+	struct PartitionRangeWidthInfo *range_width;	/* Set if applicable;
+													 * see comments in the
+													 * struct definition. */
 } PartitionBoundInfoData;
+
+/*
+ * For range partitioned tables with supported partition key specification,
+ * this stores the width of each partition and functions to use when applying
+ * fixed-width optimization during tuple routing.
+ */
+typedef struct PartitionRangeWidthInfo
+{
+	Datum		value;
+	Oid			width_typid;
+	bool		width_typbyval;
+	int			width_typlen;
+	FmgrInfo   *minus_func;
+	FmgrInfo   *div_func;
+} PartitionRangeWidthInfo;
 
 #define partition_bound_accepts_nulls(bi) ((bi)->null_index != -1)
 #define partition_bound_has_default(bi) ((bi)->default_index != -1)

@@ -20,6 +20,7 @@
 #include "catalog/partition.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
+#include "catalog/pg_operator.h"
 #include "commands/tablecmds.h"
 #include "common/hashfn.h"
 #include "executor/executor.h"
@@ -28,6 +29,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/pathnodes.h"
 #include "parser/parse_coerce.h"
+#include "parser/parse_oper.h"
 #include "partitioning/partbounds.h"
 #include "partitioning/partdesc.h"
 #include "partitioning/partprune.h"
@@ -671,6 +673,68 @@ create_list_bounds(PartitionBoundSpec **boundspecs, int nparts,
 }
 
 /*
+ * Returns if create_range_bounds() should set range_width property of the
+ * PartitionBoundInfo,
+ */
+static bool
+check_range_width_support(PartitionKey key, int ndatums, int nparts,
+						  FmgrInfo *minus_func, FmgrInfo *equal_func,
+						  FmgrInfo *div_func, Oid *width_typid)
+{
+	Oid		equal_opfuncid = InvalidOid;
+	Oid		minus_opfuncid = InvalidOid;
+	Oid		div_opfuncid = InvalidOid;
+
+	/* Not if it's a composite key */
+	if (key->partnatts > 1)
+		return false;
+
+	/* Not if the default partition is present */
+	if (ndatums != nparts * 2)
+		return false;
+
+	/* Not if the partition key is not one of the following types. */
+	if (key->parttypid[0] == INT4OID)
+	{
+		minus_opfuncid = get_opcode(Int4MinusOperator);
+		equal_opfuncid = get_opcode(Int4EqualOperator);
+		div_opfuncid = get_opcode(Int4DivisionOperator);
+		*width_typid = INT4OID;
+	}
+	else if (key->parttypid[0] == INT8OID)
+	{
+		minus_opfuncid = get_opcode(Int8MinusOperator);
+		equal_opfuncid = get_opcode(Int8EqualOperator);
+		div_opfuncid = get_opcode(Int8DivisionOperator);
+		*width_typid = INT8OID;
+	}
+	else if (key->parttypid[0] == DATEOID)
+	{
+		minus_opfuncid = get_opcode(DateMinusOperator);
+		equal_opfuncid = get_opcode(Int4EqualOperator);
+		div_opfuncid = get_opcode(Int4DivisionOperator);
+		*width_typid = INT4OID;
+	}
+	else if (key->parttypid[0] == TIMESTAMPOID)
+	{
+		minus_opfuncid = get_opcode(TimestampMinusOperator);
+		equal_opfuncid = get_opcode(IntervalEqualOperator);
+		div_opfuncid = get_opcode(IntervalDivisionOperator);
+		*width_typid = INTERVALOID;
+	}
+
+	if (OidIsValid(minus_opfuncid))
+	{
+		fmgr_info(minus_opfuncid, minus_func);
+		fmgr_info(equal_opfuncid, equal_func);
+		fmgr_info(div_opfuncid, div_func);
+		return true;
+	}
+
+	return false;
+}
+
+/*
  * create_range_bounds
  *		Create a PartitionBoundInfo for a range partitioned table
  */
@@ -690,6 +754,13 @@ create_range_bounds(PartitionBoundSpec **boundspecs, int nparts,
 	int			next_index = 0;
 	Datum	   *boundDatums;
 	PartitionRangeDatumKind *boundKinds;
+	bool		calc_width;
+	Datum		width = 0,
+				prev_width = 0;
+	Oid			width_typid;
+	FmgrInfo	minus_func;
+	FmgrInfo	equal_func;
+	FmgrInfo	div_func;
 
 	boundinfo = (PartitionBoundInfoData *)
 		palloc0(sizeof(PartitionBoundInfoData));
@@ -739,11 +810,16 @@ create_range_bounds(PartitionBoundSpec **boundspecs, int nparts,
 			  qsort_partition_rbound_cmp,
 			  (void *) key);
 
+	calc_width = check_range_width_support(key, ndatums, nparts,
+										   &minus_func, &equal_func,
+										   &div_func, &width_typid);
+
 	/* Save distinct bounds from all_bounds into rbounds. */
 	rbounds = (PartitionRangeBound **)
 		palloc(ndatums * sizeof(PartitionRangeBound *));
 	k = 0;
 	prev = NULL;
+	prev_width = 0;
 	for (i = 0; i < ndatums; i++)
 	{
 		PartitionRangeBound *cur = all_bounds[i];
@@ -786,6 +862,45 @@ create_range_bounds(PartitionBoundSpec **boundspecs, int nparts,
 		 */
 		if (is_distinct)
 			rbounds[k++] = all_bounds[i];
+
+		if (calc_width && prev)
+		{
+			/*
+			 * Stop calculating width anymore if: a) either of the bounds is
+			 * not a datum, b) if it's not the same for this pair as previous
+			 * pairs, or c) if this pair of bounds corresponds to a gap
+			 * between partitions.  boundinfo->range_width will not be set
+			 * below in that case.
+			 */
+			if (cur->kind[0] != PARTITION_RANGE_DATUM_VALUE ||
+				prev->kind[0] != PARTITION_RANGE_DATUM_VALUE)
+			{
+				calc_width = false;
+			}
+			else if (prev->lower && !cur->lower)
+			{
+				bool	width_same = true;
+
+				width = FunctionCall2(&minus_func, cur->datums[0], prev->datums[0]);
+				if (prev_width > 0)
+					width_same = DatumGetBool(FunctionCall2(&equal_func, width,
+															prev_width));
+				calc_width = width_same;
+				prev_width = width;
+			}
+			else if (is_distinct)
+			{
+				/*
+				 * 'prev' would point to the upper bound of the previous
+				 * partition and 'cur' to the lower bound of the next
+				 * partition.  'cur' being distinct from 'prev' means
+				 * that there's a gap between the previous and the next
+				 * partition.
+				 */
+				Assert(!prev->lower && cur->lower);
+				calc_width = false;
+			}
+		}
 
 		prev = cur;
 	}
@@ -879,6 +994,23 @@ create_range_bounds(PartitionBoundSpec **boundspecs, int nparts,
 	/* The extra -1 element. */
 	Assert(i == ndatums);
 	boundinfo->indexes[i] = -1;
+
+	/* Store range width if valid. */
+	if (calc_width)
+	{
+		Assert(width > 0);
+		boundinfo->range_width = palloc(sizeof(PartitionRangeWidthInfo));
+		boundinfo->range_width->value = width;
+		boundinfo->range_width->width_typid = width_typid;
+		boundinfo->range_width->width_typbyval = get_typbyval(width_typid);
+		boundinfo->range_width->width_typlen = get_typlen(width_typid);
+		boundinfo->range_width->minus_func = palloc(sizeof(FmgrInfo));
+		fmgr_info_copy(boundinfo->range_width->minus_func, &minus_func,
+					   CurrentMemoryContext);
+		boundinfo->range_width->div_func = palloc(sizeof(FmgrInfo));
+		fmgr_info_copy(boundinfo->range_width->div_func, &div_func,
+					   CurrentMemoryContext);
+	}
 
 	/* All partitions must now have been assigned canonical indexes. */
 	Assert(next_index == nparts);
@@ -1097,6 +1229,24 @@ partition_bounds_copy(PartitionBoundInfo src,
 
 	dest->null_index = src->null_index;
 	dest->default_index = src->default_index;
+
+	dest->range_width = NULL;
+	if (src->range_width)
+	{
+		dest->range_width = palloc(sizeof(PartitionRangeWidthInfo));
+		dest->range_width->value = datumCopy(src->range_width->value,
+											 src->range_width->width_typbyval,
+											 src->range_width->width_typlen);
+		dest->range_width->width_typid = src->range_width->width_typid;
+		dest->range_width->minus_func = palloc(sizeof(FmgrInfo));
+		fmgr_info_copy(dest->range_width->minus_func,
+					   src->range_width->minus_func,
+					   CurrentMemoryContext);
+		dest->range_width->div_func = palloc(sizeof(FmgrInfo));
+		fmgr_info_copy(dest->range_width->div_func,
+					   src->range_width->div_func,
+					   CurrentMemoryContext);
+	}
 
 	return dest;
 }

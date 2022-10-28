@@ -30,6 +30,8 @@
 #include "partitioning/partprune.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/acl.h"
+#include "utils/date.h"
+#include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
 #include "utils/partcache.h"
 #include "utils/rls.h"
@@ -1530,6 +1532,69 @@ get_partition_for_tuple(PartitionDispatch pd, Datum *values, bool *isnull)
 							return boundinfo->indexes[last_datum_offset + 1];
 					}
 					/* fall-through and do a manual lookup */
+				}
+
+				/* Apply fixed-width formula if valid. */
+				if (boundinfo->range_width)
+				{
+					PartitionRangeWidthInfo *range_width = boundinfo->range_width;
+					Datum	base = boundinfo->datums[0][0];
+					Datum	span;
+
+					Assert(key->parttypid[0] == INT4OID ||
+						   key->parttypid[0] == INT8OID ||
+						   key->parttypid[0] == DATEOID ||
+						   key->parttypid[0] == TIMESTAMPOID);
+
+					/* 'base' must be a valid datum. */
+					Assert(boundinfo->kind[0][0] == PARTITION_RANGE_DATUM_VALUE);
+					span = FunctionCall2(range_width->minus_func,
+										 values[0], base);
+
+					/* convert interval in 'span' to microseconds. */
+					if (range_width->width_typid == INTERVALOID)
+					{
+						Interval   *i = DatumGetIntervalP(span);
+						TimeADT		t = i->time;
+
+						t += i->day * USECS_PER_DAY;
+						t += i->month * 30 * USECS_PER_DAY;
+						span = TimeADTGetDatum(t);
+					}
+
+					/* span should always be an integer */
+					if (span >= 0)
+					{
+						Datum	width = range_width->value;
+						int		bucket;
+
+						/* A hack for widths stored as interval! */
+						if (range_width->width_typid == INTERVALOID)
+						{
+							Interval   *d = DatumGetIntervalP(width);
+							TimeADT		nt = DatumGetTimeADT(span),
+										dt;
+
+							/* convert interval in 'width' to microseconds. */
+							dt = d->time;
+							dt += d->day * USECS_PER_DAY;
+							dt += d->month * 30 * USECS_PER_DAY;
+							Assert(dt > 0);
+							/* XXX always safe? */
+							bucket = (int) (nt / dt);
+						}
+						else
+						{
+							/* XXX division result may be int64 */
+							bucket = DatumGetInt32(FunctionCall2(range_width->div_func,
+																 span, width));
+						}
+
+						if (bucket >= 0 && bucket < partdesc->nparts)
+							return bucket;
+					}
+					else
+						return -1;
 				}
 
 				bound_offset = partition_range_datum_bsearch(key->partsupfunc,
