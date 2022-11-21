@@ -356,29 +356,25 @@ DefineViewRules(Oid viewOid, Query *viewParse, bool replace)
 /*---------------------------------------------------------------
  * UpdateRangeTableOfViewParse
  *
- * Update the range table of the given parsetree.
- * This update consists of adding two new entries IN THE BEGINNING
- * of the range table (otherwise the rule system will die a slow,
- * horrible and painful death, and we do not want that now, do we?)
- * one for the OLD relation and one for the NEW one (both of
- * them refer in fact to the "view" relation).
+ * Update the range table of the given parsetree to add a placeholder entry
+ * for the view relation and increase the 'varnos' of all the Var nodes
+ * by 1 to account for its addition.
  *
- * Of course we must also increase the 'varnos' of all the Var nodes
- * by 2...
- *
- * These extra RT entries are not actually used in the query,
- * except for run-time locking.
+ * This extra RT entry for the view relation is not actually used in the query
+ * but it is needed so that 1) the executor can checks the permissions via the
+ * RTEPermissionInfo that is also added in this function, 2) the executor can
+ * lock the view, and 3) the planner can record the view's OID in
+ * PlannedStmt.relationOids such that any concurrent changes to its schema
+ * would invlidate the plans refencing the view.
  *---------------------------------------------------------------
  */
 static Query *
 UpdateRangeTableOfViewParse(Oid viewOid, Query *viewParse)
 {
 	Relation	viewRel;
-	List	   *new_rt;
 	ParseNamespaceItem *nsitem;
-	RangeTblEntry *rt_entry1,
-			   *rt_entry2;
-	RTEPermissionInfo *rte_perminfo1;
+	RangeTblEntry *rt_entry;
+	RTEPermissionInfo *rte_perminfo;
 	ParseState *pstate;
 	ListCell   *lc;
 
@@ -399,31 +395,25 @@ UpdateRangeTableOfViewParse(Oid viewOid, Query *viewParse)
 	viewRel = relation_open(viewOid, AccessShareLock);
 
 	/*
-	 * Create the 2 new range table entries and form the new range table...
-	 * OLD first, then NEW....
+	 * Create the new range table entry and form the new range table where
+	 * the OLD entry is added first, followed by the entries in the view
+	 * query's range table.
 	 */
 	nsitem = addRangeTableEntryForRelation(pstate, viewRel,
 										   AccessShareLock,
 										   makeAlias("old", NIL),
 										   false, false);
-	rt_entry1 = nsitem->p_rte;
-	rte_perminfo1 = nsitem->p_perminfo;
-	nsitem = addRangeTableEntryForRelation(pstate, viewRel,
-										   AccessShareLock,
-										   makeAlias("new", NIL),
-										   false, false);
-	rt_entry2 = nsitem->p_rte;
+	rt_entry = nsitem->p_rte;
+	rte_perminfo = nsitem->p_perminfo;
 
 	/*
-	 * Add only the "old" RTEPermissionInfo at the head of view query's list
-	 * and update the other RTEs' perminfoindex accordingly.  When rewriting a
-	 * query on the view, ApplyRetrieveRule() will transfer the view
-	 * relation's permission details into this RTEPermissionInfo.  That's
-	 * needed because the view's RTE itself will be transposed into a subquery
-	 * RTE that can't carry the permission details; see the code stanza toward
-	 * the end of ApplyRetrieveRule() for how that's done.
+	 * When rewriting a query on the view, ApplyRetrieveRule() will transfer
+	 * the view relation's permission details into this RTEPermissionInfo.
+	 * That's needed because the view's RTE itself will be transposed into a
+	 * subquery RTE that can't carry the permission details; see the code
+	 * stanza toward the end of ApplyRetrieveRule() for how that's done.
 	 */
-	viewParse->rteperminfos = lcons(rte_perminfo1, viewParse->rteperminfos);
+	viewParse->rteperminfos = lcons(rte_perminfo, viewParse->rteperminfos);
 	foreach(lc, viewParse->rtable)
 	{
 		RangeTblEntry *rte = lfirst(lc);
@@ -432,22 +422,12 @@ UpdateRangeTableOfViewParse(Oid viewOid, Query *viewParse)
 			rte->perminfoindex += 1;
 	}
 
-	/*
-	 * Also make the "new" RTE's RTEPermissionInfo undiscoverable.  This is a
-	 * bit of a hack given that all the non-child RTE_RELATION entries really
-	 * should have a RTEPermissionInfo, but this dummy "new" RTE is going to
-	 * go away anyway in the very near future.
-	 */
-	rt_entry2->perminfoindex = 0;
-
-	new_rt = lcons(rt_entry1, lcons(rt_entry2, viewParse->rtable));
-
-	viewParse->rtable = new_rt;
+	viewParse->rtable = lcons(rt_entry, viewParse->rtable);
 
 	/*
-	 * Now offset all var nodes by 2, and jointree RT indexes too.
+	 * Now offset all var nodes by 1, and jointree RT indexes too.
 	 */
-	OffsetVarNodes((Node *) viewParse, 2, 0);
+	OffsetVarNodes((Node *) viewParse, 1, 0);
 
 	relation_close(viewRel, AccessShareLock);
 
@@ -617,8 +597,8 @@ void
 StoreViewQuery(Oid viewOid, Query *viewParse, bool replace)
 {
 	/*
-	 * The range table of 'viewParse' does not contain entries for the "OLD"
-	 * and "NEW" relations. So... add them!
+	 * Add a placeholder entry for the "OLD" relation to the range table of
+	 * 'viewParse'; see the header comment for why it's needed.
 	 */
 	viewParse = UpdateRangeTableOfViewParse(viewOid, viewParse);
 

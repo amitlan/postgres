@@ -195,12 +195,10 @@ LockViewRecurse_walker(Node *node, LockViewRecurse_context *context)
 			char	   *relname = get_rel_name(relid);
 
 			/*
-			 * The OLD and NEW placeholder entries in the view's rtable are
-			 * skipped.
+			 * The OLD placeholder entry in the view's rtable is skipped.
 			 */
 			if (relid == context->viewoid &&
-				(strcmp(rte->eref->aliasname, "old") == 0 ||
-				 strcmp(rte->eref->aliasname, "new") == 0))
+				(strcmp(rte->eref->aliasname, "old") == 0))
 				continue;
 
 			/* Currently, we only allow plain tables or views to be locked. */
