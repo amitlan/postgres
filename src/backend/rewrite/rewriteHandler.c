@@ -1907,8 +1907,8 @@ ApplyRetrieveRule(Query *parsetree,
  *
  * NB: this must agree with the parser's transformLockingClause() routine.
  * However, unlike the parser we have to be careful not to mark a view's
- * OLD and NEW rels for updating.  The best way to handle that seems to be
- * to scan the jointree to determine which rels are used.
+ * OLD rel for updating.  The best way to handle that seems to be to scan
+ * the jointree to determine which rels are used.
  */
 static void
 markQueryForLocking(Query *qry, Node *jtnode,
