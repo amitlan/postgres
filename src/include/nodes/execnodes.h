@@ -563,6 +563,14 @@ typedef struct ResultRelInfo
 	TupleConversionMap *ri_ChildToRootMap;
 	bool		ri_ChildToRootMapValid;
 
+	/*
+	 * Map used to convert "root" table column bitmapsets into the ones that
+	 * describe a given child table's columns; see ExecGetInsertedCols() et
+	 * al.  Like ri_ChildToRootMap, computed only if needed.
+	 */
+	AttrMap	   *ri_RootToChildMap;
+	bool		ri_RootToChildMapValid;
+
 	/* for use by copyfrom.c when performing multi-inserts */
 	struct CopyMultiInsertBuffer *ri_CopyMultiInsertBuffer;
 

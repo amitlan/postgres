@@ -1252,6 +1252,45 @@ ExecGetChildToRootMap(ResultRelInfo *resultRelInfo)
 	return resultRelInfo->ri_ChildToRootMap;
 }
 
+/*
+ * Return the map needed to convert "root" table column bitmapsets to the
+ * rowtype of an individual child table.  A NULL result is valid and means
+ * that no conversion is needed.
+ */
+AttrMap *
+ExecGetRootToChildMap(ResultRelInfo *resultRelInfo,
+					  EState *estate)
+{
+	/* If we didn't already do so, compute the map for this child. */
+	if (!resultRelInfo->ri_RootToChildMapValid)
+	{
+		ResultRelInfo *rootRelInfo = resultRelInfo->ri_RootResultRelInfo;
+		MemoryContext oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+		if (rootRelInfo)
+		{
+			/*
+			 * Passing 'true' below means any columns present in the child
+			 * table but not in the root parent are to be ignored; note that
+			 * such a case is possible with traditional inheritance but never
+			 * with partitioning.
+			 */
+			resultRelInfo->ri_RootToChildMap =
+				build_attrmap_by_name_if_req(RelationGetDescr(rootRelInfo->ri_RelationDesc),
+											 RelationGetDescr(resultRelInfo->ri_RelationDesc),
+											 true);
+		}
+		else					/* this isn't a child result rel */
+			resultRelInfo->ri_RootToChildMap = NULL;
+
+		resultRelInfo->ri_RootToChildMapValid = true;
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	return resultRelInfo->ri_RootToChildMap;
+}
+
 /* Return a bitmap representing columns being inserted */
 Bitmapset *
 ExecGetInsertedCols(ResultRelInfo *relinfo, EState *estate)
