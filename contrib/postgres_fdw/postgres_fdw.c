@@ -624,7 +624,6 @@ postgresGetForeignRelSize(PlannerInfo *root,
 {
 	PgFdwRelationInfo *fpinfo;
 	ListCell   *lc;
-	RangeTblEntry *rte = planner_rt_fetch(baserel->relid, root);
 
 	/*
 	 * We use PgFdwRelationInfo to pass various information to subsequent
@@ -663,7 +662,7 @@ postgresGetForeignRelSize(PlannerInfo *root,
 	 */
 	if (fpinfo->use_remote_estimate)
 	{
-		Oid			userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
+		Oid			userid = baserel->userid ? baserel->userid : GetUserId();
 
 		fpinfo->user = GetUserMapping(userid, fpinfo->server->serverid);
 	}
@@ -1510,16 +1509,14 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 
 	/*
 	 * Identify which user to do the remote access as.  This should match what
-	 * ExecCheckRTEPerms() does.  In case of a join or aggregate, use the
-	 * lowest-numbered member RTE as a representative; we would get the same
-	 * result from any.
+	 * ExecCheckRTEPerms() does.
 	 */
+	userid = fsplan->checkAsUser ? fsplan->checkAsUser : GetUserId();
 	if (fsplan->scan.scanrelid > 0)
 		rtindex = fsplan->scan.scanrelid;
 	else
 		rtindex = bms_next_member(fsplan->fs_relids, -1);
 	rte = exec_rt_fetch(rtindex, estate);
-	userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
 
 	/* Get info about foreign table. */
 	table = GetForeignTable(rte->relid);
@@ -2633,7 +2630,6 @@ postgresBeginDirectModify(ForeignScanState *node, int eflags)
 	EState	   *estate = node->ss.ps.state;
 	PgFdwDirectModifyState *dmstate;
 	Index		rtindex;
-	RangeTblEntry *rte;
 	Oid			userid;
 	ForeignTable *table;
 	UserMapping *user;
@@ -2655,11 +2651,10 @@ postgresBeginDirectModify(ForeignScanState *node, int eflags)
 	 * Identify which user to do the remote access as.  This should match what
 	 * ExecCheckRTEPerms() does.
 	 */
-	rtindex = node->resultRelInfo->ri_RangeTableIndex;
-	rte = exec_rt_fetch(rtindex, estate);
-	userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
+	userid = fsplan->checkAsUser ? fsplan->checkAsUser : GetUserId();
 
 	/* Get info about foreign table. */
+	rtindex = node->resultRelInfo->ri_RangeTableIndex;
 	if (fsplan->scan.scanrelid == 0)
 		dmstate->rel = ExecOpenScanRelation(estate, rtindex, eflags);
 	else
