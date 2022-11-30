@@ -549,17 +549,26 @@ add_rte_to_flat_rtable(PlannerGlobal *glob, List *rtepermlist,
 		glob->relationOids = lappend_oid(glob->relationOids, newrte->relid);
 
 	/*
-	 * Add the RTEPermissionInfo, if any, corresponding to this RTE to the
-	 * flattened global list.  Also update the perminfoindex in newrte to
-	 * reflect the RTEPermissionInfo's position in this other list.
+	 * Add a copy of the RTEPermissionInfo, if any, corresponding to this RTE
+	 * to the flattened global list.
 	 */
 	if (rte->perminfoindex > 0)
 	{
 		RTEPermissionInfo *perminfo;
+		RTEPermissionInfo *newperminfo;
 
+		/* Get the existing one from this query's rtepermlist. */
 		perminfo = GetRTEPermissionInfo(rtepermlist, newrte);
-		glob->finalrtepermlist = lappend(glob->finalrtepermlist, perminfo);
-		newrte->perminfoindex = list_length(glob->finalrtepermlist);
+
+		/*
+		 * Add a new one to finalrtepermlist and copy the contents of the
+		 * existing one into it.  Note that AddRTEPermissionInfo() also
+		 * updates newrte->perminfoindex to point to newperminfo in
+		 * finalrtepermlist.
+		 */
+		newrte->perminfoindex = 0;	/* expected by AddRTEPermissionInfo() */
+		newperminfo = AddRTEPermissionInfo(&glob->finalrtepermlist, newrte);
+		memcpy(newperminfo, perminfo, sizeof(RTEPermissionInfo));
 	}
 }
 
