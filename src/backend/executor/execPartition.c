@@ -1843,8 +1843,17 @@ ExecInitPartitionPruning(PlanState *planstate,
 	 */
 	if (estate->es_part_prune_results)
 	{
-		pruneresult = list_nth(estate->es_part_prune_results, part_prune_index);
-		Assert(IsA(pruneresult, PartitionPruneResult));
+		pruneresult = list_nth_node(PartitionPruneResult,
+									estate->es_part_prune_results,
+									part_prune_index);
+		if (!bms_equal(root_parent_relids, pruneinfo->root_parent_relids))
+			ereport(ERROR,
+					errcode(ERRCODE_INTERNAL_ERROR),
+					errmsg_internal("mismatching PartitionPruneInfo and PartitionPruneResult at part_prune_index %d",
+									part_prune_index),
+					errdetail_internal("prunresult relids %s, pruneinfo relids %s",
+									   bmsToString(pruneresult->root_parent_relids),
+									   bmsToString(pruneinfo->root_parent_relids)));
 	}
 
 	if (pruneresult == NULL || pruneinfo->needs_exec_pruning)

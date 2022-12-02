@@ -147,6 +147,8 @@ ExecutorDoInitialPruning(PlannedStmt *plannedstmt, ParamListInfo params,
 		PartitionPruneInfo *pruneinfo = lfirst(lc);
 		PartitionPruneResult *pruneresult = makeNode(PartitionPruneResult);
 
+		pruneresult->root_parent_relids =
+			bms_copy(pruneinfo->root_parent_relids);
 		pruneresult->valid_subplan_offs =
 			ExecPartitionDoInitialPruning(plannedstmt, params, pruneinfo,
 										  scan_leafpart_rtis);

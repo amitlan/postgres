@@ -1580,6 +1580,12 @@ typedef struct PartitionPruneStepCombine
  * The result of performing ExecPartitionDoInitialPruning() on a given
  * PartitionPruneInfo.
  *
+ * root_parent_relids is same as PartitionPruneInfo.root_parent_relids.  It's
+ * there for cross-checking in ExecInitPartitionPruning() that the
+ * PartitionPruneResult and the PartitionPruneInfo at a given index in
+ * EState.es_part_prune_results and EState.es_part_prune_infos, respectively,
+ * belong to the same parent plan node.
+ *
  * valid_subplans_offs contains the indexes of subplans remaining after
  * performing initial pruning by calling ExecFindMatchingSubPlans() on the
  * PartitionPruneInfo.
@@ -1597,6 +1603,7 @@ typedef struct PartitionPruneResult
 {
 	NodeTag		type;
 
+	Bitmapset	   *root_parent_relids;
 	Bitmapset	   *valid_subplan_offs;
 } PartitionPruneResult;
 
