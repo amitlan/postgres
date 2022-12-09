@@ -1757,9 +1757,9 @@ ApplyRetrieveRule(Query *parsetree,
 	Query	   *rule_action;
 	RangeTblEntry *rte,
 			   *subrte;
-	RTEPermissionInfo *perminfo,
-			   *sub_perminfo;
+	RTEPermissionInfo *perminfo;
 	RowMarkClause *rc;
+	ListCell   *lc;
 
 	if (list_length(rule->actions) != 1)
 		elog(ERROR, "expected just one rule action");
@@ -1868,10 +1868,46 @@ ApplyRetrieveRule(Query *parsetree,
 	/*
 	 * Now, plug the view query in as a subselect, converting the relation's
 	 * original RTE to a subquery RTE.
+	 *
+	 * Before doing that, move the view's permission check data down into the
+	 * view query by adding both a copy of the view relation RTE and of the
+	 * corresponding RTEPermissionInfo to the view query's lists.  The RTE is
+	 * not referenced anywhere in the query but still needed for 1) the
+	 * executor to be able to lock the view relation, and 2) the planner to be
+	 * able to record the view relation's OID in PlannedStmt.relationOids.
+	 *
+	 * Add the view relation's RTE and the perminfo such that they each appear
+	 * before other RTEs and perminfos, respectively, to ensure that its
+	 * permissions are checked before those of others.
 	 */
 	rte = rt_fetch(rt_index, parsetree->rtable);
 	perminfo = getRTEPermissionInfo(parsetree->rteperminfos, rte);
 
+	/*
+	 * Must adjust varnos of the view query to account for the existing RTE's
+	 * indexes increasing by 1 due to view relation RTE's addition.
+	 */
+	OffsetVarNodes((Node *) rule_action, 1, 0);
+
+	/* Also their perminfoindexes. */
+	foreach(lc, rule_action->rtable)
+	{
+		RangeTblEntry *action_rte = lfirst(lc);
+
+		if (action_rte->perminfoindex > 0)
+			action_rte->perminfoindex += 1;
+	}
+	subrte = copyObject(rte);
+	rule_action->rtable = lcons(subrte, rule_action->rtable);
+	rule_action->rteperminfos = lcons(copyObject(perminfo),
+									  rule_action->rteperminfos);
+	/*
+	 * Finally, adjust the view relation's RTE in the view query to point to
+	 * the just added perminfo.
+	 */
+	subrte->perminfoindex = 1;
+
+	/* Free to convert the original RTE into a subselect. */
 	rte->rtekind = RTE_SUBQUERY;
 	rte->subquery = rule_action;
 	rte->security_barrier = RelationIsSecurityView(relation);
@@ -1880,22 +1916,8 @@ ApplyRetrieveRule(Query *parsetree,
 	rte->relkind = 0;
 	rte->rellockmode = 0;
 	rte->tablesample = NULL;
-	rte->perminfoindex = 0;		/* no permission checking for this RTE */
+	rte->perminfoindex = 0;		/* should no longer point to any perminfo! */
 	rte->inh = false;			/* must not be set for a subquery */
-
-	/*
-	 * We move the view's permission check data down to its RTEPermissionInfo
-	 * contained in the view query, which the OLD entry in its range table
-	 * points to.
-	 */
-	subrte = rt_fetch(PRS2_OLD_VARNO, rule_action->rtable);
-	Assert(subrte->relid == relation->rd_id);
-	sub_perminfo = getRTEPermissionInfo(rule_action->rteperminfos, subrte);
-	sub_perminfo->requiredPerms = perminfo->requiredPerms;
-	sub_perminfo->checkAsUser = perminfo->checkAsUser;
-	sub_perminfo->selectedCols = perminfo->selectedCols;
-	sub_perminfo->insertedCols = perminfo->insertedCols;
-	sub_perminfo->updatedCols = perminfo->updatedCols;
 
 	return parsetree;
 }
@@ -1907,9 +1929,6 @@ ApplyRetrieveRule(Query *parsetree,
  * aggregate.  We leave it to the planner to detect that.
  *
  * NB: this must agree with the parser's transformLockingClause() routine.
- * However, unlike the parser we have to be careful not to mark a view's
- * OLD and NEW rels for updating.  The best way to handle that seems to be
- * to scan the jointree to determine which rels are used.
  */
 static void
 markQueryForLocking(Query *qry, Node *jtnode,
