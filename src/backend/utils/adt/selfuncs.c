@@ -5211,9 +5211,11 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 										rte = planner_rt_fetch(varno, root);
 										Assert(rte->rtekind == RTE_RELATION);
 
-										userid = OidIsValid(onerel->userid) ?
-											onerel->userid : GetUserId();
-
+										/*
+										 * Fine to use the the userid as it's
+										 * the same in all relations of a
+										 * given inheritance tree.
+										 */
 										vardata->acl_ok =
 											rte->securityQuals == NIL &&
 											(pg_class_aclcheck(rte->relid,
@@ -5344,9 +5346,10 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 							rte = planner_rt_fetch(varno, root);
 							Assert(rte->rtekind == RTE_RELATION);
 
-							userid = OidIsValid(onerel->userid) ?
-								onerel->userid : GetUserId();
-
+							/*
+							 * Fine to use the same userid as it's the same in
+							 * all relations of a given inheritance tree.
+							 */
 							vardata->acl_ok =
 								rte->securityQuals == NIL &&
 								(pg_class_aclcheck(rte->relid,
@@ -5485,9 +5488,10 @@ examine_simple_variable(PlannerInfo *root, Var *var,
 				rte = planner_rt_fetch(varno, root);
 				Assert(rte->rtekind == RTE_RELATION);
 
-				userid = OidIsValid(onerel->userid) ?
-					onerel->userid : GetUserId();
-
+				/*
+				 * Fine to use the same userid as it's the same in all
+				 * relations of a given inheritance tree.
+				 */
 				vardata->acl_ok =
 					rte->securityQuals == NIL &&
 					((pg_class_aclcheck(rte->relid, userid,
