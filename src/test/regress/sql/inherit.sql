@@ -907,8 +907,36 @@ explain (costs off)
   select p2.a, p1.c from permtest_parent p1 inner join permtest_parent p2
   on p1.a = p2.a and left(p1.c, 3) ~ 'a1$';
 reset session authorization;
+
+-- Check with a view over permtest_parent and a UNION ALL over the view,
+-- especially that permtest_parent's permissions are checked with the role
+-- owning the view as permtest_parent's RTE's checkAsUser.
+create role regress_permtest_view_owner;
+create schema regress_permtest_schema;
+grant all on schema regress_permtest_schema to regress_permtest_view_owner;
+grant select(a,c) on permtest_parent to regress_permtest_view_owner;
+set session authorization regress_permtest_view_owner;
+create view regress_permtest_schema.permtest_parent_view as
+	select a, c from permtest_parent;
+-- Like above, the 2nd arm of UNION ALL gets a hash join due to lack of access
+-- to the expression index's stats
+explain (costs off)
+  select p2.a, p1.c
+  from regress_permtest_schema.permtest_parent_view p1
+	inner join regress_permtest_schema.permtest_parent_view p2
+  on p1.a = p2.a and p1.c ~ 'a1$'
+  union all
+  select p2.a, p1.c
+  from regress_permtest_schema.permtest_parent_view p1
+	inner join regress_permtest_schema.permtest_parent_view p2
+  on p1.a = p2.a and left(p1.c, 3) ~ 'a1$';
+reset session authorization;
 revoke all on permtest_parent from regress_no_child_access;
 drop role regress_no_child_access;
+revoke all on permtest_parent from regress_permtest_view_owner;
+drop view regress_permtest_schema.permtest_parent_view;
+drop schema regress_permtest_schema;
+drop role regress_permtest_view_owner;
 drop table permtest_parent;
 
 -- Verify that constraint errors across partition root / child are

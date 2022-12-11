@@ -228,10 +228,14 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	{
 		/*
 		 * Get the userid from the relation's RTEPermissionInfo, though only
-		 * the tables mentioned in query are assigned RTEPermissionInfos.
-		 * Child relations (otherrels) simply use the parent's value.
+		 * the tables mentioned in the query are assigned RTEPermissionInfos.
+		 * So, for child relations (otherrels), simply use the parent's value,
+		 * unless the parent is a subquery base rel.
 		 */
-		if (parent == NULL)
+		Assert(parent == NULL ||
+			   (parent->rtekind == RTE_RELATION ||
+				parent->rtekind == RTE_SUBQUERY));
+		if (parent == NULL || parent->rtekind == RTE_SUBQUERY)
 		{
 			RTEPermissionInfo *perminfo;
 
