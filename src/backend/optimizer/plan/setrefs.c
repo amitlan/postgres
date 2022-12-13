@@ -280,6 +280,16 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 	add_rtes_to_flat_rtable(root, false);
 
 	/*
+	 * Add the query's adjusted range of RT indexes to glob->minLockRelids.
+	 * The adjusted RT indexes of prunable relations will be deleted from the
+	 * set below where PartitionPruneInfos are processed.
+	 */
+	glob->minLockRelids =
+		bms_add_range(glob->minLockRelids,
+					  rtoffset + 1,
+					  rtoffset + list_length(root->parse->rtable));
+
+	/*
 	 * Adjust RT indexes of PlanRowMarks and add to final rowmarks list
 	 */
 	foreach(lc, root->rowMarks)
@@ -377,9 +387,11 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 				/* RT index of the table to which the pinfo belongs. */
 				pinfo->rtindex += rtoffset;
 			}
+
 		}
 
 		glob->partPruneInfos = lappend(glob->partPruneInfos, pruneinfo);
+		glob->containsInitialPruning |= pruneinfo->needs_init_pruning;
 	}
 
 	return result;

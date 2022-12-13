@@ -182,6 +182,7 @@ ExecSerializePlan(Plan *plan, EState *estate)
 	pstmt->transientPlan = false;
 	pstmt->dependsOnRole = false;
 	pstmt->parallelModeNeeded = false;
+	pstmt->containsInitialPruning = false;	/* workers need not know! */
 	pstmt->planTree = plan;
 	pstmt->partPruneInfos = estate->es_part_prune_infos;
 	pstmt->rtable = estate->es_range_table;
