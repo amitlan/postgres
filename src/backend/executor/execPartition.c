@@ -1956,6 +1956,7 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 			Assert(partdesc->nparts >= pinfo->nparts);
 			pprune->nparts = partdesc->nparts;
 			pprune->subplan_map = palloc(sizeof(int) * partdesc->nparts);
+			pprune->rti_map = palloc(sizeof(Index) * partdesc->nparts);
 			if (partdesc->nparts == pinfo->nparts)
 			{
 				/*
@@ -1965,6 +1966,8 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 				 */
 				pprune->subpart_map = pinfo->subpart_map;
 				memcpy(pprune->subplan_map, pinfo->subplan_map,
+					   sizeof(int) * pinfo->nparts);
+				memcpy(pprune->rti_map, pinfo->rti_map,
 					   sizeof(int) * pinfo->nparts);
 
 				/*
@@ -2016,6 +2019,8 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 							pinfo->subplan_map[pd_idx];
 						pprune->subpart_map[pp_idx] =
 							pinfo->subpart_map[pd_idx];
+						pprune->rti_map[pp_idx] =
+							pinfo->rti_map[pd_idx];
 						pd_idx++;
 					}
 					else
@@ -2023,6 +2028,7 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 						/* this partdesc entry is not in the plan */
 						pprune->subplan_map[pp_idx] = -1;
 						pprune->subpart_map[pp_idx] = -1;
+						pprune->rti_map[pp_idx] = 0;
 					}
 				}
 

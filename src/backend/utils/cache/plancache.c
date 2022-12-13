@@ -1747,7 +1747,8 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 	foreach(lc1, stmt_list)
 	{
 		PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc1);
-		ListCell   *lc2;
+		Bitmapset  *allLockRelids;
+		int			rti;
 
 		if (plannedstmt->commandType == CMD_UTILITY)
 		{
@@ -1760,14 +1761,17 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 			 */
 			Query	   *query = UtilityContainsQuery(plannedstmt->utilityStmt);
 
+			Assert(plannedstmt->minLockRelids == NULL);
 			if (query)
 				ScanQueryForLocks(query, acquire);
 			continue;
 		}
 
-		foreach(lc2, plannedstmt->rtable)
+		allLockRelids = plannedstmt->minLockRelids;
+		rti = -1;
+		while ((rti = bms_next_member(allLockRelids, rti)) > 0)
 		{
-			RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc2);
+			RangeTblEntry *rte = rt_fetch(rti, plannedstmt->rtable);
 
 			if (rte->rtekind != RTE_RELATION)
 				continue;

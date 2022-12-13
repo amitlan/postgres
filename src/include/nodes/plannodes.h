@@ -73,10 +73,17 @@ typedef struct PlannedStmt
 	List	   *partPruneInfos; /* List of PartitionPruneInfo contained in the
 								 * plan */
 
+	bool		containsInitialPruning;	/* Do any of those PartitionPruneInfos
+										 * have initial pruning steps in them?
+										 */
+
 	List	   *rtable;			/* list of RangeTblEntry nodes */
 
 	List	   *permInfos;		/* list of RTEPermissionInfo nodes for rtable
 								 * entries needing one */
+
+	Bitmapset  *minLockRelids;	/* Indexes of all range table entries; for
+								 * AcquireExecutorLocks()'s perusal */
 
 	/* rtable indexes of target relations for INSERT/UPDATE/DELETE/MERGE */
 	List	   *resultRelations;	/* integer list of RT indexes, or NIL */
@@ -1417,6 +1424,13 @@ typedef struct PlanRowMark
  * prune_infos			List of Lists containing PartitionedRelPruneInfo nodes,
  *						one sublist per run-time-prunable partition hierarchy
  *						appearing in the parent plan node's subplans.
+ *
+ * needs_init_pruning	Does any of the PartitionedRelPruneInfos in
+ *						prune_infos have its initial_pruning_steps set?
+ *
+ * needs_exec_pruning	Does any of the PartitionedRelPruneInfos in
+ *						prune_infos have its exec_pruning_steps set?
+ *
  * other_subplans		Indexes of any subplans that are not accounted for
  *						by any of the PartitionedRelPruneInfo nodes in
  *						"prune_infos".  These subplans must not be pruned.
@@ -1428,6 +1442,8 @@ typedef struct PartitionPruneInfo
 	NodeTag		type;
 	Bitmapset  *root_parent_relids;
 	List	   *prune_infos;
+	bool		needs_init_pruning;
+	bool		needs_exec_pruning;
 	Bitmapset  *other_subplans;
 } PartitionPruneInfo;
 
@@ -1471,6 +1487,9 @@ typedef struct PartitionedRelPruneInfo
 
 	/* relation OID by partition index, or 0 */
 	Oid		   *relid_map pg_node_attr(array_size(nparts));
+
+	/* Range table index by partition index, or 0. */
+	Index	   *rti_map pg_node_attr(array_size(nparts));
 
 	/*
 	 * initial_pruning_steps shows how to prune during executor startup (i.e.,
