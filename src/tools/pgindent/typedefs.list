@@ -1238,6 +1238,7 @@ JsonBehaviorType
 JsonCoercion
 JsonCommon
 JsonConstructorExpr
+JsonConstructorExprState
 JsonConstructorType
 JsonEncoding
 JsonExpr
