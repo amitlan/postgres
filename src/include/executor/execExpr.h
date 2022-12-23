@@ -238,6 +238,7 @@ typedef enum ExprEvalOp
 	EEOP_GROUPING_FUNC,
 	EEOP_WINDOW_FUNC,
 	EEOP_SUBPLAN,
+	EEOP_JSON_CONSTRUCTOR,
 
 	/* aggregation related nodes */
 	EEOP_AGG_STRICT_DESERIALIZE,
@@ -666,6 +667,17 @@ typedef struct ExprEvalStep
 			int			transno;
 			int			setoff;
 		}			agg_trans;
+
+		/* for EEOP_JSON_CONSTRUCTOR */
+		struct
+		{
+			JsonConstructorExpr *constructor;
+			Datum	   *arg_values;
+			bool	   *arg_nulls;
+			Oid		   *arg_types;
+			int			nargs;
+		}			json_constructor;
+
 	}			d;
 } ExprEvalStep;
 
@@ -766,6 +778,8 @@ extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 								ExprContext *econtext);
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
+extern void ExecEvalJsonConstructor(ExprState *state, ExprEvalStep *op,
+									ExprContext *econtext);
 
 extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
 							 ExprContext *aggcontext);

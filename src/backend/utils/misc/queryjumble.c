@@ -740,6 +740,44 @@ JumbleExpr(JumbleState *jstate, Node *node)
 				JumbleExpr(jstate, (Node *) mergeaction->targetList);
 			}
 			break;
+		case T_JsonFormat:
+			{
+				JsonFormat *format = (JsonFormat *) node;
+
+				APP_JUMB(format->type);
+				APP_JUMB(format->encoding);
+			}
+			break;
+		case T_JsonReturning:
+			{
+				JsonReturning *returning = (JsonReturning *) node;
+
+				JumbleExpr(jstate, (Node *) returning->format);
+				APP_JUMB(returning->typid);
+				APP_JUMB(returning->typmod);
+			}
+			break;
+		case T_JsonValueExpr:
+			{
+				JsonValueExpr *expr = (JsonValueExpr *) node;
+
+				JumbleExpr(jstate, (Node *) expr->raw_expr);
+				JumbleExpr(jstate, (Node *) expr->formatted_expr);
+				JumbleExpr(jstate, (Node *) expr->format);
+			}
+			break;
+		case T_JsonConstructorExpr:
+			{
+				JsonConstructorExpr *ctor = (JsonConstructorExpr *) node;
+
+				JumbleExpr(jstate, (Node *) ctor->func);
+				JumbleExpr(jstate, (Node *) ctor->coercion);
+				JumbleExpr(jstate, (Node *) ctor->returning);
+				APP_JUMB(ctor->type);
+				APP_JUMB(ctor->unique);
+				APP_JUMB(ctor->absent_on_null);
+			}
+			break;
 		case T_List:
 			foreach(temp, (List *) node)
 			{
