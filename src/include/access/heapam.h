@@ -111,7 +111,7 @@ typedef struct HeapTupleFreeze
 
 	/* Page offset number for tuple */
 	OffsetNumber offset;
-} HeapTupleFreeze;
+}			HeapTupleFreeze;
 
 /* ----------------
  *		function prototypes for heap access method
@@ -180,12 +180,12 @@ extern TM_Result heap_lock_tuple(Relation relation, HeapTuple tuple,
 extern void heap_inplace_update(Relation relation, HeapTuple tuple);
 extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  const struct VacuumCutoffs *cutoffs,
-									  HeapTupleFreeze *frz, bool *totally_frozen,
+									  HeapTupleFreeze * frz, bool *totally_frozen,
 									  TransactionId *relfrozenxid_out,
 									  MultiXactId *relminmxid_out);
 extern void heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 										 TransactionId FreezeLimit,
-										 HeapTupleFreeze *tuples, int ntuples);
+										 HeapTupleFreeze * tuples, int ntuples);
 extern bool heap_freeze_tuple(HeapTupleHeader tuple,
 							  TransactionId relfrozenxid, TransactionId relminmxid,
 							  TransactionId FreezeLimit, TransactionId MultiXactCutoff);

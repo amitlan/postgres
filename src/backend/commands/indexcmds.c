@@ -744,7 +744,7 @@ DefineIndex(Oid relationId,
 		AclResult	aclresult;
 
 		aclresult = object_aclcheck(NamespaceRelationId, namespaceId, root_save_userid,
-										  ACL_CREATE);
+									ACL_CREATE);
 		if (aclresult != ACLCHECK_OK)
 			aclcheck_error(aclresult, OBJECT_SCHEMA,
 						   get_namespace_name(namespaceId));
@@ -776,7 +776,7 @@ DefineIndex(Oid relationId,
 		AclResult	aclresult;
 
 		aclresult = object_aclcheck(TableSpaceRelationId, tablespaceId, root_save_userid,
-										   ACL_CREATE);
+									ACL_CREATE);
 		if (aclresult != ACLCHECK_OK)
 			aclcheck_error(aclresult, OBJECT_TABLESPACE,
 						   get_tablespace_name(tablespaceId));
@@ -2651,7 +2651,7 @@ ExecReindex(ParseState *pstate, ReindexStmt *stmt, bool isTopLevel)
 			AclResult	aclresult;
 
 			aclresult = object_aclcheck(TableSpaceRelationId, params.tablespaceOid,
-											   GetUserId(), ACL_CREATE);
+										GetUserId(), ACL_CREATE);
 			if (aclresult != ACLCHECK_OK)
 				aclcheck_error(aclresult, OBJECT_TABLESPACE,
 							   get_tablespace_name(params.tablespaceOid));
@@ -3255,7 +3255,7 @@ ReindexMultipleInternal(List *relids, ReindexParams *params)
 			AclResult	aclresult;
 
 			aclresult = object_aclcheck(TableSpaceRelationId, params->tablespaceOid,
-											   GetUserId(), ACL_CREATE);
+										GetUserId(), ACL_CREATE);
 			if (aclresult != ACLCHECK_OK)
 				aclcheck_error(aclresult, OBJECT_TABLESPACE,
 							   get_tablespace_name(params->tablespaceOid));

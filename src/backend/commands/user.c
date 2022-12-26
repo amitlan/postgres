@@ -64,7 +64,7 @@ typedef enum
 	RRG_REMOVE_INHERIT_OPTION,
 	RRG_REMOVE_SET_OPTION,
 	RRG_DELETE_GRANT
-} RevokeRoleGrantAction;
+}			RevokeRoleGrantAction;
 
 /* Potentially set by pg_upgrade_support functions */
 Oid			binary_upgrade_next_pg_authid_oid = InvalidOid;
@@ -75,7 +75,7 @@ typedef struct
 	bool		admin;
 	bool		inherit;
 	bool		set;
-} GrantRoleOptions;
+}			GrantRoleOptions;
 
 #define GRANT_ROLE_SPECIFIED_ADMIN			0x0001
 #define GRANT_ROLE_SPECIFIED_INHERIT		0x0002
@@ -89,27 +89,27 @@ check_password_hook_type check_password_hook = NULL;
 
 static void AddRoleMems(const char *rolename, Oid roleid,
 						List *memberSpecs, List *memberIds,
-						Oid grantorId, GrantRoleOptions *popt);
+						Oid grantorId, GrantRoleOptions * popt);
 static void DelRoleMems(const char *rolename, Oid roleid,
 						List *memberSpecs, List *memberIds,
-						Oid grantorId, GrantRoleOptions *popt,
+						Oid grantorId, GrantRoleOptions * popt,
 						DropBehavior behavior);
 static Oid	check_role_grantor(Oid currentUserId, Oid roleid, Oid grantorId,
 							   bool is_grant);
-static RevokeRoleGrantAction *initialize_revoke_actions(CatCList *memlist);
+static RevokeRoleGrantAction * initialize_revoke_actions(CatCList *memlist);
 static bool plan_single_revoke(CatCList *memlist,
-							   RevokeRoleGrantAction *actions,
+							   RevokeRoleGrantAction * actions,
 							   Oid member, Oid grantor,
-							   GrantRoleOptions *popt,
+							   GrantRoleOptions * popt,
 							   DropBehavior behavior);
 static void plan_member_revoke(CatCList *memlist,
-							   RevokeRoleGrantAction *actions, Oid member);
+							   RevokeRoleGrantAction * actions, Oid member);
 static void plan_recursive_revoke(CatCList *memlist,
-								  RevokeRoleGrantAction *actions,
+								  RevokeRoleGrantAction * actions,
 								  int index,
 								  bool revoke_admin_option_only,
 								  DropBehavior behavior);
-static void InitGrantRoleOptions(GrantRoleOptions *popt);
+static void InitGrantRoleOptions(GrantRoleOptions * popt);
 
 
 /* Check if current user has createrole privileges */
@@ -162,7 +162,7 @@ CreateRole(ParseState *pstate, CreateRoleStmt *stmt)
 	DefElem    *dadminmembers = NULL;
 	DefElem    *dvalidUntil = NULL;
 	DefElem    *dbypassRLS = NULL;
-	GrantRoleOptions	popt;
+	GrantRoleOptions popt;
 
 	/* The defaults can vary depending on the original statement type */
 	switch (stmt->stmt_type)
@@ -576,7 +576,7 @@ AlterRole(ParseState *pstate, AlterRoleStmt *stmt)
 	DefElem    *dvalidUntil = NULL;
 	DefElem    *dbypassRLS = NULL;
 	Oid			roleid;
-	GrantRoleOptions	popt;
+	GrantRoleOptions popt;
 
 	check_rolespec_name(stmt->role,
 						_("Cannot alter reserved roles."));
@@ -769,7 +769,7 @@ AlterRole(ParseState *pstate, AlterRoleStmt *stmt)
 	 */
 	if (dissuper)
 	{
-		bool	should_be_super = boolVal(dissuper->arg);
+		bool		should_be_super = boolVal(dissuper->arg);
 
 		if (!should_be_super && roleid == BOOTSTRAP_SUPERUSERID)
 			ereport(ERROR,
@@ -1370,13 +1370,13 @@ GrantRole(ParseState *pstate, GrantRoleStmt *stmt)
 	Oid			grantor;
 	List	   *grantee_ids;
 	ListCell   *item;
-	GrantRoleOptions	popt;
+	GrantRoleOptions popt;
 
 	/* Parse options list. */
 	InitGrantRoleOptions(&popt);
 	foreach(item, stmt->opt)
 	{
-		DefElem	   *opt = (DefElem *) lfirst(item);
+		DefElem    *opt = (DefElem *) lfirst(item);
 		char	   *optval = defGetString(opt);
 
 		if (strcmp(opt->defname, "admin") == 0)
@@ -1425,8 +1425,8 @@ GrantRole(ParseState *pstate, GrantRoleStmt *stmt)
 	/*
 	 * Step through all of the granted roles and add, update, or remove
 	 * entries in pg_auth_members as appropriate. If stmt->is_grant is true,
-	 * we are adding new grants or, if they already exist, updating options
-	 * on those grants. If stmt->is_grant is false, we are revoking grants or
+	 * we are adding new grants or, if they already exist, updating options on
+	 * those grants. If stmt->is_grant is false, we are revoking grants or
 	 * removing options from them.
 	 */
 	foreach(item, stmt->granted_roles)
@@ -1556,7 +1556,7 @@ roleSpecsToIds(List *memberNames)
 static void
 AddRoleMems(const char *rolename, Oid roleid,
 			List *memberSpecs, List *memberIds,
-			Oid grantorId, GrantRoleOptions *popt)
+			Oid grantorId, GrantRoleOptions * popt)
 {
 	Relation	pg_authmem_rel;
 	TupleDesc	pg_authmem_dsc;
@@ -1595,9 +1595,10 @@ AddRoleMems(const char *rolename, Oid roleid,
 	 * The charter of pg_database_owner is to have exactly one, implicit,
 	 * situation-dependent member.  There's no technical need for this
 	 * restriction.  (One could lift it and take the further step of making
-	 * object_ownercheck(DatabaseRelationId, ...) equivalent to has_privs_of_role(roleid,
-	 * ROLE_PG_DATABASE_OWNER), in which case explicit, situation-independent
-	 * members could act as the owner of any database.)
+	 * object_ownercheck(DatabaseRelationId, ...) equivalent to
+	 * has_privs_of_role(roleid, ROLE_PG_DATABASE_OWNER), in which case
+	 * explicit, situation-independent members could act as the owner of any
+	 * database.)
 	 */
 	if (roleid == ROLE_PG_DATABASE_OWNER)
 		ereport(ERROR,
@@ -1753,8 +1754,8 @@ AddRoleMems(const char *rolename, Oid roleid,
 										ObjectIdGetDatum(grantorId));
 
 		/*
-		 * If we found a tuple, update it with new option values, unless
-		 * there are no changes, in which case issue a WARNING.
+		 * If we found a tuple, update it with new option values, unless there
+		 * are no changes, in which case issue a WARNING.
 		 *
 		 * If we didn't find a tuple, just insert one.
 		 */
@@ -1837,8 +1838,8 @@ AddRoleMems(const char *rolename, Oid roleid,
 					popt->inherit;
 			else
 			{
-				HeapTuple		mrtup;
-				Form_pg_authid	mrform;
+				HeapTuple	mrtup;
+				Form_pg_authid mrform;
 
 				mrtup = SearchSysCache1(AUTHOID, memberid);
 				if (!HeapTupleIsValid(mrtup))
@@ -1889,7 +1890,7 @@ AddRoleMems(const char *rolename, Oid roleid,
 static void
 DelRoleMems(const char *rolename, Oid roleid,
 			List *memberSpecs, List *memberIds,
-			Oid grantorId, GrantRoleOptions *popt, DropBehavior behavior)
+			Oid grantorId, GrantRoleOptions * popt, DropBehavior behavior)
 {
 	Relation	pg_authmem_rel;
 	TupleDesc	pg_authmem_dsc;
@@ -2180,8 +2181,8 @@ initialize_revoke_actions(CatCList *memlist)
  * and false if not.
  */
 static bool
-plan_single_revoke(CatCList *memlist, RevokeRoleGrantAction *actions,
-				   Oid member, Oid grantor, GrantRoleOptions *popt,
+plan_single_revoke(CatCList *memlist, RevokeRoleGrantAction * actions,
+				   Oid member, Oid grantor, GrantRoleOptions * popt,
 				   DropBehavior behavior)
 {
 	int			i;
@@ -2189,8 +2190,8 @@ plan_single_revoke(CatCList *memlist, RevokeRoleGrantAction *actions,
 	/*
 	 * If popt.specified == 0, we're revoking the grant entirely; otherwise,
 	 * we expect just one bit to be set, and we're revoking the corresponding
-	 * option. As of this writing, there's no syntax that would allow for
-	 * an attempt to revoke multiple options at once, and the logic below
+	 * option. As of this writing, there's no syntax that would allow for an
+	 * attempt to revoke multiple options at once, and the logic below
 	 * wouldn't work properly if such syntax were added, so assert that our
 	 * caller isn't trying to do that.
 	 */
@@ -2222,7 +2223,7 @@ plan_single_revoke(CatCList *memlist, RevokeRoleGrantAction *actions,
 			}
 			else
 			{
-				bool	revoke_admin_option_only;
+				bool		revoke_admin_option_only;
 
 				/*
 				 * Revoking the grant entirely, or ADMIN option on a grant,
@@ -2250,7 +2251,7 @@ plan_single_revoke(CatCList *memlist, RevokeRoleGrantAction *actions,
  * 'actions'.
  */
 static void
-plan_member_revoke(CatCList *memlist, RevokeRoleGrantAction *actions,
+plan_member_revoke(CatCList *memlist, RevokeRoleGrantAction * actions,
 				   Oid member)
 {
 	int			i;
@@ -2274,7 +2275,7 @@ plan_member_revoke(CatCList *memlist, RevokeRoleGrantAction *actions,
  * This is similar to what recursive_revoke() does for ACLs.
  */
 static void
-plan_recursive_revoke(CatCList *memlist, RevokeRoleGrantAction *actions,
+plan_recursive_revoke(CatCList *memlist, RevokeRoleGrantAction * actions,
 					  int index,
 					  bool revoke_admin_option_only, DropBehavior behavior)
 {
@@ -2364,7 +2365,7 @@ plan_recursive_revoke(CatCList *memlist, RevokeRoleGrantAction *actions,
  * Initialize a GrantRoleOptions object with default values.
  */
 static void
-InitGrantRoleOptions(GrantRoleOptions *popt)
+InitGrantRoleOptions(GrantRoleOptions * popt)
 {
 	popt->specified = 0;
 	popt->admin = false;

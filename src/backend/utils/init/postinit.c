@@ -360,7 +360,7 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 		 */
 		if (!am_superuser &&
 			object_aclcheck(DatabaseRelationId, MyDatabaseId, GetUserId(),
-								 ACL_CONNECT) != ACLCHECK_OK)
+							ACL_CONNECT) != ACLCHECK_OK)
 			ereport(FATAL,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 					 errmsg("permission denied for database \"%s\"", name),

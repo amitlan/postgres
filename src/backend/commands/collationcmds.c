@@ -432,18 +432,19 @@ AlterCollation(AlterCollationStmt *stmt)
 Datum
 pg_collation_actual_version(PG_FUNCTION_ARGS)
 {
-	Oid		 collid = PG_GETARG_OID(0);
-	char	 provider;
-	char	*locale;
-	char	*version;
-	Datum	 datum;
-	bool	 isnull;
+	Oid			collid = PG_GETARG_OID(0);
+	char		provider;
+	char	   *locale;
+	char	   *version;
+	Datum		datum;
+	bool		isnull;
 
 	if (collid == DEFAULT_COLLATION_OID)
 	{
 		/* retrieve from pg_database */
 
 		HeapTuple	dbtup = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
+
 		if (!HeapTupleIsValid(dbtup))
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
@@ -466,7 +467,8 @@ pg_collation_actual_version(PG_FUNCTION_ARGS)
 	{
 		/* retrieve from pg_collation */
 
-		HeapTuple	colltp		= SearchSysCache1(COLLOID, ObjectIdGetDatum(collid));
+		HeapTuple	colltp = SearchSysCache1(COLLOID, ObjectIdGetDatum(collid));
+
 		if (!HeapTupleIsValid(colltp))
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),

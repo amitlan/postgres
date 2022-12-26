@@ -1408,7 +1408,7 @@ ExecQueryAndProcessResults(const char *query,
 		INSTR_TIME_SET_CURRENT(before);
 
 	if (pset.bind_flag)
-		success = PQsendQueryParams(pset.db, query, pset.bind_nparams, NULL, (const char * const *) pset.bind_params, NULL, NULL, 0);
+		success = PQsendQueryParams(pset.db, query, pset.bind_nparams, NULL, (const char *const *) pset.bind_params, NULL, NULL, 0);
 	else
 		success = PQsendQuery(pset.db, query);
 

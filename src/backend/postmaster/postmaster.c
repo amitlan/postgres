@@ -615,8 +615,8 @@ PostmasterMain(int argc, char *argv[])
 	 *
 	 * 1. We tell sigaction() to block all signals for the duration of the
 	 * signal handler.  This is faster than our old approach of
-	 * blocking/unblocking explicitly in the signal handler, and it should also
-	 * prevent excessive stack consumption if signals arrive quickly.
+	 * blocking/unblocking explicitly in the signal handler, and it should
+	 * also prevent excessive stack consumption if signals arrive quickly.
 	 *
 	 * 2. We do not set the SA_RESTART flag.  This is because signals will be
 	 * blocked at all times except when ServerLoop is waiting for something to

@@ -2024,9 +2024,8 @@ postgresGetForeignModifyBatchSize(ResultRelInfo *resultRelInfo)
 
 	/*
 	 * Should never get called when the insert is being performed on a table
-	 * that is also among the target relations of an UPDATE operation,
-	 * because postgresBeginForeignInsert() currently rejects such insert
-	 * attempts.
+	 * that is also among the target relations of an UPDATE operation, because
+	 * postgresBeginForeignInsert() currently rejects such insert attempts.
 	 */
 	Assert(fmstate == NULL || fmstate->aux_fmstate == NULL);
 

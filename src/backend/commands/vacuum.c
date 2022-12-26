@@ -562,11 +562,10 @@ vacuum_is_permitted_for_relation(Oid relid, Form_pg_class reltuple,
 
 	/*
 	 * A role has privileges to vacuum or analyze the relation if any of the
-	 * following are true:
-	 *   - the role is a superuser
-	 *   - the role owns the relation
-	 *   - the role owns the current database and the relation is not shared
-	 *   - the role has been granted the MAINTAIN privilege on the relation
+	 * following are true: - the role is a superuser - the role owns the
+	 * relation - the role owns the current database and the relation is not
+	 * shared - the role has been granted the MAINTAIN privilege on the
+	 * relation
 	 */
 	if (object_ownercheck(RelationRelationId, relid, GetUserId()) ||
 		(object_ownercheck(DatabaseRelationId, MyDatabaseId, GetUserId()) && !reltuple->relisshared) ||

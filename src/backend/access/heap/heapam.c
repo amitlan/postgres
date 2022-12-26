@@ -111,8 +111,8 @@ static int	bottomup_sort_and_shrink(TM_IndexDeleteOp *delstate);
 static XLogRecPtr log_heap_new_cid(Relation relation, HeapTuple tup);
 static HeapTuple ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 										bool *copy);
-static int	heap_xlog_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
-								  xl_heap_freeze_plan *plans_out,
+static int	heap_xlog_freeze_plan(HeapTupleFreeze * tuples, int ntuples,
+								  xl_heap_freeze_plan * plans_out,
 								  OffsetNumber *offsets_out);
 
 
@@ -563,7 +563,7 @@ heapgettup(HeapScanDesc scan,
 				}
 			}
 			else
-				block = scan->rs_startblock; /* first page */
+				block = scan->rs_startblock;	/* first page */
 			heapgetpage((TableScanDesc) scan, block);
 			lineoff = FirstOffsetNumber;	/* first offnum */
 			scan->rs_inited = true;
@@ -571,7 +571,7 @@ heapgettup(HeapScanDesc scan,
 		else
 		{
 			/* continue from previously returned page/tuple */
-			block = scan->rs_cblock; /* current page */
+			block = scan->rs_cblock;	/* current page */
 			lineoff =			/* next offnum */
 				OffsetNumberNext(ItemPointerGetOffsetNumber(&(tuple->t_self)));
 		}
@@ -625,7 +625,7 @@ heapgettup(HeapScanDesc scan,
 		else
 		{
 			/* continue from previously returned page/tuple */
-			block = scan->rs_cblock; /* current page */
+			block = scan->rs_cblock;	/* current page */
 		}
 
 		LockBuffer(scan->rs_cbuf, BUFFER_LOCK_SHARE);
@@ -771,7 +771,7 @@ heapgettup(HeapScanDesc scan,
 			scan->rs_parallelworkerdata;
 
 			block = table_block_parallelscan_nextpage(scan->rs_base.rs_rd,
-													 pbscanwork, pbscan);
+													  pbscanwork, pbscan);
 			finished = (block == InvalidBlockNumber);
 		}
 		else
@@ -901,7 +901,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 				}
 			}
 			else
-				block = scan->rs_startblock; /* first page */
+				block = scan->rs_startblock;	/* first page */
 			heapgetpage((TableScanDesc) scan, block);
 			lineindex = 0;
 			scan->rs_inited = true;
@@ -909,7 +909,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 		else
 		{
 			/* continue from previously returned page/tuple */
-			block = scan->rs_cblock; /* current page */
+			block = scan->rs_cblock;	/* current page */
 			lineindex = scan->rs_cindex + 1;
 		}
 
@@ -960,7 +960,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 		else
 		{
 			/* continue from previously returned page/tuple */
-			block = scan->rs_cblock; /* current page */
+			block = scan->rs_cblock;	/* current page */
 		}
 
 		page = BufferGetPage(scan->rs_cbuf);
@@ -1080,7 +1080,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 			scan->rs_parallelworkerdata;
 
 			block = table_block_parallelscan_nextpage(scan->rs_base.rs_rd,
-													 pbscanwork, pbscan);
+													  pbscanwork, pbscan);
 			finished = (block == InvalidBlockNumber);
 		}
 		else
@@ -2724,6 +2724,7 @@ heap_delete(Relation relation, ItemPointer tid,
 	tp.t_self = *tid;
 
 l1:
+
 	/*
 	 * If we didn't pin the visibility map page and the page has become all
 	 * visible while we were busy locking the buffer, we'll have to unlock and
@@ -6451,7 +6452,7 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 bool
 heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 						  const struct VacuumCutoffs *cutoffs,
-						  HeapTupleFreeze *frz, bool *totally_frozen,
+						  HeapTupleFreeze * frz, bool *totally_frozen,
 						  TransactionId *relfrozenxid_out,
 						  MultiXactId *relminmxid_out)
 {
@@ -6731,7 +6732,7 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
  * in private storage (which is what CLUSTER and friends do).
  */
 static inline void
-heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz)
+heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze * frz)
 {
 	HeapTupleHeaderSetXmax(tuple, frz->xmax);
 
@@ -6762,7 +6763,7 @@ heap_execute_freeze_tuple(HeapTupleHeader tuple, HeapTupleFreeze *frz)
 void
 heap_freeze_execute_prepared(Relation rel, Buffer buffer,
 							 TransactionId FreezeLimit,
-							 HeapTupleFreeze *tuples, int ntuples)
+							 HeapTupleFreeze * tuples, int ntuples)
 {
 	Page		page = BufferGetPage(buffer);
 
@@ -8993,7 +8994,7 @@ heap_xlog_freeze_cmp(const void *arg1, const void *arg2)
  * caller's plan.
  */
 static inline bool
-heap_xlog_freeze_eq(xl_heap_freeze_plan *plan, HeapTupleFreeze *frz)
+heap_xlog_freeze_eq(xl_heap_freeze_plan * plan, HeapTupleFreeze * frz)
 {
 	if (plan->xmax == frz->xmax &&
 		plan->t_infomask2 == frz->t_infomask2 &&
@@ -9010,7 +9011,7 @@ heap_xlog_freeze_eq(xl_heap_freeze_plan *plan, HeapTupleFreeze *frz)
  * will have steps required to freeze described by caller's plan during REDO.
  */
 static inline void
-heap_xlog_new_freeze_plan(xl_heap_freeze_plan *plan, HeapTupleFreeze *frz)
+heap_xlog_new_freeze_plan(xl_heap_freeze_plan * plan, HeapTupleFreeze * frz)
 {
 	plan->xmax = frz->xmax;
 	plan->t_infomask2 = frz->t_infomask2;
@@ -9030,8 +9031,8 @@ heap_xlog_new_freeze_plan(xl_heap_freeze_plan *plan, HeapTupleFreeze *frz)
  * concern to our caller).
  */
 static int
-heap_xlog_freeze_plan(HeapTupleFreeze *tuples, int ntuples,
-					  xl_heap_freeze_plan *plans_out,
+heap_xlog_freeze_plan(HeapTupleFreeze * tuples, int ntuples,
+					  xl_heap_freeze_plan * plans_out,
 					  OffsetNumber *offsets_out)
 {
 	int			nplans = 0;
