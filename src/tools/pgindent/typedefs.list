@@ -1300,6 +1300,7 @@ JsonQuotes
 JsonReturning
 JsonScalarExpr
 JsonSemAction
+JsonSerializeExpr
 JsonTokenType
 JsonTransformStringValuesAction
 JsonTypeCategory

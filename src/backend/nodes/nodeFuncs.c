@@ -4332,6 +4332,20 @@ raw_expression_tree_walker_impl(Node *node,
 					return true;
 			}
 			break;
+		case T_JsonParseExpr:
+			return WALK(((JsonParseExpr *) node)->expr);
+		case T_JsonScalarExpr:
+			return WALK(((JsonScalarExpr *) node)->expr);
+		case T_JsonSerializeExpr:
+			{
+				JsonSerializeExpr *jse = (JsonSerializeExpr *) node;
+
+				if (WALK(jse->expr))
+					return true;
+				if (WALK(jse->output))
+					return true;
+			}
+			break;
 		case T_JsonConstructorExpr:
 			{
 				JsonConstructorExpr *ctor = (JsonConstructorExpr *) node;
