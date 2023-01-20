@@ -19,6 +19,7 @@
 #include "nodes/lockoptions.h"
 #include "nodes/parsenodes.h"
 #include "utils/memutils.h"
+#include "utils/plancache.h"
 
 
 /*
@@ -59,6 +60,8 @@
 #define EXEC_FLAG_MARK			0x0008	/* need mark/restore */
 #define EXEC_FLAG_SKIP_TRIGGERS 0x0010	/* skip AfterTrigger calls */
 #define EXEC_FLAG_WITH_NO_DATA	0x0020	/* rel scannability doesn't matter */
+#define EXEC_FLAG_GET_LOCKS		0x0400	/* should ExecGetRangeTableRelation
+										 * lock relations? */
 
 
 /* Hook for plugins to get control in ExecutorStart() */
@@ -245,6 +248,13 @@ extern void ExecEndNode(PlanState *node);
 extern void ExecShutdownNode(PlanState *node);
 extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
 
+/* Is the cached plan*/
+static inline bool
+ExecPlanStillValid(EState *estate)
+{
+	return estate->es_cachedplan == NULL ? true :
+		CachedPlanStillValid(estate->es_cachedplan);
+}
 
 /* ----------------------------------------------------------------
  *		ExecProcNode
@@ -579,6 +589,8 @@ exec_rt_fetch(Index rti, EState *estate)
 }
 
 extern Relation ExecGetRangeTableRelation(EState *estate, Index rti);
+extern void ExecLockViewRelations(List *viewRelations, EState *estate);
+extern void ExecLockAppendNonLeafRelations(EState *estate, List *allpartrelids);
 extern void ExecInitResultRelation(EState *estate, ResultRelInfo *resultRelInfo,
 								   Index rti);
 

@@ -78,6 +78,9 @@ typedef struct PlannedStmt
 	List	   *permInfos;		/* list of RTEPermissionInfo nodes for rtable
 								 * entries needing one */
 
+	List	   *viewRelations;	/* integer list of RT indexes, or NIL if no
+								 * views are queried */
+
 	/* rtable indexes of target relations for INSERT/UPDATE/DELETE/MERGE */
 	List	   *resultRelations;	/* integer list of RT indexes, or NIL */
 

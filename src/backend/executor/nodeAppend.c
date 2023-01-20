@@ -113,6 +113,7 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 	Bitmapset  *validsubplans;
 	Bitmapset  *asyncplans;
 	int			nplans;
+	int			ninited = 0;
 	int			nasyncplans;
 	int			firstvalid;
 	int			i,
@@ -148,6 +149,8 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 											  node->part_prune_index,
 											  node->apprelids,
 											  &validsubplans);
+		if (!ExecPlanStillValid(estate))
+			goto early_exit;
 		appendstate->as_prune_state = prunestate;
 		nplans = bms_num_members(validsubplans);
 
@@ -175,6 +178,14 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 			bms_add_range(NULL, 0, nplans - 1);
 		appendstate->as_valid_subplans_identified = true;
 		appendstate->as_prune_state = NULL;
+
+		/*
+		 * Lock non-leaf partitions.  In the pruning case, it is taken care of
+		 * by ExecInitPruningInfo().
+		 */
+		ExecLockAppendNonLeafRelations(estate, node->allpartrelids);
+		if (!ExecPlanStillValid(estate))
+			goto early_exit;
 	}
 
 	/*
@@ -222,11 +233,12 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 			firstvalid = j;
 
 		appendplanstates[j++] = ExecInitNode(initNode, estate, eflags);
+		ninited++;
+		if (!ExecPlanStillValid(estate))
+			goto early_exit;
 	}
 
 	appendstate->as_first_partial_plan = firstvalid;
-	appendstate->appendplans = appendplanstates;
-	appendstate->as_nplans = nplans;
 
 	/* Initialize async state */
 	appendstate->as_asyncplans = asyncplans;
@@ -275,6 +287,10 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 
 	/* For parallel query, this will be overridden later. */
 	appendstate->choose_next_subplan = choose_next_subplan_locally;
+
+early_exit:
+	appendstate->appendplans = appendplanstates;
+	appendstate->as_nplans = ninited;
 
 	return appendstate;
 }

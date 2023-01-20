@@ -931,6 +931,8 @@ ExecInitMemoize(Memoize *node, EState *estate, int eflags)
 
 	outerNode = outerPlan(node);
 	outerPlanState(mstate) = ExecInitNode(outerNode, estate, eflags);
+	if (!ExecPlanStillValid(estate))
+		return mstate;
 
 	/*
 	 * Initialize return slot and type. No need to initialize projection info
@@ -1036,6 +1038,7 @@ ExecEndMemoize(MemoizeState *node)
 {
 #ifdef USE_ASSERT_CHECKING
 	/* Validate the memory accounting code is correct in assert builds. */
+	if (node->hashtable)
 	{
 		int			count;
 		uint64		mem = 0;
@@ -1082,11 +1085,14 @@ ExecEndMemoize(MemoizeState *node)
 	}
 
 	/* Remove the cache context */
-	MemoryContextDelete(node->tableContext);
+	if (node->tableContext)
+		MemoryContextDelete(node->tableContext);
 
-	ExecClearTuple(node->ss.ss_ScanTupleSlot);
+	if (node->ss.ss_ScanTupleSlot)
+		ExecClearTuple(node->ss.ss_ScanTupleSlot);
 	/* must drop pointer to cache result tuple */
-	ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+	if (node->ss.ps.ps_ResultTupleSlot)
+		ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
 
 	/*
 	 * free exprcontext

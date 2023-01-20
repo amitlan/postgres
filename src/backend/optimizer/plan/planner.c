@@ -527,6 +527,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	result->partPruneInfos = glob->partPruneInfos;
 	result->rtable = glob->finalrtable;
 	result->permInfos = glob->finalrteperminfos;
+	result->viewRelations = glob->viewRelations;
 	result->resultRelations = glob->resultRelations;
 	result->appendRelations = glob->appendRelations;
 	result->subplans = glob->subplans;

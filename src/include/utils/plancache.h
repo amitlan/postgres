@@ -221,6 +221,21 @@ extern CachedPlan *GetCachedPlan(CachedPlanSource *plansource,
 								 ParamListInfo boundParams,
 								 ResourceOwner owner,
 								 QueryEnvironment *queryEnv);
+
+/*
+ * CachedPlanStillValid
+ *		Returns if a cached generic plan is still valid
+ *
+ * Called by the executor after it has finished taking locks on a plan tree
+ * in a CachedPlan.
+ */
+static inline bool
+CachedPlanStillValid(CachedPlan *cplan)
+{
+	return cplan->is_valid;
+}
+
+extern bool CachedPlanStillValid(CachedPlan *cplan);
 extern void ReleaseCachedPlan(CachedPlan *plan, ResourceOwner owner);
 
 extern bool CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,

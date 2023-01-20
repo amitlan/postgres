@@ -388,6 +388,9 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			break;
 	}
 
+	if (!ExecPlanStillValid(estate))
+		return result;
+
 	ExecSetExecProcNode(result, result->ExecProcNode);
 
 	/*
@@ -403,6 +406,12 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 		Assert(IsA(subplan, SubPlan));
 		sstate = ExecInitSubPlan(subplan, result);
 		subps = lappend(subps, sstate);
+		if (!ExecPlanStillValid(estate))
+		{
+			/* Don't lose track of those initialized. */
+			result->initPlan = subps;
+			return result;
+		}
 	}
 	result->initPlan = subps;
 

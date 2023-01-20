@@ -1817,6 +1817,8 @@ ExecInitPartitionPruning(PlanState *planstate,
 
 	/* Create the working data structure for pruning */
 	prunestate = CreatePartitionPruneState(planstate, pruneinfo);
+	if (!ExecPlanStillValid(estate))
+		return NULL;
 
 	/*
 	 * Perform an initial partition prune pass, if required.
@@ -1943,6 +1945,8 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 			 * duration of this executor run.
 			 */
 			partrel = ExecGetRangeTableRelation(estate, pinfo->rtindex);
+			if (!ExecPlanStillValid(estate))
+				return NULL;
 			partkey = RelationGetPartitionKey(partrel);
 			partdesc = PartitionDirectoryLookup(estate->es_partition_directory,
 												partrel);

@@ -621,6 +621,8 @@ typedef struct EState
 										 * ExecRowMarks, or NULL if none */
 	List	   *es_rteperminfos;	/* List of RTEPermissionInfo */
 	PlannedStmt *es_plannedstmt;	/* link to top of plan tree */
+	struct CachedPlan *es_cachedplan;	/* CachedPlan if plannedstmt is from
+										 * one */
 	List	   *es_part_prune_infos;	/* PlannedStmt.partPruneInfos */
 	const char *es_sourceText;	/* Source text from QueryDesc */
 
