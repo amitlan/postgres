@@ -439,6 +439,14 @@ explain (analyze, costs off, summary off, timing off) select * from list_part wh
 
 rollback;
 
+-- Test the case where an Append with only one run-time prunable partition
+-- must not be elided
+explain (analyze, costs off, summary off, timing off)
+	select * from list_part where a > 3 and a = (select 4);
+explain (analyze, costs off, summary off, timing off)
+	select * from list_part where a > 3 and a = (select 5);
+
+
 drop table list_part;
 
 -- Parallel append
