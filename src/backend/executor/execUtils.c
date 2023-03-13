@@ -829,6 +829,8 @@ ExecGetRangeTableRelation(EState *estate, Index rti)
 		}
 
 		estate->es_relations[rti - 1] = rel;
+		estate->es_opened_relations = lappend(estate->es_opened_relations,
+											  rel);
 	}
 
 	return rel;
