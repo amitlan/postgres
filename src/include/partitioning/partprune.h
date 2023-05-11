@@ -29,6 +29,7 @@ struct RelOptInfo;
  * strategy			Partition strategy, e.g. LIST, RANGE, HASH.
  * partnatts		Number of columns in the partition key.
  * nparts			Number of partitions in this partitioned table.
+ * relid_map		If non-NULL, contains nparts OIDs of partitions
  * boundinfo		Partition boundary info for the partitioned table.
  * partcollation	Array of partnatts elements, storing the collations of the
  *					partition key columns.
@@ -51,6 +52,7 @@ typedef struct PartitionPruneContext
 	char		strategy;
 	int			partnatts;
 	int			nparts;
+	Oid		   *relid_map;
 	PartitionBoundInfo boundinfo;
 	Oid		   *partcollation;
 	FmgrInfo   *partsupfunc;

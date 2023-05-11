@@ -1521,6 +1521,9 @@ typedef struct PartitionPruneStep
  * to the hash partition bound search function.  It is never possible to
  * have an expression be present in 'exprs' for a given partition key and
  * the corresponding bit set in 'nullkeys'.
+ *
+ * 'cexpr' is the CurrentOfExpr if the step is for pruning partitions not
+ * matching the referenced cursor's active partition.
  */
 typedef struct PartitionPruneStepOp
 {
@@ -1530,6 +1533,7 @@ typedef struct PartitionPruneStepOp
 	List	   *exprs;
 	List	   *cmpfns;
 	Bitmapset  *nullkeys;
+	CurrentOfExpr *cexpr;
 } PartitionPruneStepOp;
 
 /*

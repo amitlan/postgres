@@ -115,6 +115,7 @@ extern bool ExecMaterializesOutput(NodeTag plantype);
 extern bool execCurrentOf(CurrentOfExpr *cexpr,
 						  ExprContext *econtext,
 						  Oid table_oid,
+						  bool table_missing_ok,
 						  ItemPointer current_tid);
 
 /*

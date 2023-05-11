@@ -44,6 +44,7 @@ bool
 execCurrentOf(CurrentOfExpr *cexpr,
 			  ExprContext *econtext,
 			  Oid table_oid,
+			  bool table_missing_ok,
 			  ItemPointer current_tid)
 {
 	char	   *cursor_name;
@@ -121,7 +122,7 @@ execCurrentOf(CurrentOfExpr *cexpr,
 			}
 		}
 
-		if (erm == NULL)
+		if (erm == NULL && !table_missing_ok)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_CURSOR_STATE),
 					 errmsg("cursor \"%s\" does not have a FOR UPDATE/SHARE reference to table \"%s\"",

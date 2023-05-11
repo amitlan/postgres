@@ -119,6 +119,7 @@ typedef struct GeneratePruningStepsContext
 	bool		has_mutable_arg;	/* clauses include any mutable comparison
 									 * values, *other than* exec params */
 	bool		has_exec_param; /* clauses include any PARAM_EXEC params */
+	bool		has_currentof;	/* clauses include CurrentOfExpr */
 	bool		contradictory;	/* clauses were proven self-contradictory */
 	/* Working state: */
 	int			next_step_id;
@@ -152,7 +153,8 @@ static List *gen_partprune_steps_internal(GeneratePruningStepsContext *context,
 										  List *clauses);
 static PartitionPruneStep *gen_prune_step_op(GeneratePruningStepsContext *context,
 											 StrategyNumber opstrategy, bool op_is_ne,
-											 List *exprs, List *cmpfns, Bitmapset *nullkeys);
+											 List *exprs, List *cmpfns, Bitmapset *nullkeys,
+											 CurrentOfExpr *cexpr);
 static PartitionPruneStep *gen_prune_step_combine(GeneratePruningStepsContext *context,
 												  List *source_stepids,
 												  PartitionPruneCombineOp combineOp);
@@ -559,11 +561,12 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		}
 
 		/*
-		 * If no mutable operators or expressions appear in usable pruning
-		 * clauses, then there's no point in running startup pruning, because
+		 * Only run startup pruning if pruning clauses contain either mutable
+		 * operators/expressions or if a CURRENT OF clause was found.  If not,
 		 * plan-time pruning should have pruned everything prunable.
 		 */
-		if (context.has_mutable_op || context.has_mutable_arg)
+		if (context.has_mutable_op || context.has_mutable_arg ||
+			context.has_currentof)
 			initial_pruning_steps = context.steps;
 		else
 			initial_pruning_steps = NIL;
@@ -971,6 +974,7 @@ gen_partprune_steps_internal(GeneratePruningStepsContext *context,
 	bool		generate_opsteps = false;
 	List	   *result = NIL;
 	ListCell   *lc;
+	bool		is_currentof = false;
 
 	/*
 	 * If this partitioned relation has a default partition and is itself a
@@ -1008,6 +1012,13 @@ gen_partprune_steps_internal(GeneratePruningStepsContext *context,
 		{
 			context->contradictory = true;
 			return NIL;
+		}
+
+		if (IsA(clause, CurrentOfExpr))
+		{
+			Assert(lnext(clauses, lc) == NULL);
+			is_currentof = true;
+			break;
 		}
 
 		/* Get the BoolExpr's out of the way. */
@@ -1248,6 +1259,11 @@ gen_partprune_steps_internal(GeneratePruningStepsContext *context,
 	 * 3) If this doesn't work either, we may be able to generate steps to
 	 *    prune just the null-accepting partition (if one exists), if we have
 	 *    IS NOT NULL clauses for all partition keys.
+	 *
+	 * 4) If we found an IS CURRENT OF clause, generate a special pruning step
+	 *    that selects the partition to scan based on the state of the cursor
+	 *    mentioned in the CurrentOfExpr.  But do so only when generating
+	 *    "initial" steps set.
 	 */
 	if (!bms_is_empty(nullkeys) &&
 		(part_scheme->strategy == PARTITION_STRATEGY_LIST ||
@@ -1259,7 +1275,7 @@ gen_partprune_steps_internal(GeneratePruningStepsContext *context,
 
 		/* Strategy 1 */
 		step = gen_prune_step_op(context, InvalidStrategy,
-								 false, NIL, NIL, nullkeys);
+								 false, NIL, NIL, nullkeys, NULL);
 		result = lappend(result, step);
 	}
 	else if (generate_opsteps)
@@ -1276,8 +1292,27 @@ gen_partprune_steps_internal(GeneratePruningStepsContext *context,
 
 		/* Strategy 3 */
 		step = gen_prune_step_op(context, InvalidStrategy,
-								 false, NIL, NIL, NULL);
+								 false, NIL, NIL, NULL, NULL);
 		result = lappend(result, step);
+	}
+	else if (is_currentof && context->target == PARTTARGET_INITIAL)
+	{
+		Expr	   *clause = (Expr *) lfirst(lc);
+		CurrentOfExpr *cexpr;
+		PartitionPruneStep *step;
+
+		/* Look through RestrictInfo, if any */
+		if (IsA(clause, RestrictInfo))
+			clause = ((RestrictInfo *) clause)->clause;
+
+		cexpr = castNode(CurrentOfExpr, clause);
+
+		/* Strategy 4 */
+		step = gen_prune_step_op(context, InvalidStrategy,
+								 false, NIL, NIL, nullkeys,
+								 cexpr);
+		result = lappend(result, step);
+		context->has_currentof = true;
 	}
 
 	/*
@@ -1316,7 +1351,8 @@ static PartitionPruneStep *
 gen_prune_step_op(GeneratePruningStepsContext *context,
 				  StrategyNumber opstrategy, bool op_is_ne,
 				  List *exprs, List *cmpfns,
-				  Bitmapset *nullkeys)
+				  Bitmapset *nullkeys,
+				  CurrentOfExpr *cexpr)
 {
 	PartitionPruneStepOp *opstep = makeNode(PartitionPruneStepOp);
 
@@ -1332,6 +1368,7 @@ gen_prune_step_op(GeneratePruningStepsContext *context,
 	opstep->exprs = exprs;
 	opstep->cmpfns = cmpfns;
 	opstep->nullkeys = nullkeys;
+	opstep->cexpr = cexpr;
 
 	context->steps = lappend(context->steps, opstep);
 
@@ -2393,7 +2430,8 @@ get_steps_using_prefix(GeneratePruningStepsContext *context,
 								 step_op_is_ne,
 								 list_make1(step_lastexpr),
 								 list_make1_oid(step_lastcmpfn),
-								 step_nullkeys);
+								 step_nullkeys,
+								 NULL);
 		return list_make1(step);
 	}
 
@@ -2550,7 +2588,7 @@ get_steps_using_prefix_recurse(GeneratePruningStepsContext *context,
 			step = gen_prune_step_op(context,
 									 step_opstrategy, step_op_is_ne,
 									 step_exprs1, step_cmpfns1,
-									 step_nullkeys);
+									 step_nullkeys, NULL);
 			result = lappend(result, step);
 		}
 	}
@@ -3354,6 +3392,40 @@ perform_pruning_base_step(PartitionPruneContext *context,
 	nvalues = 0;
 	lc1 = list_head(opstep->exprs);
 	lc2 = list_head(opstep->cmpfns);
+
+	/*
+	 * Special handling for pruning partitions not matching the active
+	 * partition mentioned in the CurrentOfExpr's cursor.
+	 */
+	if (opstep->cexpr)
+	{
+		int		i;
+
+		Assert(context->relid_map);
+		for (i = 0; i < context->nparts; i++)
+		{
+			Oid		partoid = context->relid_map[i];
+			ItemPointerData dummy;
+
+			if (execCurrentOf(opstep->cexpr, context->exprcontext, partoid,
+							  true, &dummy))
+			{
+				PruneStepResult *result;
+
+				result = (PruneStepResult *) palloc0(sizeof(PruneStepResult));
+				if (i != context->boundinfo->null_index)
+					result->bound_offsets = bms_make_singleton(i);
+				else if (i == context->boundinfo->null_index)
+					result->scan_null = true;
+				else if (i == context->boundinfo->default_index)
+					result->scan_default = true;
+
+				return result;
+			}
+		}
+
+		elog(ERROR, "no partition matched for CURRENT OF");
+	}
 
 	/*
 	 * Generate the partition lookup key that will be used by one of the

@@ -1947,10 +1947,12 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 			{
 				/*
 				 * There are no new partitions, so this is simple.  We can
-				 * simply point to the subpart_map from the plan, but we must
-				 * copy the subplan_map since we may change it later.
+				 * simply point to the subpart_map and relid_map from the plan,
+				 * but we must copy the subplan_map since we may change it
+				 * later.
 				 */
 				pprune->subpart_map = pinfo->subpart_map;
+				pprune->relid_map = pinfo->relid_map;
 				memcpy(pprune->subplan_map, pinfo->subplan_map,
 					   sizeof(int) * pinfo->nparts);
 
@@ -1988,6 +1990,7 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 				 * partdesc entries and in the same order.
 				 */
 				pprune->subpart_map = palloc(sizeof(int) * partdesc->nparts);
+				pprune->relid_map = palloc(sizeof(Oid) * partdesc->nparts);
 				for (pp_idx = 0; pp_idx < partdesc->nparts; pp_idx++)
 				{
 					/* Skip any InvalidOid relid_map entries */
@@ -2003,6 +2006,8 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 							pinfo->subplan_map[pd_idx];
 						pprune->subpart_map[pp_idx] =
 							pinfo->subpart_map[pd_idx];
+						pprune->relid_map[pp_idx] =
+							pinfo->relid_map[pd_idx];
 						pd_idx++;
 					}
 					else
@@ -2010,6 +2015,7 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 						/* this partdesc entry is not in the plan */
 						pprune->subplan_map[pp_idx] = -1;
 						pprune->subpart_map[pp_idx] = -1;
+						pprune->relid_map[pp_idx] = InvalidOid;
 					}
 				}
 
@@ -2042,6 +2048,9 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 										  econtext);
 				/* Record whether initial pruning is needed at any level */
 				prunestate->do_initial_prune = true;
+
+				/* Records relid_map too for use by CurrentOfExpr pruning. */
+				pprune->initial_context.relid_map = pprune->relid_map;
 			}
 			pprune->exec_pruning_steps = pinfo->exec_pruning_steps;
 			if (pinfo->exec_pruning_steps &&
@@ -2053,6 +2062,9 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 										  econtext);
 				/* Record whether exec pruning is needed at any level */
 				prunestate->do_exec_prune = true;
+
+				/* No CurrentOfExpr pruning occurs during exec pruning. */
+				pprune->initial_context.relid_map = NULL;
 			}
 
 			/*
