@@ -4303,6 +4303,11 @@ ExecEvalJsonExpr(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 				break;
 			}
 
+		case JSON_TABLE_OP:
+			res = item;
+			resnull = false;
+			break;
+
 		default:
 			elog(ERROR, "unrecognized SQL/JSON expression op %d", jexpr->op);
 			*op->resnull = true;
