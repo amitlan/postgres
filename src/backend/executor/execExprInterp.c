@@ -3987,7 +3987,7 @@ ExecEvalJsonConstructor(ExprState *state, ExprEvalStep *op,
 										 jcstate->arg_values,
 										 jcstate->arg_nulls,
 										 jcstate->arg_types,
-										 jcstate->constructor->absent_on_null);
+										 ctor->absent_on_null);
 	else if (ctor->type == JSCTOR_JSON_OBJECT)
 		res = (is_jsonb ?
 			   jsonb_build_object_worker :
@@ -3997,6 +3997,46 @@ ExecEvalJsonConstructor(ExprState *state, ExprEvalStep *op,
 										  jcstate->arg_types,
 										  jcstate->constructor->absent_on_null,
 										  jcstate->constructor->unique);
+	else if (ctor->type == JSCTOR_JSON_SCALAR)
+	{
+		if (jcstate->arg_nulls[0])
+		{
+			res = (Datum) 0;
+			isnull = true;
+		}
+		else
+		{
+			Datum		value = jcstate->arg_values[0];
+			int			category = jcstate->arg_type_cache[0].category;
+			Oid			outfuncid = jcstate->arg_type_cache[0].outfuncid;
+
+			if (is_jsonb)
+				res = to_jsonb_worker(value, category, outfuncid);
+			else
+				res = to_json_worker(value, category, outfuncid);
+		}
+	}
+	else if (ctor->type == JSCTOR_JSON_PARSE)
+	{
+		if (jcstate->arg_nulls[0])
+		{
+			res = (Datum) 0;
+			isnull = true;
+		}
+		else
+		{
+			Datum		value = jcstate->arg_values[0];
+			text	   *js = DatumGetTextP(value);
+
+			if (is_jsonb)
+				res = jsonb_from_text(js, true);
+			else
+			{
+				(void) json_validate(js, true, true);
+				res = value;
+			}
+		}
+	}
 	else
 		elog(ERROR, "invalid JsonConstructorExpr type %d", ctor->type);
 

@@ -1296,6 +1296,7 @@ JsonPathPredicateCallback
 JsonPathString
 JsonReturning
 JsonSemAction
+JsonSerializeExpr
 JsonTokenType
 JsonTransformStringValuesAction
 JsonTypeCategory

@@ -1716,6 +1716,17 @@ typedef struct TriggerTransition
 /* Nodes for SQL/JSON support */
 
 /*
+ * JsonQuotes -
+ *		representation of [KEEP|OMIT] QUOTES clause for JSON_QUERY()
+ */
+typedef enum JsonQuotes
+{
+	JS_QUOTES_UNSPEC,			/* unspecified */
+	JS_QUOTES_KEEP,				/* KEEP QUOTES */
+	JS_QUOTES_OMIT				/* OMIT QUOTES */
+} JsonQuotes;
+
+/*
  * JsonOutput -
  *		representation of JSON output clause (RETURNING type [FORMAT format])
  */
@@ -1737,6 +1748,43 @@ typedef struct JsonKeyValue
 	Expr	   *key;			/* key expression */
 	JsonValueExpr *value;		/* JSON value expression */
 } JsonKeyValue;
+
+/*
+ * JsonParseExpr -
+ *		untransformed representation of JSON()
+ */
+typedef struct JsonParseExpr
+{
+	NodeTag		type;
+	JsonValueExpr *expr;		/* string expression */
+	JsonOutput *output;			/* RETURNING clause, if specified */
+	bool		unique_keys;	/* WITH UNIQUE KEYS? */
+	int			location;		/* token location, or -1 if unknown */
+} JsonParseExpr;
+
+/*
+ * JsonScalarExpr -
+ *		untransformed representation of JSON_SCALAR()
+ */
+typedef struct JsonScalarExpr
+{
+	NodeTag		type;
+	Expr	   *expr;			/* scalar expression */
+	JsonOutput *output;			/* RETURNING clause, if specified */
+	int			location;		/* token location, or -1 if unknown */
+} JsonScalarExpr;
+
+/*
+ * JsonSerializeExpr -
+ *		untransformed representation of JSON_SERIALIZE() function
+ */
+typedef struct JsonSerializeExpr
+{
+	NodeTag		type;
+	JsonValueExpr *expr;		/* json value expression */
+	JsonOutput *output;			/* RETURNING clause, if specified  */
+	int			location;		/* token location, or -1 if unknown */
+}			JsonSerializeExpr;
 
 /*
  * JsonObjectConstructor -
