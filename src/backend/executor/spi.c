@@ -2680,6 +2680,7 @@ replan:
 					snap = InvalidSnapshot;
 
 				qdesc = CreateQueryDesc(stmt,
+										cplan,
 										plansource->query_string,
 										snap, crosscheck_snapshot,
 										dest,

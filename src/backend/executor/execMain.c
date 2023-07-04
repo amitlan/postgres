@@ -642,6 +642,17 @@ ExecCheckPermissions(List *rangeTable, List *rteperminfos,
 		RTEPermissionInfo *perminfo = lfirst_node(RTEPermissionInfo, l);
 
 		Assert(OidIsValid(perminfo->relid));
+
+		/*
+		 * Relations whose permissions need to be checked must already have
+		 * been locked by the parser or by GetCachedPlan() if a cached plan is
+		 * being executed.
+		 *
+		 * XXX shouldn't we skip calling ExecCheckPermissions from InitPlan
+		 * in a parallel worker?
+		 */
+		Assert(CheckRelLockedByMe(perminfo->relid, AccessShareLock, true) ||
+			   IsParallelWorker());
 		result = ExecCheckOneRelPerms(perminfo);
 		if (!result)
 		{
@@ -880,7 +891,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos);
 
 	estate->es_plannedstmt = plannedstmt;
-	estate->es_cachedplan = NULL;
+	estate->es_cachedplan = queryDesc->cplan;
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.
@@ -1465,7 +1476,7 @@ ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo)
 
 			/*
 			 * All ancestors up to the root target relation must have been
-			 * locked by the planner or AcquireExecutorLocks().
+			 * locked by the planner or ExecLockAppendNonLeafRelations().
 			 */
 			ancRel = table_open(ancOid, NoLock);
 			rInfo = makeNode(ResultRelInfo);
@@ -2897,7 +2908,8 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	 * Child EPQ EStates share the parent's copy of unchanging state such as
 	 * the snapshot, rangetable, and external Param info.  They need their own
 	 * copies of local state, including a tuple table, es_param_exec_vals,
-	 * result-rel info, etc.
+	 * result-rel info, etc.  Also, we don't pass the parent't copy of the
+	 * CachedPlan, because no new locks will be taken for EvalPlanQual().
 	 */
 	rcestate->es_direction = ForwardScanDirection;
 	rcestate->es_snapshot = parentestate->es_snapshot;

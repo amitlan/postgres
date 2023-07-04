@@ -838,6 +838,7 @@ postquel_start(execution_state *es, SQLFunctionCachePtr fcache)
 		dest = None_Receiver;
 
 	es->qd = CreateQueryDesc(es->stmt,
+							 NULL,	/* fmgr_sql() doesn't use CachedPlans */
 							 fcache->src,
 							 GetActiveSnapshot(),
 							 InvalidSnapshot,

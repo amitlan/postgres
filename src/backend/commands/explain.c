@@ -416,7 +416,7 @@ ExplainOneQuery(Query *query, int cursorOptions,
 			BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
 		}
 
-		queryDesc = ExplainQueryDesc(plan, queryString, into, es,
+		queryDesc = ExplainQueryDesc(plan, NULL, queryString, into, es,
 									 params, queryEnv);
 		Assert(queryDesc);
 
@@ -429,9 +429,11 @@ ExplainOneQuery(Query *query, int cursorOptions,
 /*
  * ExplainQueryDesc
  *		Set up QueryDesc for EXPLAINing a given plan
+ *
+ * This returns NULL if cplan is found to be no longer valid.
  */
 QueryDesc *
-ExplainQueryDesc(PlannedStmt *stmt,
+ExplainQueryDesc(PlannedStmt *stmt, CachedPlan *cplan,
 				 const char *queryString, IntoClause *into, ExplainState *es,
 				 ParamListInfo params, QueryEnvironment *queryEnv)
 {
@@ -467,7 +469,7 @@ ExplainQueryDesc(PlannedStmt *stmt,
 	UpdateActiveSnapshotCommandId();
 
 	/* Create a QueryDesc for the query */
-	queryDesc = CreateQueryDesc(stmt, queryString,
+	queryDesc = CreateQueryDesc(stmt, cplan, queryString,
 								GetActiveSnapshot(), InvalidSnapshot,
 								dest, params, queryEnv, instrument_option);
 

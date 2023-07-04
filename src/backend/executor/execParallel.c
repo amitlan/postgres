@@ -1248,8 +1248,15 @@ ExecParallelGetQueryDesc(shm_toc *toc, DestReceiver *receiver,
 	paramspace = shm_toc_lookup(toc, PARALLEL_KEY_PARAMLISTINFO, false);
 	paramLI = RestoreParamList(&paramspace);
 
-	/* Create a QueryDesc for the query. */
+	/*
+	 * Set up a QueryDesc for the query. While the leader might've sourced
+	 * the plan tree from a CachedPlan, we don't have one here. This isn't
+	 * an issue since the leader ensured the required locks, making our
+	 * plan tree valid. Even as we get our own lock copies in
+	 * ExecGetRangeTableRelation(), they're all already held by the leader.
+	 */
 	return CreateQueryDesc(pstmt,
+						   NULL,
 						   queryString,
 						   GetActiveSnapshot(), InvalidSnapshot,
 						   receiver, paramLI, NULL, instrument_options);

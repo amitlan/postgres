@@ -88,7 +88,7 @@ extern void ExplainOneUtility(Node *utilityStmt, IntoClause *into,
 							  ExplainState *es, const char *queryString,
 							  ParamListInfo params, QueryEnvironment *queryEnv);
 
-extern QueryDesc *ExplainQueryDesc(PlannedStmt *stmt,
+extern QueryDesc *ExplainQueryDesc(PlannedStmt *stmt, struct CachedPlan *cplan,
 				 const char *queryString, IntoClause *into, ExplainState *es,
 				 ParamListInfo params, QueryEnvironment *queryEnv);
 extern void ExplainOnePlan(QueryDesc *queryDesc,

@@ -650,7 +650,7 @@ replan:
 		{
 			QueryDesc *queryDesc;
 
-			queryDesc = ExplainQueryDesc(pstmt, queryString,
+			queryDesc = ExplainQueryDesc(pstmt, cplan, queryString,
 										 into, es, paramLI, queryEnv);
 			if (queryDesc == NULL)
 			{

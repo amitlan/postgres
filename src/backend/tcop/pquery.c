@@ -60,6 +60,7 @@ static void DoPortalRewind(Portal portal);
  */
 QueryDesc *
 CreateQueryDesc(PlannedStmt *plannedstmt,
+				CachedPlan *cplan,
 				const char *sourceText,
 				Snapshot snapshot,
 				Snapshot crosscheck_snapshot,
@@ -72,6 +73,7 @@ CreateQueryDesc(PlannedStmt *plannedstmt,
 
 	qd->operation = plannedstmt->commandType;	/* operation */
 	qd->plannedstmt = plannedstmt;	/* plan */
+	qd->cplan = cplan;				/* CachedPlan, if plan is from one */
 	qd->sourceText = sourceText;	/* query text */
 	qd->snapshot = RegisterSnapshot(snapshot);	/* snapshot */
 	/* RI check snapshot */
@@ -410,6 +412,7 @@ PortalStart(Portal portal, ParamListInfo params,
 				 * set the destination to DestNone.
 				 */
 				queryDesc = CreateQueryDesc(linitial_node(PlannedStmt, portal->stmts),
+											portal->cplan,
 											portal->sourceText,
 											GetActiveSnapshot(),
 											InvalidSnapshot,
@@ -440,6 +443,7 @@ PortalStart(Portal portal, ParamListInfo params,
 				 */
 				if (!ExecutorStart(queryDesc, myeflags))
 				{
+					Assert(queryDesc->cplan);
 					ExecutorEnd(queryDesc);
 					FreeQueryDesc(queryDesc);
 					PopActiveSnapshot();
@@ -538,7 +542,7 @@ PortalStart(Portal portal, ParamListInfo params,
 						 * Create the QueryDesc.  DestReceiver will be set in
 						 * PortalRunMulti() before calling ExecutorRun().
 						 */
-						queryDesc = CreateQueryDesc(plan,
+						queryDesc = CreateQueryDesc(plan, portal->cplan,
 													portal->sourceText,
 													!is_utility ?
 													GetActiveSnapshot() :
@@ -562,6 +566,7 @@ PortalStart(Portal portal, ParamListInfo params,
 						if (!ExecutorStart(queryDesc, myeflags))
 						{
 							PopActiveSnapshot();
+							Assert(queryDesc->cplan);
 							ExecutorEnd(queryDesc);
 							FreeQueryDesc(queryDesc);
 							plan_valid = false;

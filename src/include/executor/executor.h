@@ -599,6 +599,7 @@ exec_rt_fetch(Index rti, EState *estate)
 }
 
 extern Relation ExecGetRangeTableRelation(EState *estate, Index rti);
+extern void ExecLockAppendNonLeafRelations(EState *estate, List *allpartrelids);
 extern void ExecInitResultRelation(EState *estate, ResultRelInfo *resultRelInfo,
 								   Index rti);
 

@@ -81,6 +81,25 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 	mergestate->ps.state = estate;
 	mergestate->ps.ExecProcNode = ExecMergeAppend;
 
+	/*
+	 * Lock non-leaf partitions whose leaf children are present in
+	 * node->mergeplans.  Only need to do so if executing a cached
+	 * plan, because child tables present in cached plans are not
+	 * locked before execution.
+	 *
+	 * XXX - some of the non-leaf partitions may also be mentioned in
+	 * part_prune_info, which if they are would get locked again in
+	 * ExecInitPartitionPruning() because it calls
+	 * ExecGetRangeTableRelation() which locks child tables.
+	 */
+	if (estate->es_cachedplan)
+	{
+		ExecLockAppendNonLeafRelations(estate, node->allpartrelids);
+		if (!ExecPlanStillValid(estate))
+			return NULL;
+
+	}
+
 	/* If run-time partition pruning is enabled, then set that up now */
 	if (node->part_prune_info != NULL)
 	{
