@@ -38,7 +38,7 @@ typedef void (*JsonIterateStringValuesAction) (void *state, char *elem_value, in
 typedef text *(*JsonTransformStringValuesAction) (void *state, char *elem_value, int elem_len);
 
 /* build a JsonLexContext from a text datum */
-extern JsonLexContext *makeJsonLexContext(text *json, bool need_escapes);
+extern JsonLexContext *makeJsonLexContext(JsonLexContext *lex, text *json, bool need_escapes);
 
 /* try to parse json, and errsave(escontext) on failure */
 extern bool pg_parse_json_or_errsave(JsonLexContext *lex, JsonSemAction *sem,

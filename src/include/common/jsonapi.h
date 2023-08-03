@@ -71,6 +71,8 @@ typedef enum JsonParseErrorType
  * AFTER the end of the token, i.e. where there would be a nul byte
  * if we were using nul-terminated strings.
  */
+#define JSONLEX_FREE_STRUCT			(1 << 0)
+#define JSONLEX_FREE_STRVAL			(1 << 1)
 typedef struct JsonLexContext
 {
 	char	   *input;
@@ -84,6 +86,7 @@ typedef struct JsonLexContext
 	int			line_number;	/* line number, starting from 1 */
 	char	   *line_start;		/* where that line starts within input */
 	StringInfo	strval;
+	bits32		flags;
 } JsonLexContext;
 
 typedef JsonParseErrorType (*json_struct_action) (void *state);
@@ -151,15 +154,25 @@ extern JsonParseErrorType json_count_array_elements(JsonLexContext *lex,
 													int *elements);
 
 /*
- * constructor for JsonLexContext, with or without strval element.
- * If supplied, the strval element will contain a de-escaped version of
- * the lexeme. However, doing this imposes a performance penalty, so
- * it should be avoided if the de-escaped lexeme is not required.
+ * initializer for JsonLexContext.
+ *
+ * If a valid 'lex' pointer is given, it is initialized.  This can be used
+ * for stack-allocated structs, saving overhead.  If NULL is given, a new
+ * struct is allocated.
+ *
+ * If need_escapes is true, ->strval stores the unescaped lexemes.
+ * Unescaping is expensive, so only request it when necessary.
+ *
+ * If either need_escapes or lex was given as NULL, then the caller is
+ * responsible for freeing the returned struct, either by calling
+ * freeJsonLexContext() or via memory context cleanup.
  */
-extern JsonLexContext *makeJsonLexContextCstringLen(char *json,
+extern JsonLexContext *makeJsonLexContextCstringLen(JsonLexContext *lex,
+													char *json,
 													int len,
 													int encoding,
 													bool need_escapes);
+extern void freeJsonLexContext(JsonLexContext *lex);
 
 /* lex one token */
 extern JsonParseErrorType json_lex(JsonLexContext *lex);

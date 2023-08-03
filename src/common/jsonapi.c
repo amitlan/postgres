@@ -135,24 +135,57 @@ IsValidJsonNumber(const char *str, int len)
 
 /*
  * makeJsonLexContextCstringLen
+ *		Initialize the given JsonLexContext object, or create one
  *
- * lex constructor, with or without StringInfo object for de-escaped lexemes.
+ * If a valid 'lex' pointer is given, it is initialized.  This can
+ * be used for stack-allocated structs, saving overhead.  Otherwise,
+ * one is allocated.
  *
- * Without is better as it makes the processing faster, so only make one
- * if really required.
+ * If need_escapes is true, ->strval stores the unescaped lexemes.
+ * Unescaping is expensive, so only request it when necessary.
+ *
+ * If either need_escapes or lex was given as NULL, then caller
+ * is responsible for freeing the object, either by calling
+ * freeJsonLexContext() or via memory context cleanup.
  */
 JsonLexContext *
-makeJsonLexContextCstringLen(char *json, int len, int encoding, bool need_escapes)
+makeJsonLexContextCstringLen(JsonLexContext *lex, char *json,
+							 int len, int encoding, bool need_escapes)
 {
-	JsonLexContext *lex = palloc0(sizeof(JsonLexContext));
+	if (lex == NULL)
+	{
+		lex = palloc0(sizeof(JsonLexContext));
+		lex->flags |= JSONLEX_FREE_STRUCT;
+	}
+	else
+		memset(lex, 0, sizeof(JsonLexContext));
 
 	lex->input = lex->token_terminator = lex->line_start = json;
 	lex->line_number = 1;
 	lex->input_length = len;
 	lex->input_encoding = encoding;
 	if (need_escapes)
+	{
 		lex->strval = makeStringInfo();
+		lex->flags |= JSONLEX_FREE_STRVAL;
+	}
+
 	return lex;
+}
+
+/*
+ * Free memory in a JsonLexContext
+ */
+void
+freeJsonLexContext(JsonLexContext *lex)
+{
+	if (lex->flags & JSONLEX_FREE_STRVAL)
+	{
+		pfree(lex->strval->data);
+		pfree(lex->strval);
+	}
+	if (lex->flags & JSONLEX_FREE_STRUCT)
+		pfree(lex);
 }
 
 /*
