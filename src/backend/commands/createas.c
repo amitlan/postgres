@@ -329,8 +329,12 @@ ExecCreateTableAs(ParseState *pstate, CreateTableAsStmt *stmt,
 									GetActiveSnapshot(), InvalidSnapshot,
 									dest, params, queryEnv, 0);
 
-		/* call ExecutorStart to prepare the plan for execution */
-		ExecutorStart(queryDesc, GetIntoRelEFlags(into));
+		/*
+		 * call ExecutorStart to prepare the plan for execution
+		 *
+		 * OK to ignore the return value; plan can't become invalid.
+		 */
+		(void) ExecutorStart(queryDesc, GetIntoRelEFlags(into));
 
 		/* run the plan to completion */
 		ExecutorRun(queryDesc, ForwardScanDirection, 0, true);

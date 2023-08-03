@@ -862,7 +862,9 @@ postquel_start(execution_state *es, SQLFunctionCachePtr fcache)
 			eflags = EXEC_FLAG_SKIP_TRIGGERS;
 		else
 			eflags = 0;			/* default run-to-completion flags */
-		ExecutorStart(es->qd, eflags);
+
+		/* OK to ignore the return value; plan can't become invalid. */
+		(void) ExecutorStart(es->qd, eflags);
 	}
 
 	es->status = F_EXEC_RUN;

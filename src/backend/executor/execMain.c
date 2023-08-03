@@ -79,7 +79,7 @@ ExecutorEnd_hook_type ExecutorEnd_hook = NULL;
 ExecutorCheckPerms_hook_type ExecutorCheckPerms_hook = NULL;
 
 /* decls for local routines only used within this module */
-static void InitPlan(QueryDesc *queryDesc, int eflags);
+static bool InitPlan(QueryDesc *queryDesc, int eflags);
 static void CheckValidRowMarkRel(Relation rel, RowMarkType markType);
 static void ExecPostprocessPlan(EState *estate);
 static void ExecEndPlan(PlanState *planstate, EState *estate);
@@ -119,6 +119,13 @@ static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
  *
  * eflags contains flag bits as described in executor.h.
  *
+ * Plan initialization may fail if the input plan tree is found to have been
+ * invalidated, which can happen if it comes from a CachedPlan.
+ *
+ * Returns true if plan was successfully initialized and false otherwise.  If
+ * the latter, the caller must call ExecutorEnd() on 'queryDesc' to clean up
+ * after failed plan initialization.
+ *
  * NB: the CurrentMemoryContext when this is called will become the parent
  * of the per-query context used for this Executor invocation.
  *
@@ -128,7 +135,7 @@ static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
  *
  * ----------------------------------------------------------------
  */
-void
+bool
 ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	/*
@@ -140,14 +147,15 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 	pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
 
 	if (ExecutorStart_hook)
-		(*ExecutorStart_hook) (queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
+		return (*ExecutorStart_hook) (queryDesc, eflags);
+
+	return standard_ExecutorStart(queryDesc, eflags);
 }
 
-void
+bool
 standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
+	bool		plan_valid;
 	EState	   *estate;
 	MemoryContext oldcontext;
 
@@ -263,9 +271,14 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	/*
 	 * Initialize the plan state tree
 	 */
-	InitPlan(queryDesc, eflags);
+	plan_valid = InitPlan(queryDesc, eflags);
+
+	/* Mark execution as canceled if plan won't be executed. */
+	estate->es_canceled = !plan_valid;
 
 	MemoryContextSwitchTo(oldcontext);
+
+	return plan_valid;
 }
 
 /* ----------------------------------------------------------------
@@ -325,6 +338,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	estate = queryDesc->estate;
 
 	Assert(estate != NULL);
+	Assert(!estate->es_canceled);
 	Assert(!(estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY));
 
 	/*
@@ -429,7 +443,7 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 	Assert(!(estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY));
 
 	/* This should be run once and only once per Executor instance */
-	Assert(!estate->es_finished);
+	Assert(!estate->es_finished && !estate->es_canceled);
 
 	/* Switch into per-query memory context */
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
@@ -488,11 +502,11 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
 	Assert(estate != NULL);
 
 	/*
-	 * Check that ExecutorFinish was called, unless in EXPLAIN-only mode. This
-	 * Assert is needed because ExecutorFinish is new as of 9.1, and callers
-	 * might forget to call it.
+	 * Check that ExecutorFinish was called, unless in EXPLAIN-only mode or if
+	 * execution was canceled. This Assert is needed because ExecutorFinish is
+	 * new as of 9.1, and callers might forget to call it.
 	 */
-	Assert(estate->es_finished ||
+	Assert(estate->es_finished || estate->es_canceled ||
 		   (estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY));
 
 	/*
@@ -505,6 +519,14 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
 	/* do away with our snapshots */
 	UnregisterSnapshot(estate->es_snapshot);
 	UnregisterSnapshot(estate->es_crosscheck_snapshot);
+
+	/*
+	 * Cancel trigger execution too if the query execution was canceled.
+	 */
+	if (estate->es_canceled &&
+		!(estate->es_top_eflags &
+		  (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY)))
+		AfterTriggerCancelQuery();
 
 	/*
 	 * Must switch out of context before destroying it
@@ -829,9 +851,12 @@ ExecCheckXactReadOnly(PlannedStmt *plannedstmt)
  *
  *		Initializes the query plan: open files, allocate storage
  *		and start up the rule manager
+ *
+ * Returns true if the plan tree is successfully initialized for execution,
+ * false otherwise.
  * ----------------------------------------------------------------
  */
-static void
+static bool
 InitPlan(QueryDesc *queryDesc, int eflags)
 {
 	CmdType		operation = queryDesc->operation;
@@ -1014,9 +1039,15 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		}
 	}
 
+	queryDesc->tupDesc = tupType;
+	Assert(planstate != NULL);
+	queryDesc->planstate = planstate;
+	return true;
+
 plan_init_suspended:
 	queryDesc->tupDesc = tupType;
 	queryDesc->planstate = planstate;
+	return false;
 }
 
 /*

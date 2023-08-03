@@ -670,6 +670,9 @@ typedef struct EState
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
 	int			es_instrument;	/* OR of InstrumentOption flags */
 	bool		es_finished;	/* true when ExecutorFinish is done */
+	bool		es_canceled;	/* true when execution was canceled
+								 * upon encountering that plan was invalided
+								 * during ExecInitNode() */
 
 	List	   *es_exprcontexts;	/* List of ExprContexts within EState */
 
