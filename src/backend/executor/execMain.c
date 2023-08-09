@@ -856,6 +856,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 
 	estate->es_plannedstmt = plannedstmt;
 	estate->es_part_prune_infos = plannedstmt->partPruneInfos;
+	estate->es_part_prune_results = queryDesc->part_prune_results;
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.

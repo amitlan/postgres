@@ -43,6 +43,12 @@ typedef struct QueryDesc
 	QueryEnvironment *queryEnv; /* query environment passed in */
 	int			instrument_options; /* OR of InstrumentOption flags */
 
+	/*
+	 * Used by ExecParallelGetQueryDesc() to save the result of initial
+	 * partition pruning sent down by the leader to workers.
+	 */
+	List		*part_prune_results; /* List of Bitmapset */
+
 	/* These fields are set by ExecutorStart */
 	TupleDesc	tupDesc;		/* descriptor for result tuples */
 	EState	   *estate;			/* executor's query-wide state */

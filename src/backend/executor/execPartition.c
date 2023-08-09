@@ -1822,13 +1822,53 @@ ExecInitPartitionPruning(PlanState *planstate,
 	 * Perform an initial partition prune pass, if required.
 	 */
 	if (prunestate->do_initial_prune)
-		*initially_valid_subplans = ExecFindMatchingSubPlans(prunestate, true);
+	{
+		/*
+		 * If doing this in a parallel query plan, compute the initial pruning
+		 * steps only once in the leader and have it pass that down to the
+		 * workers so they don't need to compute that again.  That is done not
+		 * just for performance, but also to avoid situations where a worker
+		 * might end up with a different result of performing the same initial
+		 * pruning steps than the leader and/or other workers.
+		 */
+		if (IsParallelWorker())
+		{
+			Assert(estate->es_part_prune_results != NULL);
+			*initially_valid_subplans = list_nth(estate->es_part_prune_results,
+												 part_prune_index);
+		}
+		else
+		{
+			*initially_valid_subplans = ExecFindMatchingSubPlans(prunestate,
+																 true);
+
+			/*
+			 * Add the bitmap at part_prune_index to pass to parallel workers.
+			 * XXX - no way to tell whether or not we're under Gather to avoid
+			 * populating the list if not.
+			 */
+			Assert(list_length(estate->es_part_prune_results) ==
+				   part_prune_index);
+			estate->es_part_prune_results =
+				lappend(estate->es_part_prune_results,
+						*initially_valid_subplans);
+		}
+	}
 	else
 	{
 		/* No pruning, so we'll need to initialize all subplans */
 		Assert(n_total_subplans > 0);
 		*initially_valid_subplans = bms_add_range(NULL, 0,
 												  n_total_subplans - 1);
+
+		/*
+		 * Add a dummy NULL to es_part_prune_results at this index to keep it
+		 * of the same length as es_part_prune_infos.  Note that the worker
+		 * won't actually read this element, so there's no confusing NULL for
+		 * an empty set of initially valid subplans.
+		 */
+		estate->es_part_prune_results =
+				lappend(estate->es_part_prune_results, NULL);
 	}
 
 	/*
