@@ -147,6 +147,8 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 											  list_length(node->appendplans),
 											  node->part_prune_info,
 											  &validsubplans);
+		if (!ExecPlanStillValid(estate))
+			return NULL;
 		appendstate->as_prune_state = prunestate;
 		nplans = bms_num_members(validsubplans);
 
@@ -185,8 +187,13 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 	appendstate->ps.resultopsset = true;
 	appendstate->ps.resultopsfixed = false;
 
-	appendplanstates = (PlanState **) palloc(nplans *
-											 sizeof(PlanState *));
+	/*
+	 * Any uninitialized sunbodes will have NULL in appendplans in the case of
+	 * an early return.
+	 */
+	appendstate->appendplans = appendplanstates =
+		(PlanState **) palloc0(nplans * sizeof(PlanState *));
+	appendstate->as_nplans = nplans;
 
 	/*
 	 * call ExecInitNode on each of the valid plans to be executed and save
@@ -221,11 +228,12 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 			firstvalid = j;
 
 		appendplanstates[j++] = ExecInitNode(initNode, estate, eflags);
+		if (!ExecPlanStillValid(estate))
+			return appendstate;
 	}
 
 	appendstate->as_first_partial_plan = firstvalid;
 	appendstate->appendplans = appendplanstates;
-	appendstate->as_nplans = nplans;
 
 	/* Initialize async state */
 	appendstate->as_asyncplans = asyncplans;

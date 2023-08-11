@@ -247,6 +247,8 @@ ExecInitProjectSet(ProjectSet *node, EState *estate, int eflags)
 	 * initialize child nodes
 	 */
 	outerPlanState(state) = ExecInitNode(outerPlan(node), estate, eflags);
+	if (!ExecPlanStillValid(estate))
+		return state;
 
 	/*
 	 * we don't use inner plan

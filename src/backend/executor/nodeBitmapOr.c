@@ -70,6 +70,10 @@ ExecInitBitmapOr(BitmapOr *node, EState *estate, int eflags)
 	 */
 	nplans = list_length(node->bitmapplans);
 
+	/*
+	 * Any uninitialized sunbodes will have NULL in bitmapplans in the case of
+	 * an early return.
+	 */
 	bitmapplanstates = (PlanState **) palloc0(nplans * sizeof(PlanState *));
 
 	/*
@@ -79,7 +83,6 @@ ExecInitBitmapOr(BitmapOr *node, EState *estate, int eflags)
 	bitmaporstate->ps.state = estate;
 	bitmaporstate->ps.ExecProcNode = ExecBitmapOr;
 	bitmaporstate->bitmapplans = bitmapplanstates;
-	bitmaporstate->nplans = nplans;
 
 	/*
 	 * call ExecInitNode on each of the plans to be executed and save the
@@ -89,8 +92,10 @@ ExecInitBitmapOr(BitmapOr *node, EState *estate, int eflags)
 	foreach(l, node->bitmapplans)
 	{
 		initNode = (Plan *) lfirst(l);
-		bitmapplanstates[i] = ExecInitNode(initNode, estate, eflags);
-		i++;
+		bitmapplanstates[i++] = ExecInitNode(initNode, estate, eflags);
+		if (!ExecPlanStillValid(estate))
+			return bitmaporstate;
+		bitmaporstate->nplans = i;
 	}
 
 	/*

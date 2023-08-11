@@ -822,6 +822,8 @@ ExecInitResultRelation(EState *estate, ResultRelInfo *resultRelInfo,
 	Relation	resultRelationDesc;
 
 	resultRelationDesc = ExecGetRangeTableRelation(estate, rti);
+	if (!ExecPlanStillValid(estate))
+		return;
 	InitResultRelInfo(resultRelInfo,
 					  resultRelationDesc,
 					  rti,

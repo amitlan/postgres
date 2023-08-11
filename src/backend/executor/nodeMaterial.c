@@ -214,6 +214,8 @@ ExecInitMaterial(Material *node, EState *estate, int eflags)
 
 	outerPlan = outerPlan(node);
 	outerPlanState(matstate) = ExecInitNode(outerPlan, estate, eflags);
+	if (!ExecPlanStillValid(estate))
+		return matstate;
 
 	/*
 	 * Initialize result type and slot. No need to initialize projection info

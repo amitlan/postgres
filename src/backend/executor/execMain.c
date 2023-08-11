@@ -839,8 +839,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	Plan	   *plan = plannedstmt->planTree;
 	List	   *rangeTable = plannedstmt->rtable;
 	EState	   *estate = queryDesc->estate;
-	PlanState  *planstate;
-	TupleDesc	tupType;
+	PlanState  *planstate = NULL;
+	TupleDesc	tupType = NULL;
 	ListCell   *l;
 	int			i;
 
@@ -855,6 +855,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos);
 
 	estate->es_plannedstmt = plannedstmt;
+	estate->es_cachedplan = NULL;
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.
@@ -886,6 +887,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 				case ROW_MARK_KEYSHARE:
 				case ROW_MARK_REFERENCE:
 					relation = ExecGetRangeTableRelation(estate, rc->rti);
+					if (!ExecPlanStillValid(estate))
+						goto plan_init_suspended;
 					break;
 				case ROW_MARK_COPY:
 					/* no physical table access is required */
@@ -956,6 +959,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 
 		estate->es_subplanstates = lappend(estate->es_subplanstates,
 										   subplanstate);
+		if (!ExecPlanStillValid(estate))
+			goto plan_init_suspended;
 
 		i++;
 	}
@@ -966,6 +971,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	 * processing tuples.
 	 */
 	planstate = ExecInitNode(plan, estate, eflags);
+	if (!ExecPlanStillValid(estate))
+		goto plan_init_suspended;
 
 	/*
 	 * Get the tuple descriptor describing the type of tuples to return.
@@ -1007,6 +1014,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		}
 	}
 
+plan_init_suspended:
 	queryDesc->tupDesc = tupType;
 	queryDesc->planstate = planstate;
 }
@@ -2945,6 +2953,12 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 		PlanState  *subplanstate;
 
 		subplanstate = ExecInitNode(subplan, rcestate, 0);
+
+		/*
+		 * At this point, we shouldn't have received any new invalidation
+		 * messages that would make the plan tree stale.
+		 */
+		Assert(ExecPlanStillValid(rcestate));
 		rcestate->es_subplanstates = lappend(rcestate->es_subplanstates,
 											 subplanstate);
 	}
@@ -2987,6 +3001,12 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	 * and leaves us ready to start processing tuples.
 	 */
 	epqstate->recheckplanstate = ExecInitNode(planTree, rcestate, 0);
+
+	/*
+	 * At this point, we shouldn't have received any new invalidation messages
+	 * that would make the plan tree stale.
+	 */
+	Assert(ExecPlanStillValid(rcestate));
 
 	MemoryContextSwitchTo(oldcontext);
 }

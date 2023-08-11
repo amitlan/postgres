@@ -3304,6 +3304,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 		eflags &= ~EXEC_FLAG_REWIND;
 	outerPlan = outerPlan(node);
 	outerPlanState(aggstate) = ExecInitNode(outerPlan, estate, eflags);
+	if (!ExecPlanStillValid(estate))
+		return aggstate;
 
 	/*
 	 * initialize source tuple type.

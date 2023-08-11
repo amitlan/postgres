@@ -3985,6 +3985,9 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 							   linitial_int(node->resultRelations));
 	}
 
+	if (!ExecPlanStillValid(estate))
+		return NULL;
+
 	/* set up epqstate with dummy subplan data for the moment */
 	EvalPlanQualInit(&mtstate->mt_epqstate, estate, NULL, NIL,
 					 node->epqParam, node->resultRelations);
@@ -4012,6 +4015,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		if (resultRelInfo != mtstate->rootResultRelInfo)
 		{
 			ExecInitResultRelation(estate, resultRelInfo, resultRelation);
+			if (!ExecPlanStillValid(estate))
+				return NULL;
 
 			/*
 			 * For child result relations, store the root result relation
@@ -4039,6 +4044,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 * Now we may initialize the subplan.
 	 */
 	outerPlanState(mtstate) = ExecInitNode(subplan, estate, eflags);
+	if (!ExecPlanStillValid(estate))
+		return mtstate;
 
 	/*
 	 * Do additional per-result-relation initialization.

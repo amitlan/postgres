@@ -95,6 +95,8 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 											  list_length(node->mergeplans),
 											  node->part_prune_info,
 											  &validsubplans);
+		if (!ExecPlanStillValid(estate))
+			return NULL;
 		mergestate->ms_prune_state = prunestate;
 		nplans = bms_num_members(validsubplans);
 
@@ -120,7 +122,11 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 		mergestate->ms_prune_state = NULL;
 	}
 
-	mergeplanstates = (PlanState **) palloc(nplans * sizeof(PlanState *));
+	/*
+	 * Any uninitialized sunbodes will have NULL in mergeplans in the case of
+	 * an early return.
+	 */
+	mergeplanstates = (PlanState **) palloc0(nplans * sizeof(PlanState *));
 	mergestate->mergeplans = mergeplanstates;
 	mergestate->ms_nplans = nplans;
 
@@ -151,6 +157,8 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 		Plan	   *initNode = (Plan *) list_nth(node->mergeplans, i);
 
 		mergeplanstates[j++] = ExecInitNode(initNode, estate, eflags);
+		if (!ExecPlanStillValid(estate))
+			return mergestate;
 	}
 
 	mergestate->ps.ps_ProjInfo = NULL;

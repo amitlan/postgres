@@ -135,7 +135,20 @@ static bool ExecShutdownNode_walker(PlanState *node, void *context);
  *		  'estate' is the shared execution state for the plan tree
  *		  'eflags' is a bitwise OR of flag bits described in executor.h
  *
- *		Returns a PlanState node corresponding to the given Plan node.
+ *		Returns a PlanState node corresponding to the given Plan node or NULL.
+ *
+ *		The node type-specific ExecInit* routines listed in this function can
+ *		either return NULL or a partially initialized PlanState tree when they
+ *		detect that the CachedPlan has been invalidated. This is determined by
+ *		invoking ExecPlanStillValid() at key intervals, for instance, right
+ *		after opening/locking a relation, or following the call to a function
+ *		that might open/lock a relation. The latter involves recursive calls
+ *		to ExecInitNode() for child node initialization. If an ExecInit*
+ *		routine gets a false from ExecPlanStillValid(), it should:
+ *		- Return NULL if no child node was initialized at the time of
+ *		  checking.
+ *		- Provide the partially initialized PlanState node if any child node
+ *		  was set up recursively by then.
  * ------------------------------------------------------------------------
  */
 PlanState *
@@ -388,6 +401,10 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			break;
 	}
 
+	if (!ExecPlanStillValid(estate))
+		return result;
+
+	Assert(result != NULL);
 	ExecSetExecProcNode(result, result->ExecProcNode);
 
 	/*

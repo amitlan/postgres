@@ -263,6 +263,8 @@ ExecInitSort(Sort *node, EState *estate, int eflags)
 	eflags &= ~(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK);
 
 	outerPlanState(sortstate) = ExecInitNode(outerPlan(node), estate, eflags);
+	if (!ExecPlanStillValid(estate))
+		return sortstate;
 
 	/*
 	 * Initialize scan slot and type.
