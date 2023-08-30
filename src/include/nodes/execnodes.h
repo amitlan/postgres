@@ -124,6 +124,13 @@ typedef struct ExprState
 	struct PlanState *parent;	/* parent PlanState node, if any */
 	ParamListInfo ext_params;	/* for compiling PARAM_EXTERN nodes */
 
+#define FIELDNO_EXPRSTATE_ESCONTEXT 13
+	/*
+	 * This contains ErrorSaveContext for soft-error capture during expression
+	 * evaluation.
+	 */
+	Node	   *escontext;
+
 	Datum	   *innermost_caseval;
 	bool	   *innermost_casenull;
 

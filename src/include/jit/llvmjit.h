@@ -71,6 +71,7 @@ extern PGDLLIMPORT LLVMTypeRef StructTupleTableSlot;
 extern PGDLLIMPORT LLVMTypeRef StructHeapTupleTableSlot;
 extern PGDLLIMPORT LLVMTypeRef StructMinimalTupleTableSlot;
 extern PGDLLIMPORT LLVMTypeRef StructMemoryContextData;
+extern PGDLLIMPORT LLVMTypeRef StructFmgrInfo;
 extern PGDLLIMPORT LLVMTypeRef StructFunctionCallInfoData;
 extern PGDLLIMPORT LLVMTypeRef StructExprContext;
 extern PGDLLIMPORT LLVMTypeRef StructExprEvalStep;

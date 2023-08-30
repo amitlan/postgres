@@ -63,6 +63,7 @@
 #include "executor/nodeSubplan.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "nodes/miscnodes.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parsetree.h"
 #include "pgstat.h"
@@ -1177,29 +1178,22 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/* call input function (similar to InputFunctionCall) */
 			if (!op->d.iocoerce.finfo_in->fn_strict || str != NULL)
 			{
-				FunctionCallInfo fcinfo_in;
-				Datum		d;
+				/*
+				 * InputFunctionCallSafe() writes directly into *op->resvalue.
+				 */
+				if (!InputFunctionCallSafe(op->d.iocoerce.finfo_in, str,
+										   op->d.iocoerce.typioparam, -1,
+										   state->escontext, op->resvalue))
+					*op->resnull = true;
 
-				fcinfo_in = op->d.iocoerce.fcinfo_data_in;
-				fcinfo_in->args[0].value = PointerGetDatum(str);
-				fcinfo_in->args[0].isnull = *op->resnull;
-				/* second and third arguments are already set up */
-
-				fcinfo_in->isnull = false;
-				d = FunctionCallInvoke(fcinfo_in);
-				*op->resvalue = d;
-
-				/* Should get null result if and only if str is NULL */
-				if (str == NULL)
-				{
+				/*
+				 * Should get null result if and only if str is NULL or if we
+				 * got an error above.
+				 */
+				if (str == NULL || SOFT_ERROR_OCCURRED(state->escontext))
 					Assert(*op->resnull);
-					Assert(fcinfo_in->isnull);
-				}
 				else
-				{
 					Assert(!*op->resnull);
-					Assert(!fcinfo_in->isnull);
-				}
 			}
 
 			EEO_NEXT();
@@ -1847,6 +1841,28 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 out:
 	*isnull = state->resnull;
 	return state->resvalue;
+}
+
+/*
+ * ExecExprEnableErrorSafe / ExecExprDisableErrorSafe
+ *		Initiate or stop "soft" error handling during expression evaluation
+ *
+ * Note that not all errors become soft errors, only the errors that can occur
+ * when evaluating expressions whose implementation supports soft error
+ * handling.  For example, CoerceViaIO, which uses InputFunctionCallSafe().
+ */
+void
+ExecExprEnableErrorSafe(ExprState *state)
+{
+	Assert(state->escontext);
+	((ErrorSaveContext *) state->escontext)->type = T_ErrorSaveContext;
+}
+
+void
+ExecExprDisableErrorSafe(ExprState *state)
+{
+	Assert(state->escontext);
+	memset(state->escontext, 0, sizeof(ErrorSaveContext));
 }
 
 /*

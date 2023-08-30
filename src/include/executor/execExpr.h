@@ -416,7 +416,7 @@ typedef struct ExprEvalStep
 			FunctionCallInfo fcinfo_data_out;
 			/* lookup and call info for result type's input function */
 			FmgrInfo   *finfo_in;
-			FunctionCallInfo fcinfo_data_in;
+			Oid			typioparam;
 		}			iocoerce;
 
 		/* for EEOP_SQLVALUEFUNCTION */
@@ -762,6 +762,8 @@ extern ExprEvalOp ExecEvalStepOp(ExprState *state, ExprEvalStep *op);
 
 extern Datum ExecInterpExprStillValid(ExprState *state, ExprContext *econtext, bool *isNull);
 extern void CheckExprStillValid(ExprState *state, ExprContext *econtext);
+extern void ExecExprEnableErrorSafe(ExprState *state);
+extern void ExecExprDisableErrorSafe(ExprState *state);
 
 /*
  * Non fast-path execution functions. These are externs instead of statics in

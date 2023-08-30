@@ -40,6 +40,7 @@
 #include "jit/jit.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
+#include "nodes/miscnodes.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/subscripting.h"
 #include "optimizer/optimizer.h"
@@ -140,6 +141,12 @@ ExecInitExpr(Expr *node, PlanState *parent)
 	state->parent = parent;
 	state->ext_params = NULL;
 
+	/*
+	 * ExecExprEnableErrorSafe() must be called on this ExprState before
+	 * passing this on to modules that support soft error handling.
+	 */
+	state->escontext = palloc0(sizeof(ErrorSaveContext));
+
 	/* Insert setup steps as needed */
 	ExecCreateExprSetupSteps(state, (Node *) node);
 
@@ -176,6 +183,12 @@ ExecInitExprWithParams(Expr *node, ParamListInfo ext_params)
 	state->expr = node;
 	state->parent = NULL;
 	state->ext_params = ext_params;
+
+	/*
+	 * ExecExprEnableErrorSafe() must be called on this ExprState before
+	 * passing this on to modules that support soft error handling.
+	 */
+	state->escontext = palloc0(sizeof(ErrorSaveContext));
 
 	/* Insert setup steps as needed */
 	ExecCreateExprSetupSteps(state, (Node *) node);
@@ -228,6 +241,12 @@ ExecInitQual(List *qual, PlanState *parent)
 	state->expr = (Expr *) qual;
 	state->parent = parent;
 	state->ext_params = NULL;
+
+	/*
+	 * ExecExprEnableErrorSafe() must be called on this ExprState before
+	 * passing this on to modules that support soft error handling.
+	 */
+	state->escontext = palloc0(sizeof(ErrorSaveContext));
 
 	/* mark expression as to be used with ExecQual() */
 	state->flags = EEO_FLAG_IS_QUAL;
@@ -373,6 +392,12 @@ ExecBuildProjectionInfo(List *targetList,
 	state->expr = (Expr *) targetList;
 	state->parent = parent;
 	state->ext_params = NULL;
+
+	/*
+	 * ExecExprEnableErrorSafe() must be called on this ExprState before
+	 * passing this on to modules that support soft error handling.
+	 */
+	state->escontext = palloc0(sizeof(ErrorSaveContext));
 
 	state->resultslot = slot;
 
@@ -1549,8 +1574,6 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				CoerceViaIO *iocoerce = (CoerceViaIO *) node;
 				Oid			iofunc;
 				bool		typisvarlena;
-				Oid			typioparam;
-				FunctionCallInfo fcinfo_in;
 
 				/* evaluate argument into step's result area */
 				ExecInitExprRec(iocoerce->arg, state, resv, resnull);
@@ -1579,25 +1602,10 @@ ExecInitExprRec(Expr *node, ExprState *state,
 
 				/* lookup the result type's input function */
 				scratch.d.iocoerce.finfo_in = palloc0(sizeof(FmgrInfo));
-				scratch.d.iocoerce.fcinfo_data_in = palloc0(SizeForFunctionCallInfo(3));
-
 				getTypeInputInfo(iocoerce->resulttype,
-								 &iofunc, &typioparam);
+								 &iofunc, &scratch.d.iocoerce.typioparam);
 				fmgr_info(iofunc, scratch.d.iocoerce.finfo_in);
 				fmgr_info_set_expr((Node *) node, scratch.d.iocoerce.finfo_in);
-				InitFunctionCallInfoData(*scratch.d.iocoerce.fcinfo_data_in,
-										 scratch.d.iocoerce.finfo_in,
-										 3, InvalidOid, NULL, NULL);
-
-				/*
-				 * We can preload the second and third arguments for the input
-				 * function, since they're constants.
-				 */
-				fcinfo_in = scratch.d.iocoerce.fcinfo_data_in;
-				fcinfo_in->args[1].value = ObjectIdGetDatum(typioparam);
-				fcinfo_in->args[1].isnull = false;
-				fcinfo_in->args[2].value = Int32GetDatum(-1);
-				fcinfo_in->args[2].isnull = false;
 
 				ExprEvalPushStep(state, &scratch);
 				break;

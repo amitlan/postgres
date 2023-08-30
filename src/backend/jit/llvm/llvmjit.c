@@ -1024,6 +1024,7 @@ llvm_create_types(void)
 	StructExprEvalStep = llvm_pg_var_type("StructExprEvalStep");
 	StructExprState = llvm_pg_var_type("StructExprState");
 	StructFunctionCallInfoData = llvm_pg_var_type("StructFunctionCallInfoData");
+	StructFmgrInfo = llvm_pg_var_type("StructFmgrInfo");
 	StructMemoryContextData = llvm_pg_var_type("StructMemoryContextData");
 	StructTupleTableSlot = llvm_pg_var_type("StructTupleTableSlot");
 	StructHeapTupleTableSlot = llvm_pg_var_type("StructHeapTupleTableSlot");
