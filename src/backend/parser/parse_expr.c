@@ -4342,7 +4342,20 @@ transformJsonFuncExpr(ParseState *pstate, JsonFuncExpr *func)
 			jsexpr->on_error = transformJsonBehavior(pstate, func->on_error,
 													 JSON_BEHAVIOR_NULL,
 													 jsexpr->returning);
+			break;
 
+		case JSON_TABLE_OP:
+			func_name = "JSON_TABLE";
+
+			jsexpr = transformJsonExprCommon(pstate, func, func_name);
+			contextItemExpr = jsexpr->formatted_expr;
+			jsexpr->returning = makeNode(JsonReturning);
+			jsexpr->returning->format = makeJsonFormat(JS_FORMAT_DEFAULT, JS_ENC_DEFAULT, -1);
+			jsexpr->returning->typid = exprType(contextItemExpr);
+			jsexpr->returning->typmod = -1;
+			jsexpr->on_error = transformJsonBehavior(pstate, func->on_error,
+													 JSON_BEHAVIOR_EMPTY,
+													 jsexpr->returning);
 			break;
 	}
 

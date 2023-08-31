@@ -4325,6 +4325,11 @@ ExecEvalJsonExpr(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 				break;
 			}
 
+		case JSON_TABLE_OP:
+			res = item;
+			resnull = false;
+			break;
+
 		default:
 			elog(ERROR, "unrecognized SQL/JSON expression op %d", jexpr->op);
 			*op->resnull = true;
@@ -4506,6 +4511,11 @@ ExecEvalJsonExprCoercion(ExprState *state, ExprEvalStep *op,
 			else if (result_jcstate && result_jcstate->jump_eval_expr >= 0)
 				return result_jcstate->jump_eval_expr;
 			break;
+
+		case JSON_TABLE_OP:
+			/* No coercion needed. */
+			post_eval->coercion_done = true;
+			return op->d.jsonexpr_coercion.jump_coercion_done;
 
 		default:
 			elog(ERROR, "unrecognized SQL/JSON expression op %d", jexpr->op);

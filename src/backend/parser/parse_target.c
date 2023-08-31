@@ -1995,6 +1995,9 @@ FigureColnameInternal(Node *node, char **name)
 				case JSON_VALUE_OP:
 					*name = "json_value";
 					return 2;
+				case JSON_TABLE_OP:
+					*name = "json_table";
+					return 2;
 			}
 			break;
 		default:
