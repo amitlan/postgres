@@ -861,6 +861,22 @@ makeJsonValueExpr(Expr *raw_expr, Expr *formatted_expr,
 }
 
 /*
+ * makeJsonBehavior -
+ *	  creates a JsonBehavior node
+ */
+JsonBehavior *
+makeJsonBehavior(JsonBehaviorType type, Node *default_expr, int location)
+{
+	JsonBehavior *behavior = makeNode(JsonBehavior);
+
+	behavior->btype = type;
+	behavior->default_expr = default_expr;
+	behavior->location = location;
+
+	return behavior;
+}
+
+/*
  * makeJsonEncoding -
  *	  converts JSON encoding name to enum JsonEncoding
  */

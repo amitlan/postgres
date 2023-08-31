@@ -278,6 +278,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	MergeWhenClause *mergewhen;
 	struct KeyActions *keyactions;
 	struct KeyAction *keyaction;
+	JsonBehavior *jsbehavior;
+	JsonQuotes	js_quotes;
 }
 
 %type <node>	stmt toplevel_stmt schema_stmt routine_body_stmt
@@ -650,14 +652,22 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				json_returning_clause_opt
 				json_name_and_value
 				json_aggregate_func
+				json_api_common_syntax
+				json_argument
 %type <list>	json_name_and_value_list
 				json_value_expr_list
 				json_array_aggregate_order_by_clause_opt
+				json_arguments
 %type <ival>	json_encoding_clause_opt
 				json_predicate_type_constraint
+				json_wrapper_behavior
 %type <boolean>	json_key_uniqueness_constraint_opt
 				json_object_constructor_null_clause_opt
 				json_array_constructor_null_clause_opt
+%type <jsbehavior>	json_value_behavior
+					json_query_behavior
+					json_exists_behavior
+%type <js_quotes>	json_quotes_clause_opt
 
 
 /*
@@ -695,7 +705,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	CACHE CALL CALLED CASCADE CASCADED CASE CAST CATALOG_P CHAIN CHAR_P
 	CHARACTER CHARACTERISTICS CHECK CHECKPOINT CLASS CLOSE
 	CLUSTER COALESCE COLLATE COLLATION COLUMN COLUMNS COMMENT COMMENTS COMMIT
-	COMMITTED COMPRESSION CONCURRENTLY CONFIGURATION CONFLICT
+	COMMITTED COMPRESSION CONCURRENTLY CONDITIONAL CONFIGURATION CONFLICT
 	CONNECTION CONSTRAINT CONSTRAINTS CONTENT_P CONTINUE_P CONVERSION_P COPY
 	COST CREATE CROSS CSV CUBE CURRENT_P
 	CURRENT_CATALOG CURRENT_DATE CURRENT_ROLE CURRENT_SCHEMA
@@ -706,8 +716,8 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	DETACH DICTIONARY DISABLE_P DISCARD DISTINCT DO DOCUMENT_P DOMAIN_P
 	DOUBLE_P DROP
 
-	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EVENT EXCEPT
-	EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN EXPRESSION
+	EACH ELSE EMPTY_P ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ERROR_P ESCAPE
+	EVENT EXCEPT EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN EXPRESSION
 	EXTENSION EXTERNAL EXTRACT
 
 	FALSE_P FAMILY FETCH FILTER FINALIZE FIRST_P FLOAT_P FOLLOWING FOR
@@ -722,10 +732,10 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	INNER_P INOUT INPUT_P INSENSITIVE INSERT INSTEAD INT_P INTEGER
 	INTERSECT INTERVAL INTO INVOKER IS ISNULL ISOLATION
 
-	JOIN JSON JSON_ARRAY JSON_ARRAYAGG JSON_OBJECT JSON_OBJECTAGG
-	JSON_SCALAR JSON_SERIALIZE
+	JOIN JSON JSON_ARRAY JSON_ARRAYAGG JSON_EXISTS JSON_OBJECT JSON_OBJECTAGG
+	JSON_QUERY JSON_SCALAR JSON_SERIALIZE JSON_VALUE
 
-	KEY KEYS
+	KEY KEYS KEEP
 
 	LABEL LANGUAGE LARGE_P LAST_P LATERAL_P
 	LEADING LEAKPROOF LEAST LEFT LEVEL LIKE LIMIT LISTEN LOAD LOCAL
@@ -739,7 +749,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	NOT NOTHING NOTIFY NOTNULL NOWAIT NULL_P NULLIF
 	NULLS_P NUMERIC
 
-	OBJECT_P OF OFF OFFSET OIDS OLD ON ONLY OPERATOR OPTION OPTIONS OR
+	OBJECT_P OF OFF OFFSET OIDS OLD OMIT ON ONLY OPERATOR OPTION OPTIONS OR
 	ORDER ORDINALITY OTHERS OUT_P OUTER_P
 	OVER OVERLAPS OVERLAY OVERRIDING OWNED OWNER
 
@@ -748,7 +758,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	POSITION PRECEDING PRECISION PRESERVE PREPARE PREPARED PRIMARY
 	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROCEDURES PROGRAM PUBLICATION
 
-	QUOTE
+	QUOTE QUOTES
 
 	RANGE READ REAL REASSIGN RECHECK RECURSIVE REF_P REFERENCES REFERENCING
 	REFRESH REINDEX RELATIVE_P RELEASE RENAME REPEATABLE REPLACE REPLICA
@@ -759,7 +769,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	SEQUENCE SEQUENCES
 	SERIALIZABLE SERVER SESSION SESSION_USER SET SETS SETOF SHARE SHOW
 	SIMILAR SIMPLE SKIP SMALLINT SNAPSHOT SOME SQL_P STABLE STANDALONE_P
-	START STATEMENT STATISTICS STDIN STDOUT STORAGE STORED STRICT_P STRIP_P
+	START STATEMENT STATISTICS STDIN STDOUT STORAGE STORED STRICT_P STRING_P STRIP_P
 	SUBSCRIPTION SUBSTRING SUPPORT SYMMETRIC SYSID SYSTEM_P SYSTEM_USER
 
 	TABLE TABLES TABLESAMPLE TABLESPACE TEMP TEMPLATE TEMPORARY TEXT_P THEN
@@ -767,7 +777,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 	TREAT TRIGGER TRIM TRUE_P
 	TRUNCATE TRUSTED TYPE_P TYPES_P
 
-	UESCAPE UNBOUNDED UNCOMMITTED UNENCRYPTED UNION UNIQUE UNKNOWN
+	UESCAPE UNBOUNDED UNCONDITIONAL UNCOMMITTED UNENCRYPTED UNION UNIQUE UNKNOWN
 	UNLISTEN UNLOGGED UNTIL UPDATE USER USING
 
 	VACUUM VALID VALIDATE VALIDATOR VALUE_P VALUES VARCHAR VARIADIC VARYING
@@ -15711,6 +15721,192 @@ func_expr_common_subexpr:
 					n->location = @1;
 					$$ = (Node *) n;
 				}
+			| JSON_QUERY '('
+				json_api_common_syntax
+				json_returning_clause_opt
+				json_wrapper_behavior
+				json_quotes_clause_opt
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+
+					n->op = JSON_QUERY_OP;
+					n->common = (JsonCommon *) $3;
+					n->output = (JsonOutput *) $4;
+					n->wrapper = $5;
+					if (n->wrapper != JSW_NONE && $6 != JS_QUOTES_UNSPEC)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used"),
+								 parser_errposition(@6)));
+					n->quotes = $6;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| JSON_QUERY '('
+				json_api_common_syntax
+				json_returning_clause_opt
+				json_wrapper_behavior
+				json_quotes_clause_opt
+				json_query_behavior ON EMPTY_P
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+
+					n->op = JSON_QUERY_OP;
+					n->common = (JsonCommon *) $3;
+					n->output = (JsonOutput *) $4;
+					n->wrapper = $5;
+					if (n->wrapper != JSW_NONE && $6 != JS_QUOTES_UNSPEC)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used"),
+								 parser_errposition(@6)));
+					n->quotes = $6;
+					n->on_empty = $7;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| JSON_QUERY '('
+				json_api_common_syntax
+				json_returning_clause_opt
+				json_wrapper_behavior
+				json_quotes_clause_opt
+				json_query_behavior ON ERROR_P
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+
+					n->op = JSON_QUERY_OP;
+					n->common = (JsonCommon *) $3;
+					n->output = (JsonOutput *) $4;
+					n->wrapper = $5;
+					if (n->wrapper != JSW_NONE && $6 != JS_QUOTES_UNSPEC)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used"),
+								 parser_errposition(@6)));
+					n->quotes = $6;
+					n->on_error = $7;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| JSON_QUERY '('
+				json_api_common_syntax
+				json_returning_clause_opt
+				json_wrapper_behavior
+				json_quotes_clause_opt
+				json_query_behavior ON EMPTY_P
+				json_query_behavior ON ERROR_P
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+
+					n->op = JSON_QUERY_OP;
+					n->common = (JsonCommon *) $3;
+					n->output = (JsonOutput *) $4;
+					n->wrapper = $5;
+					if (n->wrapper != JSW_NONE && $6 != JS_QUOTES_UNSPEC)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used"),
+								 parser_errposition(@6)));
+					n->quotes = $6;
+					n->on_empty = $7;
+					n->on_error = $10;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| JSON_EXISTS '('
+				json_api_common_syntax
+				json_returning_clause_opt
+			')'
+				{
+					JsonFuncExpr *p = makeNode(JsonFuncExpr);
+
+					p->op = JSON_EXISTS_OP;
+					p->common = (JsonCommon *) $3;
+					p->output = (JsonOutput *) $4;
+					p->location = @1;
+					$$ = (Node *) p;
+				}
+			| JSON_EXISTS '('
+				json_api_common_syntax
+				json_returning_clause_opt
+				json_exists_behavior ON ERROR_P
+			')'
+				{
+					JsonFuncExpr *p = makeNode(JsonFuncExpr);
+
+					p->op = JSON_EXISTS_OP;
+					p->common = (JsonCommon *) $3;
+					p->output = (JsonOutput *) $4;
+					p->on_error = $5;
+					p->location = @1;
+					$$ = (Node *) p;
+				}
+			| JSON_VALUE '('
+				json_api_common_syntax
+				json_returning_clause_opt
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+
+					n->op = JSON_VALUE_OP;
+					n->common = (JsonCommon *) $3;
+					n->output = (JsonOutput *) $4;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+
+			| JSON_VALUE '('
+				json_api_common_syntax
+				json_returning_clause_opt
+				json_value_behavior ON EMPTY_P
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+
+					n->op = JSON_VALUE_OP;
+					n->common = (JsonCommon *) $3;
+					n->output = (JsonOutput *) $4;
+					n->on_empty = $5;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| JSON_VALUE '('
+				json_api_common_syntax
+				json_returning_clause_opt
+				json_value_behavior ON ERROR_P
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+
+					n->op = JSON_VALUE_OP;
+					n->common = (JsonCommon *) $3;
+					n->output = (JsonOutput *) $4;
+					n->on_error = $5;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+
+			| JSON_VALUE '('
+				json_api_common_syntax
+				json_returning_clause_opt
+				json_value_behavior ON EMPTY_P
+				json_value_behavior ON ERROR_P
+			')'
+				{
+					JsonFuncExpr *n = makeNode(JsonFuncExpr);
+
+					n->op = JSON_VALUE_OP;
+					n->common = (JsonCommon *) $3;
+					n->output = (JsonOutput *) $4;
+					n->on_empty = $5;
+					n->on_error = $8;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
 			;
 
 
@@ -16437,6 +16633,72 @@ opt_asymmetric: ASYMMETRIC
 		;
 
 /* SQL/JSON support */
+json_api_common_syntax:
+			json_value_expr ',' a_expr /* i.e. a json_path */
+				{
+					JsonCommon *n = makeNode(JsonCommon);
+
+					n->expr = (JsonValueExpr *) $1;
+					n->pathspec = $3;
+					n->pathname = NULL;
+					n->passing = NULL;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| json_value_expr ',' a_expr AS name
+				{
+					JsonCommon *n = makeNode(JsonCommon);
+
+					n->expr = (JsonValueExpr *) $1;
+					n->pathspec = $3;
+					n->pathname = $5;
+					n->passing = NULL;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+
+			| json_value_expr ',' a_expr /* i.e. a json_path */
+				PASSING json_arguments
+				{
+					JsonCommon *n = makeNode(JsonCommon);
+
+					n->expr = (JsonValueExpr *) $1;
+					n->pathspec = $3;
+					n->pathname = NULL;
+					n->passing = $5;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+			| json_value_expr ',' a_expr AS name
+				PASSING json_arguments
+				{
+					JsonCommon *n = makeNode(JsonCommon);
+
+					n->expr = (JsonValueExpr *) $1;
+					n->pathspec = $3;
+					n->pathname = $5;
+					n->passing = $7;
+					n->location = @1;
+					$$ = (Node *) n;
+				}
+		;
+
+json_arguments:
+			json_argument							{ $$ = list_make1($1); }
+			| json_arguments ',' json_argument		{ $$ = lappend($1, $3); }
+		;
+
+json_argument:
+			json_value_expr AS ColLabel
+			{
+				JsonArgument *n = makeNode(JsonArgument);
+
+				n->val = (JsonValueExpr *) $1;
+				n->name = $3;
+				$$ = (Node *) n;
+			}
+		;
+
 json_value_expr:
 			a_expr json_format_clause_opt
 			{
@@ -16460,6 +16722,50 @@ json_format_clause_opt:
 json_encoding_clause_opt:
 			ENCODING name					{ $$ = makeJsonEncoding($2); }
 			| /* EMPTY */					{ $$ = JS_ENC_DEFAULT; }
+		;
+
+json_query_behavior:
+			ERROR_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_ERROR, NULL, @1); }
+			| NULL_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_NULL, NULL, @1); }
+			| DEFAULT a_expr	{ $$ = makeJsonBehavior(JSON_BEHAVIOR_DEFAULT, $2, @1); }
+			| EMPTY_P ARRAY	{ $$ = makeJsonBehavior(JSON_BEHAVIOR_EMPTY_ARRAY, NULL, @1); }
+			| EMPTY_P OBJECT_P	{ $$ = makeJsonBehavior(JSON_BEHAVIOR_EMPTY_OBJECT, NULL, @1); }
+			/* non-standard, for Oracle compatibility only */
+			| EMPTY_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_EMPTY_ARRAY, NULL, @1); }
+		;
+
+json_exists_behavior:
+			ERROR_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_ERROR, NULL, @1); }
+			| TRUE_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_TRUE, NULL, @1); }
+			| FALSE_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_FALSE, NULL, @1); }
+			| UNKNOWN		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_UNKNOWN, NULL, @1); }
+		;
+
+json_value_behavior:
+			NULL_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_NULL, NULL, @1); }
+			| ERROR_P		{ $$ = makeJsonBehavior(JSON_BEHAVIOR_ERROR, NULL, @1); }
+			| DEFAULT a_expr	{ $$ = makeJsonBehavior(JSON_BEHAVIOR_DEFAULT, $2, @1); }
+		;
+
+/* ARRAY is a noise word */
+json_wrapper_behavior:
+			  WITHOUT WRAPPER					{ $$ = JSW_NONE; }
+			| WITHOUT ARRAY	WRAPPER				{ $$ = JSW_NONE; }
+			| WITH WRAPPER						{ $$ = JSW_UNCONDITIONAL; }
+			| WITH ARRAY WRAPPER				{ $$ = JSW_UNCONDITIONAL; }
+			| WITH CONDITIONAL ARRAY WRAPPER	{ $$ = JSW_CONDITIONAL; }
+			| WITH UNCONDITIONAL ARRAY WRAPPER	{ $$ = JSW_UNCONDITIONAL; }
+			| WITH CONDITIONAL WRAPPER			{ $$ = JSW_CONDITIONAL; }
+			| WITH UNCONDITIONAL WRAPPER		{ $$ = JSW_UNCONDITIONAL; }
+			| /* empty */						{ $$ = JSW_NONE; }
+		;
+
+json_quotes_clause_opt:
+			KEEP QUOTES ON SCALAR STRING_P		{ $$ = JS_QUOTES_KEEP; }
+			| KEEP QUOTES						{ $$ = JS_QUOTES_KEEP; }
+			| OMIT QUOTES ON SCALAR STRING_P	{ $$ = JS_QUOTES_OMIT; }
+			| OMIT QUOTES						{ $$ = JS_QUOTES_OMIT; }
+			| /* EMPTY */						{ $$ = JS_QUOTES_UNSPEC; }
 		;
 
 json_returning_clause_opt:
@@ -17064,6 +17370,7 @@ unreserved_keyword:
 			| COMMIT
 			| COMMITTED
 			| COMPRESSION
+			| CONDITIONAL
 			| CONFIGURATION
 			| CONFLICT
 			| CONNECTION
@@ -17100,10 +17407,12 @@ unreserved_keyword:
 			| DOUBLE_P
 			| DROP
 			| EACH
+			| EMPTY_P
 			| ENABLE_P
 			| ENCODING
 			| ENCRYPTED
 			| ENUM_P
+			| ERROR_P
 			| ESCAPE
 			| EVENT
 			| EXCLUDE
@@ -17153,6 +17462,7 @@ unreserved_keyword:
 			| INSTEAD
 			| INVOKER
 			| ISOLATION
+			| KEEP
 			| KEY
 			| KEYS
 			| LABEL
@@ -17199,6 +17509,7 @@ unreserved_keyword:
 			| OFF
 			| OIDS
 			| OLD
+			| OMIT
 			| OPERATOR
 			| OPTION
 			| OPTIONS
@@ -17229,6 +17540,7 @@ unreserved_keyword:
 			| PROGRAM
 			| PUBLICATION
 			| QUOTE
+			| QUOTES
 			| RANGE
 			| READ
 			| REASSIGN
@@ -17288,6 +17600,7 @@ unreserved_keyword:
 			| STORAGE
 			| STORED
 			| STRICT_P
+			| STRING_P
 			| STRIP_P
 			| SUBSCRIPTION
 			| SUPPORT
@@ -17310,6 +17623,7 @@ unreserved_keyword:
 			| UESCAPE
 			| UNBOUNDED
 			| UNCOMMITTED
+			| UNCONDITIONAL
 			| UNENCRYPTED
 			| UNKNOWN
 			| UNLISTEN
@@ -17370,10 +17684,13 @@ col_name_keyword:
 			| JSON
 			| JSON_ARRAY
 			| JSON_ARRAYAGG
+			| JSON_EXISTS
 			| JSON_OBJECT
 			| JSON_OBJECTAGG
+			| JSON_QUERY
 			| JSON_SCALAR
 			| JSON_SERIALIZE
+			| JSON_VALUE
 			| LEAST
 			| NATIONAL
 			| NCHAR
@@ -17606,6 +17923,7 @@ bare_label_keyword:
 			| COMMITTED
 			| COMPRESSION
 			| CONCURRENTLY
+			| CONDITIONAL
 			| CONFIGURATION
 			| CONFLICT
 			| CONNECTION
@@ -17658,11 +17976,13 @@ bare_label_keyword:
 			| DROP
 			| EACH
 			| ELSE
+			| EMPTY_P
 			| ENABLE_P
 			| ENCODING
 			| ENCRYPTED
 			| END_P
 			| ENUM_P
+			| ERROR_P
 			| ESCAPE
 			| EVENT
 			| EXCLUDE
@@ -17732,10 +18052,14 @@ bare_label_keyword:
 			| JSON
 			| JSON_ARRAY
 			| JSON_ARRAYAGG
+			| JSON_EXISTS
 			| JSON_OBJECT
 			| JSON_OBJECTAGG
+			| JSON_QUERY
 			| JSON_SCALAR
 			| JSON_SERIALIZE
+			| JSON_VALUE
+			| KEEP
 			| KEY
 			| KEYS
 			| LABEL
@@ -17796,6 +18120,7 @@ bare_label_keyword:
 			| OFF
 			| OIDS
 			| OLD
+			| OMIT
 			| ONLY
 			| OPERATOR
 			| OPTION
@@ -17833,6 +18158,7 @@ bare_label_keyword:
 			| PROGRAM
 			| PUBLICATION
 			| QUOTE
+			| QUOTES
 			| RANGE
 			| READ
 			| REAL
@@ -17901,6 +18227,7 @@ bare_label_keyword:
 			| STORAGE
 			| STORED
 			| STRICT_P
+			| STRING_P
 			| STRIP_P
 			| SUBSCRIPTION
 			| SUBSTRING
@@ -17935,6 +18262,7 @@ bare_label_keyword:
 			| UESCAPE
 			| UNBOUNDED
 			| UNCOMMITTED
+			| UNCONDITIONAL
 			| UNENCRYPTED
 			| UNIQUE
 			| UNKNOWN

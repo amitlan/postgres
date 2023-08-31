@@ -1545,6 +1545,17 @@ typedef struct XmlExpr
 } XmlExpr;
 
 /*
+ * JsonExprOp -
+ *		enumeration of JSON functions using JSON path
+ */
+typedef enum JsonExprOp
+{
+	JSON_VALUE_OP,				/* JSON_VALUE() */
+	JSON_QUERY_OP,				/* JSON_QUERY() */
+	JSON_EXISTS_OP				/* JSON_EXISTS() */
+} JsonExprOp;
+
+/*
  * JsonEncoding -
  *		representation of JSON ENCODING clause
  */
@@ -1567,6 +1578,37 @@ typedef enum JsonFormatType
 	JS_FORMAT_JSONB				/* implicit internal format for RETURNING
 								 * jsonb */
 } JsonFormatType;
+
+/*
+ * JsonBehaviorType -
+ *		enumeration of behavior types used in JSON ON ... BEHAVIOR clause
+ *
+ * 		If enum members are reordered, get_json_behavior() from ruleutils.c
+ * 		must be updated accordingly.
+ */
+typedef enum JsonBehaviorType
+{
+	JSON_BEHAVIOR_NULL = 0,
+	JSON_BEHAVIOR_ERROR,
+	JSON_BEHAVIOR_EMPTY,
+	JSON_BEHAVIOR_TRUE,
+	JSON_BEHAVIOR_FALSE,
+	JSON_BEHAVIOR_UNKNOWN,
+	JSON_BEHAVIOR_EMPTY_ARRAY,
+	JSON_BEHAVIOR_EMPTY_OBJECT,
+	JSON_BEHAVIOR_DEFAULT
+} JsonBehaviorType;
+
+/*
+ * JsonWrapper -
+ *		representation of WRAPPER clause for JSON_QUERY()
+ */
+typedef enum JsonWrapper
+{
+	JSW_NONE,
+	JSW_CONDITIONAL,
+	JSW_UNCONDITIONAL,
+} JsonWrapper;
 
 /*
  * JsonFormat -
@@ -1661,6 +1703,79 @@ typedef struct JsonIsPredicate
 	bool		unique_keys;	/* check key uniqueness? */
 	int			location;		/* token location, or -1 if unknown */
 } JsonIsPredicate;
+
+/*
+ * JsonBehavior -
+ *		representation of JSON ON ERROR / EMPTY clause
+ */
+typedef struct JsonBehavior
+{
+	NodeTag		type;
+	JsonBehaviorType btype;		/* behavior type */
+	Node	   *default_expr;	/* default expression, if any */
+	int			location;		/* token location, or -1 if unknown */
+} JsonBehavior;
+
+/*
+ * JsonCoercion -
+ *		coercion from SQL/JSON item types to SQL types
+ */
+typedef struct JsonCoercion
+{
+	NodeTag		type;
+	Node	   *expr;			/* resulting expression coerced to target type */
+	bool		via_populate;	/* coerce result using json_populate_type()? */
+	bool		via_io;			/* coerce result using type input function? */
+	Oid			collation;		/* collation for coercion via I/O or populate */
+} JsonCoercion;
+
+/*
+ * JsonItemType
+ *		Represents type codes to identify a JsonCoercion node to use when
+ *		coercing a given SQL/JSON items to the output SQL type
+ *
+ * The comment next to each item type mentions the JsonbValue.jbvType of the
+ * source JsonbValue value to be coerced using the expression in the
+ * JsonCoercion node.
+ *
+ * Also, see InitJsonItemCoercions() and ExecPrepareJsonItemCoercion().
+ */
+typedef enum JsonItemType
+{
+	JsonItemTypeNull = 0,			/* jbvNull */
+	JsonItemTypeString = 1,			/* jbvString */
+	JsonItemTypeNumeric = 2,		/* jbvNumeric */
+	JsonItemTypeBoolean = 3,		/* jbvBool */
+	JsonItemTypeDate = 4,			/* jbvDatetime: DATEOID */
+	JsonItemTypeTime = 5,			/* jbvDatetime: TIMEOID */
+	JsonItemTypeTimetz = 6,			/* jbvDatetime: TIMETZOID */
+	JsonItemTypeTimestamp = 7,		/* jbvDatetime: TIMESTAMPOID */
+	JsonItemTypeTimestamptz = 8,	/* jbvDatetime: TIMESTAMPTZOID */
+	JsonItemTypeComposite = 9		/* jbvArray, jbvObject, jbvBinary */
+} JsonItemType;
+
+/*
+ * JsonExpr -
+ *		transformed representation of JSON_VALUE(), JSON_QUERY(), JSON_EXISTS()
+ */
+typedef struct JsonExpr
+{
+	Expr		xpr;
+	JsonExprOp	op;				/* json function ID */
+	Node	   *formatted_expr; /* formatted context item expression */
+	JsonCoercion *result_coercion;	/* resulting coercion to RETURNING type */
+	JsonFormat *format;			/* context item format (JSON/JSONB) */
+	Node	   *path_spec;		/* JSON path specification expression */
+	List	   *passing_names;	/* PASSING argument names */
+	List	   *passing_values; /* PASSING argument values */
+	JsonReturning *returning;	/* RETURNING clause type/format info */
+	JsonBehavior *on_empty;		/* ON EMPTY behavior */
+	JsonBehavior *on_error;		/* ON ERROR behavior */
+	List	   *item_coercions;	/* coercions for JSON_VALUE */
+	JsonWrapper wrapper;		/* WRAPPER for JSON_QUERY */
+	bool		omit_quotes;	/* KEEP/OMIT QUOTES for JSON_QUERY */
+	int			location;		/* token location, or -1 if unknown */
+} JsonExpr;
 
 /* ----------------
  * NullTest
