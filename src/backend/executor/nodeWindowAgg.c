@@ -1351,11 +1351,14 @@ release_partition(WindowAggState *winstate)
 	 * any aggregate temp data).  We don't rely on retail pfree because some
 	 * aggregates might have allocated data we don't have direct pointers to.
 	 */
-	MemoryContextResetAndDeleteChildren(winstate->partcontext);
-	MemoryContextResetAndDeleteChildren(winstate->aggcontext);
+	if (winstate->partcontext != NULL)
+		MemoryContextResetAndDeleteChildren(winstate->partcontext);
+	if (winstate->aggcontext != NULL)
+		MemoryContextResetAndDeleteChildren(winstate->aggcontext);
 	for (i = 0; i < winstate->numaggs; i++)
 	{
-		if (winstate->peragg[i].aggcontext != winstate->aggcontext)
+		if (winstate->peragg[i].aggcontext != NULL &&
+			winstate->peragg[i].aggcontext != winstate->aggcontext)
 			MemoryContextResetAndDeleteChildren(winstate->peragg[i].aggcontext);
 	}
 
@@ -2688,14 +2691,19 @@ ExecEndWindowAgg(WindowAggState *node)
 
 	for (i = 0; i < node->numaggs; i++)
 	{
-		if (node->peragg[i].aggcontext != node->aggcontext)
+		if (node->peragg[i].aggcontext != NULL &&
+			node->peragg[i].aggcontext != node->aggcontext)
 			MemoryContextDelete(node->peragg[i].aggcontext);
 	}
-	MemoryContextDelete(node->partcontext);
-	MemoryContextDelete(node->aggcontext);
+	if (node->partcontext != NULL)
+		MemoryContextDelete(node->partcontext);
+	if (node->aggcontext != NULL)
+		MemoryContextDelete(node->aggcontext);
 
-	pfree(node->perfunc);
-	pfree(node->peragg);
+	if (node->perfunc != NULL)
+		pfree(node->perfunc);
+	if (node->peragg != NULL)
+		pfree(node->peragg);
 
 	outerPlan = outerPlanState(node);
 	ExecEndNode(outerPlan);

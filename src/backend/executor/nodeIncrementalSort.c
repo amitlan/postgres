@@ -1079,8 +1079,10 @@ ExecEndIncrementalSort(IncrementalSortState *node)
 {
 	SO_printf("ExecEndIncrementalSort: shutting down sort node\n");
 
-	ExecDropSingleTupleTableSlot(node->group_pivot);
-	ExecDropSingleTupleTableSlot(node->transfer_tuple);
+	if (node->group_pivot != NULL)
+		ExecDropSingleTupleTableSlot(node->group_pivot);
+	if (node->transfer_tuple != NULL)
+		ExecDropSingleTupleTableSlot(node->transfer_tuple);
 
 	/*
 	 * Release tuplesort resources.

@@ -301,13 +301,16 @@ ExecEndForeignScan(ForeignScanState *node)
 	EState	   *estate = node->ss.ps.state;
 
 	/* Let the FDW shut down */
-	if (plan->operation != CMD_SELECT)
+	if (node->fdwroutine != NULL)
 	{
-		if (estate->es_epq_active == NULL)
-			node->fdwroutine->EndDirectModify(node);
+		if (plan->operation != CMD_SELECT)
+		{
+			if (estate->es_epq_active == NULL)
+				node->fdwroutine->EndDirectModify(node);
+		}
+		else
+			node->fdwroutine->EndForeignScan(node);
 	}
-	else
-		node->fdwroutine->EndForeignScan(node);
 
 	/* Shut down any outer plan. */
 	if (outerPlanState(node))

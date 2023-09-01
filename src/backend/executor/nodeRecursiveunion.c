@@ -272,8 +272,10 @@ void
 ExecEndRecursiveUnion(RecursiveUnionState *node)
 {
 	/* Release tuplestores */
-	tuplestore_end(node->working_table);
-	tuplestore_end(node->intermediate_table);
+	if (node->working_table != NULL)
+		tuplestore_end(node->working_table);
+	if (node->intermediate_table != NULL)
+		tuplestore_end(node->intermediate_table);
 
 	/* free subsidiary stuff including hashtable */
 	if (node->tempContext)

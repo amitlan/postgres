@@ -681,7 +681,8 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	/*
 	 * close heap scan
 	 */
-	table_endscan(scanDesc);
+	if (scanDesc != NULL)
+		table_endscan(scanDesc);
 }
 
 /* ----------------------------------------------------------------

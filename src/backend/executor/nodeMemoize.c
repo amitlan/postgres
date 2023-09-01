@@ -1043,6 +1043,7 @@ ExecEndMemoize(MemoizeState *node)
 {
 #ifdef USE_ASSERT_CHECKING
 	/* Validate the memory accounting code is correct in assert builds. */
+	if (node->hashtable != NULL)
 	{
 		int			count;
 		uint64		mem = 0;
