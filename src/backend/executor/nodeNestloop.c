@@ -363,17 +363,6 @@ ExecEndNestLoop(NestLoopState *node)
 {
 	NL1_printf("ExecEndNestLoop: %s\n",
 			   "ending node processing");
-
-	/*
-	 * Free the exprcontext
-	 */
-	ExecFreeExprContext(&node->js.ps);
-
-	/*
-	 * clean out the tuple table
-	 */
-	ExecClearTuple(node->js.ps.ps_ResultTupleSlot);
-
 	/*
 	 * close down subplans
 	 */
