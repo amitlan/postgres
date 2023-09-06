@@ -128,6 +128,9 @@ typedef struct PlannerGlobal
 	/* "flat" list of AppendRelInfos */
 	List	   *appendRelations;
 
+	/* "flat list of Bitmapsets of RT indexes "*/
+	List	   *elidedAppendPartRels;
+
 	/* OIDs of relations the plan depends on */
 	List	   *relationOids;
 
