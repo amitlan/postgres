@@ -19,6 +19,7 @@
 #include "nodes/lockoptions.h"
 #include "nodes/parsenodes.h"
 #include "utils/memutils.h"
+#include "utils/plancache.h"
 
 
 /*
@@ -72,7 +73,8 @@
 
 
 /* Hook for plugins to get control in ExecutorStart() */
-typedef void (*ExecutorStart_hook_type) (QueryDesc *queryDesc, int eflags);
+typedef bool (*ExecutorStart_hook_type) (QueryDesc *queryDesc, CachedPlan *cplan,
+										 int eflags);
 extern PGDLLIMPORT ExecutorStart_hook_type ExecutorStart_hook;
 
 /* Hook for plugins to get control in ExecutorRun() */
@@ -197,8 +199,9 @@ ExecGetJunkAttribute(TupleTableSlot *slot, AttrNumber attno, bool *isNull)
 /*
  * prototypes from functions in execMain.c
  */
-extern void ExecutorStart(QueryDesc *queryDesc, int eflags);
-extern void standard_ExecutorStart(QueryDesc *queryDesc, int eflags);
+extern bool ExecutorStart(QueryDesc *queryDesc, CachedPlan *cplan, int eflags);
+extern bool standard_ExecutorStart(QueryDesc *queryDesc, CachedPlan *cplan,
+								   int eflags);
 extern void ExecutorRun(QueryDesc *queryDesc,
 						ScanDirection direction, uint64 count, bool execute_once);
 extern void standard_ExecutorRun(QueryDesc *queryDesc,

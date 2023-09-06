@@ -801,7 +801,11 @@ execute_sql_string(const char *sql)
 										GetActiveSnapshot(), NULL,
 										dest, NULL, NULL, 0);
 
-				ExecutorStart(qdesc, 0);
+				/*
+				 * Plan can't become invalid, because there's no CachedPlan.
+				 */
+				if (!ExecutorStart(qdesc, NULL, 0))
+					elog(ERROR, "unexpected failure running ExecutorStart()");
 				ExecutorRun(qdesc, ForwardScanDirection, 0, true);
 				ExecutorFinish(qdesc);
 				ExecutorEnd(qdesc);

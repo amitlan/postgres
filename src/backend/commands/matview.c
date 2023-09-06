@@ -412,8 +412,14 @@ refresh_matview_datafill(DestReceiver *dest, Query *query,
 								GetActiveSnapshot(), InvalidSnapshot,
 								dest, NULL, NULL, 0);
 
-	/* call ExecutorStart to prepare the plan for execution */
-	ExecutorStart(queryDesc, 0);
+	/*
+	 * call ExecutorStart to prepare the plan for execution
+	 *
+	 * OK to ignore the return value; plan can't become invalid,
+	 * because there's no CachedPlan.
+	 */
+	if (!ExecutorStart(queryDesc, NULL, 0))
+		elog(ERROR, "unexpected failure running ExecutorStart()");
 
 	/* run the plan */
 	ExecutorRun(queryDesc, ForwardScanDirection, 0, true);

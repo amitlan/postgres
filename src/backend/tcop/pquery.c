@@ -19,6 +19,7 @@
 
 #include "access/xact.h"
 #include "commands/prepare.h"
+#include "executor/execdesc.h"
 #include "executor/tstoreReceiver.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
@@ -34,8 +35,7 @@
  */
 Portal		ActivePortal = NULL;
 
-
-static void ProcessQuery(PlannedStmt *plan,
+static void ProcessQuery(QueryDesc *queryDesc,
 						 const char *sourceText,
 						 ParamListInfo params,
 						 QueryEnvironment *queryEnv,
@@ -115,13 +115,12 @@ FreeQueryDesc(QueryDesc *qdesc)
 	pfree(qdesc);
 }
 
-
 /*
  * ProcessQuery
  *		Execute a single plannable query within a PORTAL_MULTI_QUERY,
  *		PORTAL_ONE_RETURNING, or PORTAL_ONE_MOD_WITH portal
  *
- *	plan: the plan tree for the query
+ *	queryDesc: QueryDesc created in PortalStart()
  *	sourceText: the source text of the query
  *	params: any parameters needed
  *	dest: where to send results
@@ -133,26 +132,14 @@ FreeQueryDesc(QueryDesc *qdesc)
  * error; otherwise the executor's memory usage will be leaked.
  */
 static void
-ProcessQuery(PlannedStmt *plan,
+ProcessQuery(QueryDesc *queryDesc,
 			 const char *sourceText,
 			 ParamListInfo params,
 			 QueryEnvironment *queryEnv,
 			 DestReceiver *dest,
 			 QueryCompletion *qc)
 {
-	QueryDesc  *queryDesc;
-
-	/*
-	 * Create the QueryDesc object
-	 */
-	queryDesc = CreateQueryDesc(plan, sourceText,
-								GetActiveSnapshot(), InvalidSnapshot,
-								dest, params, queryEnv, 0);
-
-	/*
-	 * Call ExecutorStart to prepare the plan for execution
-	 */
-	ExecutorStart(queryDesc, 0);
+	queryDesc->dest = dest;
 
 	/*
 	 * Run the plan to completion.
@@ -426,19 +413,22 @@ FetchStatementTargetList(Node *stmt)
  * presently ignored for non-PORTAL_ONE_SELECT portals (it's only intended
  * to be used for cursors).
  *
- * On return, portal is ready to accept PortalRun() calls, and the result
- * tupdesc (if any) is known.
+ * True is returned if portal is ready to accept PortalRun() calls, and the
+ * result tupdesc (if any) is known.  False if the plan tree is no longer
+ * valid, in which case, the caller must retry after generating a new
+ * CachedPlan.
  */
-void
+bool
 PortalStart(Portal portal, ParamListInfo params,
-			int eflags, Snapshot snapshot)
+			int eflags, Snapshot snapshot,
+			CachedPlan *cplan)
 {
 	Portal		saveActivePortal;
 	ResourceOwner saveResourceOwner;
-	MemoryContext savePortalContext;
 	MemoryContext oldContext;
 	QueryDesc  *queryDesc;
-	int			myeflags;
+	int			myeflags = 0;
+	bool		plan_valid = true;
 
 	Assert(PortalIsValid(portal));
 	Assert(portal->status == PORTAL_DEFINED);
@@ -448,15 +438,13 @@ PortalStart(Portal portal, ParamListInfo params,
 	 */
 	saveActivePortal = ActivePortal;
 	saveResourceOwner = CurrentResourceOwner;
-	savePortalContext = PortalContext;
 	PG_TRY();
 	{
 		ActivePortal = portal;
 		if (portal->resowner)
 			CurrentResourceOwner = portal->resowner;
-		PortalContext = portal->portalContext;
 
-		oldContext = MemoryContextSwitchTo(PortalContext);
+		oldContext = MemoryContextSwitchTo(portal->queryContext);
 
 		/* Must remember portal param list, if any */
 		portal->portalParams = params;
@@ -472,6 +460,8 @@ PortalStart(Portal portal, ParamListInfo params,
 		switch (portal->strategy)
 		{
 			case PORTAL_ONE_SELECT:
+			case PORTAL_ONE_RETURNING:
+			case PORTAL_ONE_MOD_WITH:
 
 				/* Must set snapshot before starting executor. */
 				if (snapshot)
@@ -489,8 +479,8 @@ PortalStart(Portal portal, ParamListInfo params,
 				 */
 
 				/*
-				 * Create QueryDesc in portal's context; for the moment, set
-				 * the destination to DestNone.
+				 * Create QueryDesc in portal->queryContext; for the moment,
+				 * set the destination to DestNone.
 				 */
 				queryDesc = CreateQueryDesc(linitial_node(PlannedStmt, portal->stmts),
 											portal->sourceText,
@@ -501,30 +491,52 @@ PortalStart(Portal portal, ParamListInfo params,
 											portal->queryEnv,
 											0);
 
+				/* Remember for PortalRunMulti(). */
+				if (portal->strategy == PORTAL_ONE_RETURNING ||
+					portal->strategy == PORTAL_ONE_MOD_WITH)
+					portal->qdescs = list_make1(queryDesc);
+
 				/*
 				 * If it's a scrollable cursor, executor needs to support
 				 * REWIND and backwards scan, as well as whatever the caller
 				 * might've asked for.
 				 */
-				if (portal->cursorOptions & CURSOR_OPT_SCROLL)
+				if (portal->strategy == PORTAL_ONE_SELECT &&
+					(portal->cursorOptions & CURSOR_OPT_SCROLL))
 					myeflags = eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD;
 				else
 					myeflags = eflags;
 
 				/*
-				 * Call ExecutorStart to prepare the plan for execution
+				 * Call ExecutorStart to prepare the plan for execution.  A
+				 * cached plan may get invalidated during plan intialization.
 				 */
-				ExecutorStart(queryDesc, myeflags);
+				if (!ExecutorStart(queryDesc, cplan, myeflags))
+				{
+					Assert(cplan != NULL);
+					ExecutorEnd(queryDesc);
+					FreeQueryDesc(queryDesc);
+					PopActiveSnapshot();
+					plan_valid = false;
+					goto plan_init_failed;
+				}
 
 				/*
-				 * This tells PortalCleanup to shut down the executor
+				 * This tells PortalCleanup to shut down the executor, though
+				 * not needed for queries handled by PortalRunMulti().
 				 */
-				portal->queryDesc = queryDesc;
+				if (portal->strategy == PORTAL_ONE_SELECT)
+					portal->queryDesc = queryDesc;
 
 				/*
-				 * Remember tuple descriptor (computed by ExecutorStart)
+				 * Remember tuple descriptor (computed by ExecutorStart),
+				 * though make it independent of QueryDesc for queries handled
+				 * by PortalRunMulti().
 				 */
-				portal->tupDesc = queryDesc->tupDesc;
+				if (portal->strategy != PORTAL_ONE_SELECT)
+					portal->tupDesc = CreateTupleDescCopy(queryDesc->tupDesc);
+				else
+					portal->tupDesc = queryDesc->tupDesc;
 
 				/*
 				 * Reset cursor position data to "start of query"
@@ -534,29 +546,6 @@ PortalStart(Portal portal, ParamListInfo params,
 				portal->portalPos = 0;
 
 				PopActiveSnapshot();
-				break;
-
-			case PORTAL_ONE_RETURNING:
-			case PORTAL_ONE_MOD_WITH:
-
-				/*
-				 * We don't start the executor until we are told to run the
-				 * portal.  We do need to set up the result tupdesc.
-				 */
-				{
-					PlannedStmt *pstmt;
-
-					pstmt = PortalGetPrimaryStmt(portal);
-					portal->tupDesc =
-						ExecCleanTypeFromTL(pstmt->planTree->targetlist);
-				}
-
-				/*
-				 * Reset cursor position data to "start of query"
-				 */
-				portal->atStart = true;
-				portal->atEnd = false;	/* allow fetches */
-				portal->portalPos = 0;
 				break;
 
 			case PORTAL_UTIL_SELECT:
@@ -581,7 +570,82 @@ PortalStart(Portal portal, ParamListInfo params,
 				break;
 
 			case PORTAL_MULTI_QUERY:
-				/* Need do nothing now */
+				{
+					ListCell   *lc;
+					bool		first = true;
+
+					myeflags = eflags;
+					foreach(lc, portal->stmts)
+					{
+						PlannedStmt *plan = lfirst_node(PlannedStmt, lc);
+						bool		is_utility = (plan->utilityStmt != NULL);
+
+						/*
+						 * Push the snapshot to be used by the executor.
+						 */
+						if (!is_utility)
+						{
+							/*
+							 * Must copy the snapshot for all statements
+							 * except thec first as we'll need to update its
+							 * command ID.
+							 */
+							if (!first)
+								PushCopiedSnapshot(GetTransactionSnapshot());
+							else
+								PushActiveSnapshot(GetTransactionSnapshot());
+						}
+
+						/*
+						 * From the 2nd statement onwards, update the command
+						 * ID and the snapshot to match.
+						 */
+						if (!first)
+						{
+							CommandCounterIncrement();
+							UpdateActiveSnapshotCommandId();
+						}
+
+						first = false;
+
+						/*
+						 * Create the QueryDesc.  DestReceiver will be set in
+						 * PortalRunMulti() before calling ExecutorRun().
+						 */
+						queryDesc = CreateQueryDesc(plan,
+													portal->sourceText,
+													!is_utility ?
+													GetActiveSnapshot() :
+													InvalidSnapshot,
+													InvalidSnapshot,
+													NULL,
+													params,
+													portal->queryEnv, 0);
+
+						/* Remember for PortalRunMulti() */
+						portal->qdescs = lappend(portal->qdescs, queryDesc);
+
+						if (is_utility)
+							continue;
+
+						/*
+						 * Call ExecutorStart to prepare the plan for
+						 * execution.  A cached plan may get invalidated
+						 * during plan intialization.
+						 */
+						if (!ExecutorStart(queryDesc, cplan, myeflags))
+						{
+							Assert(cplan != NULL);
+							PopActiveSnapshot();
+							ExecutorEnd(queryDesc);
+							FreeQueryDesc(queryDesc);
+							plan_valid = false;
+							goto plan_init_failed;
+						}
+						PopActiveSnapshot();
+					}
+				}
+
 				portal->tupDesc = NULL;
 				break;
 		}
@@ -594,19 +658,20 @@ PortalStart(Portal portal, ParamListInfo params,
 		/* Restore global vars and propagate error */
 		ActivePortal = saveActivePortal;
 		CurrentResourceOwner = saveResourceOwner;
-		PortalContext = savePortalContext;
 
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
+	portal->status = PORTAL_READY;
+
+plan_init_failed:
 	MemoryContextSwitchTo(oldContext);
 
 	ActivePortal = saveActivePortal;
 	CurrentResourceOwner = saveResourceOwner;
-	PortalContext = savePortalContext;
 
-	portal->status = PORTAL_READY;
+	return plan_valid;
 }
 
 /*
@@ -1193,7 +1258,7 @@ PortalRunMulti(Portal portal,
 			   QueryCompletion *qc)
 {
 	bool		active_snapshot_set = false;
-	ListCell   *stmtlist_item;
+	ListCell   *qdesc_item;
 
 	/*
 	 * If the destination is DestRemoteExecute, change to DestNone.  The
@@ -1214,9 +1279,10 @@ PortalRunMulti(Portal portal,
 	 * Loop to handle the individual queries generated from a single parsetree
 	 * by analysis and rewrite.
 	 */
-	foreach(stmtlist_item, portal->stmts)
+	foreach(qdesc_item, portal->qdescs)
 	{
-		PlannedStmt *pstmt = lfirst_node(PlannedStmt, stmtlist_item);
+		QueryDesc *qdesc = (QueryDesc *) lfirst(qdesc_item);
+		PlannedStmt *pstmt = qdesc->plannedstmt;
 
 		/*
 		 * If we got a cancel signal in prior command, quit
@@ -1233,33 +1299,26 @@ PortalRunMulti(Portal portal,
 			if (log_executor_stats)
 				ResetUsage();
 
-			/*
-			 * Must always have a snapshot for plannable queries.  First time
-			 * through, take a new snapshot; for subsequent queries in the
-			 * same portal, just update the snapshot's copy of the command
-			 * counter.
-			 */
+			/* Push the snapshot for plannable queries. */
 			if (!active_snapshot_set)
 			{
-				Snapshot	snapshot = GetTransactionSnapshot();
+				Snapshot	snapshot = qdesc->snapshot;
 
-				/* If told to, register the snapshot and save in portal */
+				/*
+				 * If told to, register the snapshot and save in portal
+				 *
+				 * Note that the command ID of qdesc->snapshot for 2nd query
+				 * onwards would have been updated in PortalStart() to account
+				 * for CCI() done between queries, but it's OK that here we
+				 * don't likewise update holdSnapshot's command ID.
+				 */
 				if (setHoldSnapshot)
 				{
 					snapshot = RegisterSnapshot(snapshot);
 					portal->holdSnapshot = snapshot;
 				}
 
-				/*
-				 * We can't have the holdSnapshot also be the active one,
-				 * because UpdateActiveSnapshotCommandId would complain.  So
-				 * force an extra snapshot copy.  Plain PushActiveSnapshot
-				 * would have copied the transaction snapshot anyway, so this
-				 * only adds a copy step when setHoldSnapshot is true.  (It's
-				 * okay for the command ID of the active snapshot to diverge
-				 * from what holdSnapshot has.)
-				 */
-				PushCopiedSnapshot(snapshot);
+				PushActiveSnapshot(snapshot);
 
 				/*
 				 * As for PORTAL_ONE_SELECT portals, it does not seem
@@ -1268,13 +1327,11 @@ PortalRunMulti(Portal portal,
 
 				active_snapshot_set = true;
 			}
-			else
-				UpdateActiveSnapshotCommandId();
 
 			if (pstmt->canSetTag)
 			{
 				/* statement can set tag string */
-				ProcessQuery(pstmt,
+				ProcessQuery(qdesc,
 							 portal->sourceText,
 							 portal->portalParams,
 							 portal->queryEnv,
@@ -1283,7 +1340,7 @@ PortalRunMulti(Portal portal,
 			else
 			{
 				/* stmt added by rewrite cannot set tag */
-				ProcessQuery(pstmt,
+				ProcessQuery(qdesc,
 							 portal->sourceText,
 							 portal->portalParams,
 							 portal->queryEnv,
@@ -1341,13 +1398,6 @@ PortalRunMulti(Portal portal,
 		 */
 		if (portal->stmts == NIL)
 			break;
-
-		/*
-		 * Increment command counter between queries, but not after the last
-		 * one.
-		 */
-		if (lnext(portal->stmts, stmtlist_item) != NULL)
-			CommandCounterIncrement();
 	}
 
 	/* Pop the snapshot if we pushed one. */

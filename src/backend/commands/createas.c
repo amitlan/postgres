@@ -329,8 +329,13 @@ ExecCreateTableAs(ParseState *pstate, CreateTableAsStmt *stmt,
 									GetActiveSnapshot(), InvalidSnapshot,
 									dest, params, queryEnv, 0);
 
-		/* call ExecutorStart to prepare the plan for execution */
-		ExecutorStart(queryDesc, GetIntoRelEFlags(into));
+		/*
+		 * call ExecutorStart to prepare the plan for execution
+		 *
+		 * Plan can't become invalid, because there's no CachedPlan.
+		 */
+		if (!ExecutorStart(queryDesc, NULL, GetIntoRelEFlags(into)))
+			elog(ERROR, "unexpected failure running ExecutorStart()");
 
 		/* run the plan to completion */
 		ExecutorRun(queryDesc, ForwardScanDirection, 0, true);

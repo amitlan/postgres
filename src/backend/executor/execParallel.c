@@ -1431,7 +1431,12 @@ ParallelQueryMain(dsm_segment *seg, shm_toc *toc)
 
 	/* Start up the executor */
 	queryDesc->plannedstmt->jitFlags = fpes->jit_flags;
-	ExecutorStart(queryDesc, fpes->eflags);
+	/*
+	 * OK to ignore the return value; plan can't become invalid,
+	 * because there's no CachedPlan.
+	 */
+	if (!ExecutorStart(queryDesc, NULL, fpes->eflags))
+		elog(ERROR, "unexpected failure running ExecutorStart()");
 
 	/* Special executor initialization steps for parallel workers */
 	queryDesc->planstate->state->es_query_dsa = area;

@@ -29,8 +29,9 @@ extern List *FetchPortalTargetList(Portal portal);
 
 extern List *FetchStatementTargetList(Node *stmt);
 
-extern void PortalStart(Portal portal, ParamListInfo params,
-						int eflags, Snapshot snapshot);
+extern bool PortalStart(Portal portal, ParamListInfo params,
+						int eflags, Snapshot snapshot,
+						CachedPlan *cplan);
 
 extern void PortalSetResultFormat(Portal portal, int nFormats,
 								  int16 *formats);

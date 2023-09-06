@@ -567,8 +567,11 @@ BeginCopyTo(ParseState *pstate,
 		 * Call ExecutorStart to prepare the plan for execution.
 		 *
 		 * ExecutorStart computes a result tupdesc for us
+		 *
+		 * Plan can't become invalid, because there's no CachedPlan.
 		 */
-		ExecutorStart(cstate->queryDesc, 0);
+		if (!ExecutorStart(cstate->queryDesc, NULL, 0))
+			elog(ERROR, "unexpected failure running ExecutorStart()");
 
 		tupDesc = cstate->queryDesc->tupDesc;
 	}
