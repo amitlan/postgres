@@ -1035,3 +1035,130 @@ distribute_row_identity_vars(PlannerInfo *root)
 		}
 	}
 }
+
+/*
+ * add_append_subpath_partrelids
+ *		Look up a child subpath's rel's partitioned parent relids up to
+ *		parentrel and add the bitmapset containing those into
+ *		'allpartrelids'
+ */
+List *
+add_append_subpath_partrelids(PlannerInfo *root, Path *subpath,
+							  RelOptInfo *parentrel,
+							  List *allpartrelids)
+{
+	RelOptInfo *pathrel = subpath->parent;
+	Relids		partrelids = NULL;
+	Index		top_parent;
+	ListCell   *lc;
+
+	/* Nothing to do if there's no parent to begin with. */
+	if (!IS_OTHER_REL(pathrel))
+		return allpartrelids;
+
+	/*
+	 * Traverse up to the pathrel's topmost partitioned parent, collecting
+	 * parent relids as we go; but stop if we reach parentrel.  (Normally, a
+	 * pathrel's topmost partitioned parent is either parentrel or a UNION ALL
+	 * appendrel child of parentrel.  But when handling partitionwise joins of
+	 * multi-level partitioning trees, we can see an append path whose
+	 * parentrel is an intermediate partitioned table.)
+	 */
+	do
+	{
+		Relids	parent_relids = NULL;
+
+		/*
+		 * For simple child rels, we can simply set the parent_relids to
+		 * pathrel->parent->relids.  But for partitionwise join and aggregate
+		 * child rels, while we can use pathrel->parent to move up the tree,
+		 * parent_relids must be found the hard way through AppendInfoInfos,
+		 * because 1) a joinrel's relids may point to RTE_JOIN entries,
+		 * 2) topmost parent grouping rel's relids field is NULL.
+		 */
+		if (IS_SIMPLE_REL(pathrel))
+		{
+			pathrel = pathrel->parent;
+			/* Stop once we reach the root partitioned rel. */
+			if (!IS_PARTITIONED_REL(pathrel))
+				break;
+			parent_relids = bms_add_members(parent_relids, pathrel->relids);
+		}
+		else
+		{
+			AppendRelInfo **appinfos;
+			int		nappinfos,
+					i;
+
+			appinfos = find_appinfos_by_relids(root, pathrel->relids,
+											   &nappinfos);
+			for (i = 0; i < nappinfos; i++)
+			{
+				AppendRelInfo *appinfo = appinfos[i];
+
+				parent_relids = bms_add_member(parent_relids,
+											   appinfo->parent_relid);
+			}
+			pfree(appinfos);
+			pathrel = pathrel->parent;
+		}
+		/* accept this level as an interesting parent */
+		partrelids = bms_add_members(partrelids, parent_relids);
+		if (pathrel == parentrel)
+			break;		/* don't traverse above parentrel */
+	} while (IS_OTHER_REL(pathrel));
+
+	if (partrelids == NULL)
+		return allpartrelids;
+
+	/*
+	 * Append the 'partrelids' RT index bitmapset to 'allpartrelids' or
+	 * merge the RT indexes into an appropriate bitmapset already present
+	 * in the list
+	 *
+	 * Within 'allpartrelids', there is one Bitmapset for each topmost parent
+	 * partitioned rel mentioned in the query whose children's subpaths have
+	 * been passed to add_append_subpath_partrelids.  Each Bitmapset contains
+	 * the RT indexes of the topmost parent as well as its relevant non-leaf
+	 * child partitions.  Since (by construction of the rangetable list) parent
+	 * partitions must have lower RT indexes than their children, we can
+	 * distinguish the topmost parent as being the lowest set bit in the
+	 * Bitmapset.
+	 *
+	 * Note that the list contains only RT indexes of partitioned tables that
+	 * are parents of some scan-level relation appearing in the 'subpaths' that
+	 * add_append_subpath_partrelids() is dealing with.  Also, "topmost"
+	 * parents are not allowed to be higher than the 'parentrel' associated
+	 * with the append path.  In this way, we avoid expending cycles on
+	 * partitioned rels that can't contribute useful pruning information for
+	 * the problem at hand.
+	 *
+	 * (It is possible for 'parentrel' to be a child partitioned table, and it
+	 * is also possible for scan-level relations to be child partitioned tables
+	 * rather than leaf partitions.  Hence we must construct this relation set
+	 * with reference to the particular append path we're dealing with, rather
+	 * than looking at the full partitioning structure represented in the
+	 * RelOptInfos.)
+	 */
+
+	/* We can easily get the lowest set bit this way: */
+	top_parent = bms_next_member(partrelids, -1);
+	Assert(top_parent > 0);
+
+	/* Look for a matching topmost parent */
+	foreach(lc, allpartrelids)
+	{
+		Bitmapset  *currpartrelids = (Bitmapset *) lfirst(lc);
+		Index		currtarget = bms_next_member(currpartrelids, -1);
+
+		if (top_parent == currtarget)
+		{
+			/* Found a match, so add any new RT indexes to this hierarchy */
+			currpartrelids = bms_add_members(currpartrelids, partrelids);
+			lfirst(lc) = currpartrelids;
+			return allpartrelids;
+		}
+	}
+	/* No match, so add the new partition hierarchy to the list */
+	return lappend(allpartrelids, partrelids);
+}

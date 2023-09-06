@@ -79,6 +79,11 @@ typedef struct PlannedStmt
 
 	List	   *appendRelations;	/* list of AppendRelInfo nodes */
 
+	List	   *elidedAppendPartRels; /* list of Bitmapsets of RT indexes of
+									   * partitioned tables from Append/
+									   * MergeAppend nodes that were elided
+									   * in setrefs.c */
+
 	List	   *subplans;		/* Plan trees for SubPlan expressions; note
 								 * that some could be NULL */
 
@@ -268,6 +273,15 @@ typedef struct Append
 	int			nasyncplans;	/* # of asynchronous plans */
 
 	/*
+	 * List of bitmapsets containing RT indexes of all partitioned tables
+	 * scanned by this Append, with one bitmapset for every partitioned
+	 * table appearing in the query.  Each bitmapset contains the RT indexes
+	 * of all non-pruned non-leaf partitions in the tree with a given
+	 * partitioned table as root.
+	 */
+	List	   *allpartrelids;
+
+	/*
 	 * All 'appendplans' preceding this index are non-partial plans. All
 	 * 'appendplans' from this index onwards are partial plans.
 	 */
@@ -290,6 +304,9 @@ typedef struct MergeAppend
 	Bitmapset  *apprelids;
 
 	List	   *mergeplans;
+
+	/* See the description in Append's definition. */
+	List	   *allpartrelids;
 
 	/* these fields are just like the sort-key info in struct Sort: */
 

@@ -1742,6 +1742,10 @@ set_append_references(PlannerInfo *root,
 		lfirst(l) = set_plan_refs(root, (Plan *) lfirst(l), rtoffset);
 	}
 
+	/* Do this before possibly removing the MergeAppend node below. */
+	foreach(l, aplan->allpartrelids)
+		lfirst(l) = offset_relid_set((Relids) lfirst(l), rtoffset);
+
 	/*
 	 * See if it's safe to get rid of the Append entirely.  For this to be
 	 * safe, there must be only one child plan and that child plan's parallel
@@ -1755,7 +1759,14 @@ set_append_references(PlannerInfo *root,
 		Plan	   *p = (Plan *) linitial(aplan->appendplans);
 
 		if (p->parallel_aware == aplan->plan.parallel_aware)
+		{
+			if (aplan->allpartrelids)
+				root->glob->elidedAppendPartRels =
+					list_concat(root->glob->elidedAppendPartRels,
+								aplan->allpartrelids);
+
 			return clean_up_removed_plan_level((Plan *) aplan, p);
+		}
 	}
 
 	/*
@@ -1817,6 +1828,10 @@ set_mergeappend_references(PlannerInfo *root,
 		lfirst(l) = set_plan_refs(root, (Plan *) lfirst(l), rtoffset);
 	}
 
+	/* Do this before possibly removing the MergeAppend node below. */
+	foreach(l, mplan->allpartrelids)
+		lfirst(l) = offset_relid_set((Relids) lfirst(l), rtoffset);
+
 	/*
 	 * See if it's safe to get rid of the MergeAppend entirely.  For this to
 	 * be safe, there must be only one child plan and that child plan's
@@ -1831,7 +1846,14 @@ set_mergeappend_references(PlannerInfo *root,
 		Plan	   *p = (Plan *) linitial(mplan->mergeplans);
 
 		if (p->parallel_aware == mplan->plan.parallel_aware)
+		{
+			if (mplan->allpartrelids)
+				root->glob->elidedAppendPartRels =
+					list_concat(root->glob->elidedAppendPartRels,
+								mplan->allpartrelids);
+
 			return clean_up_removed_plan_level((Plan *) mplan, p);
+		}
 	}
 
 	/*

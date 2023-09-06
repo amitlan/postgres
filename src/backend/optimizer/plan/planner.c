@@ -521,6 +521,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	Assert(glob->finalrowmarks == NIL);
 	Assert(glob->resultRelations == NIL);
 	Assert(glob->appendRelations == NIL);
+	Assert(glob->elidedAppendPartRels == NIL);
 	top_plan = set_plan_references(root, top_plan);
 	/* ... and the subplans (both regular subplans and initplans) */
 	Assert(list_length(glob->subplans) == list_length(glob->subroots));
@@ -548,6 +549,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	result->permInfos = glob->finalrteperminfos;
 	result->resultRelations = glob->resultRelations;
 	result->appendRelations = glob->appendRelations;
+	result->elidedAppendPartRels = glob->elidedAppendPartRels;
 	result->subplans = glob->subplans;
 	result->rewindPlanIDs = glob->rewindPlanIDs;
 	result->rowMarks = glob->finalrowmarks;
@@ -7852,8 +7854,11 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 									   agg_costs, gd, &child_extra,
 									   &child_partially_grouped_rel);
 
+		/* Mark as child of grouped_rel. */
+		child_grouped_rel->parent = grouped_rel;
 		if (child_partially_grouped_rel)
 		{
+			child_partially_grouped_rel->parent = grouped_rel;
 			partially_grouped_live_children =
 				lappend(partially_grouped_live_children,
 						child_partially_grouped_rel);
