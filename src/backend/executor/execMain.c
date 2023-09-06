@@ -1511,7 +1511,7 @@ ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo)
 
 			/*
 			 * All ancestors up to the root target relation must have been
-			 * locked by the planner or AcquireExecutorLocks().
+			 * locked by the planner or ExecLockAppendNonLeafPartitions().
 			 */
 			ancRel = table_open(ancOid, NoLock);
 			rInfo = makeNode(ResultRelInfo);
