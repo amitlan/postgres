@@ -1685,12 +1685,13 @@ ExecCloseResultRelations(EState *estate)
 void
 ExecCloseRangeTableRelations(EState *estate)
 {
-	int			i;
+	ListCell *lc;
 
-	for (i = 0; i < estate->es_range_table_size; i++)
+	foreach(lc, estate->es_opened_relations)
 	{
-		if (estate->es_relations[i])
-			table_close(estate->es_relations[i], NoLock);
+		Relation rel = lfirst(lc);
+
+		table_close(rel, NoLock);
 	}
 }
 
