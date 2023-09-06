@@ -172,6 +172,8 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	if (scanrelid > 0)
 	{
 		currentRelation = ExecOpenScanRelation(estate, scanrelid, eflags);
+		if (unlikely(currentRelation == NULL || !ExecPlanStillValid(estate)))
+			return scanstate;
 		scanstate->ss.ss_currentRelation = currentRelation;
 		fdwroutine = GetFdwRoutineForRelation(currentRelation, true);
 	}
@@ -263,6 +265,8 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	if (outerPlan(node))
 		outerPlanState(scanstate) =
 			ExecInitNode(outerPlan(node), estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return scanstate;
 
 	/*
 	 * Tell the FDW to initialize the scan.

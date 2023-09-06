@@ -1040,6 +1040,8 @@ ExecInitIncrementalSort(IncrementalSort *node, EState *estate, int eflags)
 	 * nodes may be able to do something more useful.
 	 */
 	outerPlanState(incrsortstate) = ExecInitNode(outerPlan(node), estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return incrsortstate;
 
 	/*
 	 * Initialize scan slot and type.

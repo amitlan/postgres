@@ -142,9 +142,11 @@ PerformCursorOpen(ParseState *pstate, DeclareCursorStmt *cstmt, ParamListInfo pa
 
 	/*
 	 * Start execution, inserting parameters if any.
+	 *
+	 * Plan can't become invalid here, because there's no CachedPlan.
 	 */
-	PortalStart(portal, params, 0, GetActiveSnapshot());
-
+	if (!PortalStart(portal, params, 0, GetActiveSnapshot(), NULL))
+		elog(ERROR, "unexpected failure running PortalStart()");
 	Assert(portal->strategy == PORTAL_ONE_SELECT);
 
 	/*

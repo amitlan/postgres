@@ -506,10 +506,11 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
 	}
 
-	/* run it (if needed) and produce output */
-	ExplainOnePlan(plan, into, es, queryString, params, queryEnv,
-				   &planduration, (es->buffers ? &bufusage : NULL),
-				   es->memory ? &mem_counters : NULL);
+	/* run it (if needed) and produce output; no CachedPlan, no replanning! */
+	if (!ExplainOnePlan(plan, NULL, into, es, queryString, params, queryEnv,
+						&planduration, (es->buffers ? &bufusage : NULL),
+						es->memory ? &mem_counters : NULL))
+		elog(ERROR, "unexpected failure to finish ExplainOnePlan()");
 }
 
 /*
@@ -613,9 +614,13 @@ ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
  * This is exported because it's called back from prepare.c in the
  * EXPLAIN EXECUTE case, and because an index advisor plugin would need
  * to call it.
+ *
+ * Returns true if execution succeeds, false otherwise.  Latter only possible
+ * if cplan != NULL and gets invalidated during ExecutorStart().
  */
-void
-ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
+bool
+ExplainOnePlan(PlannedStmt *plannedstmt, CachedPlan *cplan,
+			   IntoClause *into, ExplainState *es,
 			   const char *queryString, ParamListInfo params,
 			   QueryEnvironment *queryEnv, const instr_time *planduration,
 			   const BufferUsage *bufusage,
@@ -685,8 +690,16 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 	if (into)
 		eflags |= GetIntoRelEFlags(into);
 
-	/* call ExecutorStart to prepare the plan for execution */
-	ExecutorStart(queryDesc, eflags);
+	/*
+	 * Call TryExecutorStart to prepare the plan for execution.  A cached plan
+	 * may get invalidated during plan intialization.
+	 */
+	if (!TryExecutorStart(queryDesc, cplan, eflags))
+	{
+		/* Clean up. */
+		PopActiveSnapshot();
+		return false;
+	}
 
 	/* Execute the plan for statistics if asked for */
 	if (es->analyze)
@@ -798,6 +811,8 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 							 es);
 
 	ExplainCloseGroup("Query", NULL, true, es);
+
+	return true;
 }
 
 /*
@@ -5192,6 +5207,17 @@ ExplainDummyGroup(const char *objtype, const char *labelname, ExplainState *es)
 			escape_yaml(es->str, objtype);
 			break;
 	}
+}
+
+/*
+ * Discard output buffer for a fresh restart.
+ */
+void
+ExplainResetOutput(ExplainState *es)
+{
+	Assert(es->str);
+	resetStringInfo(es->str);
+	ExplainBeginOutput(es);
 }
 
 /*

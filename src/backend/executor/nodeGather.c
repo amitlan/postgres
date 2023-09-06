@@ -84,6 +84,8 @@ ExecInitGather(Gather *node, EState *estate, int eflags)
 	 */
 	outerNode = outerPlan(node);
 	outerPlanState(gatherstate) = ExecInitNode(outerNode, estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return gatherstate;
 	tupDesc = ExecGetResultType(outerPlanState(gatherstate));
 
 	/*

@@ -136,6 +136,10 @@ static bool ExecShutdownNode_walker(PlanState *node, void *context);
  *		  'eflags' is a bitwise OR of flag bits described in executor.h
  *
  *		Returns a PlanState node corresponding to the given Plan node.
+ *
+ *		Callers should check upon returning that ExecPlanStillValid(estate)
+ *		returns true before continuing further with its processing, because the
+ *		returned PlanState might be only partially valid otherwise.
  * ------------------------------------------------------------------------
  */
 PlanState *
@@ -387,6 +391,9 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			result = NULL;		/* keep compiler quiet */
 			break;
 	}
+
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return result;
 
 	ExecSetExecProcNode(result, result->ExecProcNode);
 

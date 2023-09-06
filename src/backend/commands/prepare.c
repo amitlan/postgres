@@ -180,6 +180,7 @@ ExecuteQuery(ParseState *pstate,
 		paramLI = EvaluateParams(pstate, entry, stmt->params, estate);
 	}
 
+replan:
 	/* Create a new portal to run the query in */
 	portal = CreateNewPortal();
 	/* Don't display the portal in pg_cursors, it is for internal use only */
@@ -248,9 +249,16 @@ ExecuteQuery(ParseState *pstate,
 	}
 
 	/*
-	 * Run the portal as appropriate.
+	 * Run the portal as appropriate. If the portal has a cached plan and
+	 * it's found to be invalidated during the initialization of its plan
+	 * trees, the plan must be regenerated.
 	 */
-	PortalStart(portal, paramLI, eflags, GetActiveSnapshot());
+	if (!PortalStart(portal, paramLI, eflags, GetActiveSnapshot(), cplan))
+	{
+		Assert(cplan != NULL);
+		PortalDrop(portal, false);
+		goto replan;
+	}
 
 	(void) PortalRun(portal, count, false, true, dest, dest, qc);
 
@@ -571,7 +579,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 {
 	PreparedStatement *entry;
 	const char *query_string;
-	CachedPlan *cplan;
+	CachedPlan *cplan = NULL;
 	List	   *plan_list;
 	ListCell   *p;
 	ParamListInfo paramLI = NULL;
@@ -628,6 +636,7 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	}
 
 	/* Replan if needed, and acquire a transient refcount */
+replan:
 	cplan = GetCachedPlan(entry->plansource, paramLI,
 						  CurrentResourceOwner, queryEnv);
 
@@ -655,9 +664,18 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 		PlannedStmt *pstmt = lfirst_node(PlannedStmt, p);
 
 		if (pstmt->commandType != CMD_UTILITY)
-			ExplainOnePlan(pstmt, into, es, query_string, paramLI, queryEnv,
-						   &planduration, (es->buffers ? &bufusage : NULL),
-						   es->memory ? &mem_counters : NULL);
+		{
+			if (!ExplainOnePlan(pstmt, cplan, into, es, query_string, paramLI,
+								queryEnv, &planduration,
+								(es->buffers ? &bufusage : NULL),
+								es->memory ? &mem_counters : NULL))
+			{
+				Assert(cplan != NULL);
+				ExplainResetOutput(es);
+				ReleaseCachedPlan(cplan, CurrentResourceOwner);
+				goto replan;
+			}
+		}
 		else
 			ExplainOneUtility(pstmt->utilityStmt, into, es, query_string,
 							  paramLI, queryEnv);

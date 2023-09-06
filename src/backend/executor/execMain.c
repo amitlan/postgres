@@ -58,6 +58,7 @@
 #include "utils/backend_status.h"
 #include "utils/lsyscache.h"
 #include "utils/partcache.h"
+#include "utils/plancache.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
 
@@ -72,7 +73,7 @@ ExecutorEnd_hook_type ExecutorEnd_hook = NULL;
 ExecutorCheckPerms_hook_type ExecutorCheckPerms_hook = NULL;
 
 /* decls for local routines only used within this module */
-static void InitPlan(QueryDesc *queryDesc, int eflags);
+static bool InitPlan(QueryDesc *queryDesc, CachedPlan *cplan, int eflags);
 static void CheckValidRowMarkRel(Relation rel, RowMarkType markType);
 static void ExecPostprocessPlan(EState *estate);
 static void ExecEndPlan(PlanState *planstate, EState *estate);
@@ -112,6 +113,13 @@ static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
  *
  * eflags contains flag bits as described in executor.h.
  *
+ * Plan initialization may fail if the input plan tree is found to have been
+ * invalidated, which can happen if it comes from a CachedPlan ('cplan').
+ *
+ * Returns true if plan was successfully initialized and false otherwise.  If
+ * the latter, the caller must call ExecutorEnd() on 'queryDesc' to clean up
+ * after failed plan initialization.
+ *
  * NB: the CurrentMemoryContext when this is called will become the parent
  * of the per-query context used for this Executor invocation.
  *
@@ -121,8 +129,8 @@ static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
  *
  * ----------------------------------------------------------------
  */
-void
-ExecutorStart(QueryDesc *queryDesc, int eflags)
+bool
+ExecutorStart(QueryDesc *queryDesc, CachedPlan *cplan, int eflags)
 {
 	/*
 	 * In some cases (e.g. an EXECUTE statement) a query execution will skip
@@ -133,14 +141,34 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 	pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
 
 	if (ExecutorStart_hook)
-		(*ExecutorStart_hook) (queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
+		return (*ExecutorStart_hook) (queryDesc, cplan, eflags);
+
+	return standard_ExecutorStart(queryDesc, cplan, eflags);
 }
 
-void
-standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
+/*
+ * Variant of ExecutorStart() that handles cleaning up if the input CachedPlan
+ * becomes invalid due to locks being taken during ExecutorStart().
+ */
+bool
+TryExecutorStart(QueryDesc *queryDesc, CachedPlan *cplan, int eflags)
 {
+	bool	plan_valid = ExecutorStart(queryDesc, cplan, eflags);
+
+	if (!plan_valid)
+	{
+		Assert(cplan != NULL);
+		ExecutorEnd(queryDesc);
+		FreeQueryDesc(queryDesc);
+	}
+
+	return plan_valid;
+}
+
+bool
+standard_ExecutorStart(QueryDesc *queryDesc, CachedPlan *cplan, int eflags)
+{
+	bool		plan_valid;
 	EState	   *estate;
 	MemoryContext oldcontext;
 
@@ -259,9 +287,14 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	/*
 	 * Initialize the plan state tree
 	 */
-	InitPlan(queryDesc, eflags);
+	plan_valid = InitPlan(queryDesc, cplan, eflags);
+
+	/* Mark execution as canceled if plan won't be executed. */
+	estate->es_canceled = !plan_valid;
 
 	MemoryContextSwitchTo(oldcontext);
+
+	return plan_valid;
 }
 
 /* ----------------------------------------------------------------
@@ -321,6 +354,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 	estate = queryDesc->estate;
 
 	Assert(estate != NULL);
+	Assert(!estate->es_canceled);
 	Assert(!(estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY));
 
 	/* caller must ensure the query's snapshot is active */
@@ -428,7 +462,7 @@ standard_ExecutorFinish(QueryDesc *queryDesc)
 	Assert(!(estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY));
 
 	/* This should be run once and only once per Executor instance */
-	Assert(!estate->es_finished);
+	Assert(!estate->es_finished && !estate->es_canceled);
 
 	/* Switch into per-query memory context */
 	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
@@ -487,11 +521,11 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
 	Assert(estate != NULL);
 
 	/*
-	 * Check that ExecutorFinish was called, unless in EXPLAIN-only mode. This
-	 * Assert is needed because ExecutorFinish is new as of 9.1, and callers
-	 * might forget to call it.
+	 * Check that ExecutorFinish was called, unless in EXPLAIN-only mode or if
+	 * execution was canceled. This Assert is needed because ExecutorFinish is
+	 * new as of 9.1, and callers might forget to call it.
 	 */
-	Assert(estate->es_finished ||
+	Assert(estate->es_finished || estate->es_canceled ||
 		   (estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY));
 
 	/*
@@ -504,6 +538,14 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
 	/* do away with our snapshots */
 	UnregisterSnapshot(estate->es_snapshot);
 	UnregisterSnapshot(estate->es_crosscheck_snapshot);
+
+	/*
+	 * Cancel trigger execution too if the query execution was canceled.
+	 */
+	if (estate->es_canceled &&
+		!(estate->es_top_eflags &
+		  (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY)))
+		AfterTriggerCancelQuery();
 
 	/*
 	 * Must switch out of context before destroying it
@@ -834,24 +876,55 @@ ExecCheckXactReadOnly(PlannedStmt *plannedstmt)
 		PreventCommandIfParallelMode(CreateCommandName((Node *) plannedstmt));
 }
 
+/* Lock the relations found in PlannedStmt.elidedAppendPartRels. */
+static void
+ExecLockElidedAppendPartRels(EState *estate, List *elidedAppendPartRels)
+{
+	ListCell *lc;
+
+	foreach(lc, elidedAppendPartRels)
+	{
+		Bitmapset *partrelids = castNode(Bitmapset, lfirst(lc));
+		int		rti = -1;
+
+		while ((rti = bms_next_member(partrelids, rti)) > 0)
+		{
+			RangeTblEntry *rte = exec_rt_fetch(rti, estate);
+
+			/*
+			 * Don't lock any partitioned tables mentioned in the query,
+			 * because they would already have been locked before entering the
+			 * executor.
+			 */
+			if (!rte->inFromCl)
+				LockRelationOid(rte->relid, rte->rellockmode);
+			else
+				Assert(CheckRelationOidLockedByMe(rte->relid, rte->rellockmode, true));
+		}
+	}
+}
 
 /* ----------------------------------------------------------------
  *		InitPlan
  *
  *		Initializes the query plan: open files, allocate storage
  *		and start up the rule manager
+ *
+ * Returns true if the plan tree is successfully initialized for execution,
+ * false otherwise.  The latter case may occur if the CachedPlan that provides
+ * the plan tree ('cplan') got invalidated during the initialization.
  * ----------------------------------------------------------------
  */
-static void
-InitPlan(QueryDesc *queryDesc, int eflags)
+static bool
+InitPlan(QueryDesc *queryDesc, CachedPlan *cplan, int eflags)
 {
 	CmdType		operation = queryDesc->operation;
 	PlannedStmt *plannedstmt = queryDesc->plannedstmt;
 	Plan	   *plan = plannedstmt->planTree;
 	List	   *rangeTable = plannedstmt->rtable;
 	EState	   *estate = queryDesc->estate;
-	PlanState  *planstate;
-	TupleDesc	tupType;
+	PlanState  *planstate = NULL;
+	TupleDesc	tupType = NULL;
 	ListCell   *l;
 	int			i;
 
@@ -865,7 +938,16 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	 */
 	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos);
 
+	/*
+	 * With range table in place, lock partitioned tables whose
+	 * Append/MergeAppend nodes have been removed by the planner.
+	 */
+	if (cplan != NULL)
+		ExecLockElidedAppendPartRels(estate,
+									 plannedstmt->elidedAppendPartRels);
+
 	estate->es_plannedstmt = plannedstmt;
+	estate->es_cachedplan = cplan;
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.
@@ -897,6 +979,9 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 				case ROW_MARK_KEYSHARE:
 				case ROW_MARK_REFERENCE:
 					relation = ExecGetRangeTableRelation(estate, rc->rti);
+					if (unlikely(relation == NULL ||
+								 !ExecPlanStillValid(estate)))
+						return false;
 					break;
 				case ROW_MARK_COPY:
 					/* no physical table access is required */
@@ -967,6 +1052,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 
 		estate->es_subplanstates = lappend(estate->es_subplanstates,
 										   subplanstate);
+		if (unlikely(!ExecPlanStillValid(estate)))
+			return false;
 
 		i++;
 	}
@@ -977,6 +1064,8 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	 * processing tuples.
 	 */
 	planstate = ExecInitNode(plan, estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return false;
 
 	/*
 	 * Get the tuple descriptor describing the type of tuples to return.
@@ -1018,8 +1107,12 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		}
 	}
 
+	Assert(queryDesc->tupDesc == NULL);
 	queryDesc->tupDesc = tupType;
+	Assert(queryDesc->planstate == NULL);
 	queryDesc->planstate = planstate;
+
+	return true;
 }
 
 /*
@@ -2847,7 +2940,8 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	 * Child EPQ EStates share the parent's copy of unchanging state such as
 	 * the snapshot, rangetable, and external Param info.  They need their own
 	 * copies of local state, including a tuple table, es_param_exec_vals,
-	 * result-rel info, etc.
+	 * result-rel info, etc.  Also, we don't pass the parent's copy of the
+	 * CachedPlan, because no new locks will be taken for EvalPlanQual().
 	 */
 	rcestate->es_direction = ForwardScanDirection;
 	rcestate->es_snapshot = parentestate->es_snapshot;
@@ -2936,6 +3030,14 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 		subplanstate = ExecInitNode(subplan, rcestate, 0);
 		rcestate->es_subplanstates = lappend(rcestate->es_subplanstates,
 											 subplanstate);
+
+		/*
+		 * All the necessary locks must already have been taken when
+		 * initializing the parent's copy of subplanstate, so the CachedPlan,
+		 * if any, should not have become invalid during ExecInitNode().
+		 */
+		if (!ExecPlanStillValid(rcestate))
+			elog(ERROR, "unexpected failure to initialize subplan in EvalPlanQualStart()");
 	}
 
 	/*
@@ -2976,6 +3078,10 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	 * and leaves us ready to start processing tuples.
 	 */
 	epqstate->recheckplanstate = ExecInitNode(planTree, rcestate, 0);
+
+	/* See the comment above. */
+	if (!ExecPlanStillValid(rcestate))
+		elog(ERROR, "unexpected failure to initialize main plantree in EvalPlanQualStart()");
 
 	MemoryContextSwitchTo(oldcontext);
 }

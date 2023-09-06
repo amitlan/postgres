@@ -153,6 +153,9 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 		ExecOpenScanRelation(estate,
 							 node->scan.scanrelid,
 							 eflags);
+	if (unlikely(scanstate->ss.ss_currentRelation == NULL ||
+				 !ExecPlanStillValid(estate)))
+		return scanstate;
 
 	/* and create slot with the appropriate rowtype */
 	ExecInitScanTupleSlot(estate, &scanstate->ss,

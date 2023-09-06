@@ -973,6 +973,8 @@ ExecInitMemoize(Memoize *node, EState *estate, int eflags)
 
 	outerNode = outerPlan(node);
 	outerPlanState(mstate) = ExecInitNode(outerNode, estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return mstate;
 
 	/*
 	 * Initialize return slot and type. No need to initialize projection info

@@ -329,7 +329,8 @@ static PlannedStmt *pgss_planner(Query *parse,
 								 const char *query_string,
 								 int cursorOptions,
 								 ParamListInfo boundParams);
-static void pgss_ExecutorStart(QueryDesc *queryDesc, int eflags);
+static bool pgss_ExecutorStart(QueryDesc *queryDesc, CachedPlan *cplan,
+							   int eflags);
 static void pgss_ExecutorRun(QueryDesc *queryDesc,
 							 ScanDirection direction,
 							 uint64 count, bool execute_once);
@@ -984,13 +985,15 @@ pgss_planner(Query *parse,
 /*
  * ExecutorStart hook: start up tracking if needed
  */
-static void
-pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
+static bool
+pgss_ExecutorStart(QueryDesc *queryDesc, CachedPlan *cplan, int eflags)
 {
+	bool	plan_valid;
+
 	if (prev_ExecutorStart)
-		prev_ExecutorStart(queryDesc, eflags);
+		plan_valid = prev_ExecutorStart(queryDesc, cplan, eflags);
 	else
-		standard_ExecutorStart(queryDesc, eflags);
+		plan_valid = standard_ExecutorStart(queryDesc, cplan, eflags);
 
 	/*
 	 * If query has queryId zero, don't track it.  This prevents double
@@ -1013,6 +1016,8 @@ pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			MemoryContextSwitchTo(oldcxt);
 		}
 	}
+
+	return plan_valid;
 }
 
 /*
