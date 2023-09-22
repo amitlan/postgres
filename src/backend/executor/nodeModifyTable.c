@@ -4002,6 +4002,13 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 							   linitial_int(node->resultRelations));
 	}
 
+	/*
+	 * ExecInitResultRelation() may have returned without initializing
+	 * rootResultRelInfo if the plan got invalidated, so check.
+	 */
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return mtstate;
+
 	/* set up epqstate with dummy subplan data for the moment */
 	EvalPlanQualInit(&mtstate->mt_epqstate, estate, NULL, NIL,
 					 node->epqParam, node->resultRelations);
@@ -4030,6 +4037,10 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		{
 			ExecInitResultRelation(estate, resultRelInfo, resultRelation);
 
+			/* See the comment above. */
+			if (unlikely(!ExecPlanStillValid(estate)))
+				return mtstate;
+
 			/*
 			 * For child result relations, store the root result relation
 			 * pointer.  We do so for the convenience of places that want to
@@ -4056,6 +4067,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 * Now we may initialize the subplan.
 	 */
 	outerPlanState(mtstate) = ExecInitNode(subplan, estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return mtstate;
 
 	/*
 	 * Do additional per-result-relation initialization.

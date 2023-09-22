@@ -108,6 +108,8 @@ ExecInitGatherMerge(GatherMerge *node, EState *estate, int eflags)
 	 */
 	outerNode = outerPlan(node);
 	outerPlanState(gm_state) = ExecInitNode(outerNode, estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return gm_state;
 
 	/*
 	 * Leader may access ExecProcNode result directly (if

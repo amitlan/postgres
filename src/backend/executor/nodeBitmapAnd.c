@@ -89,6 +89,8 @@ ExecInitBitmapAnd(BitmapAnd *node, EState *estate, int eflags)
 	{
 		initNode = (Plan *) lfirst(l);
 		bitmapplanstates[i] = ExecInitNode(initNode, estate, eflags);
+		if (unlikely(!ExecPlanStillValid(estate)))
+			return bitmapandstate;
 		i++;
 	}
 

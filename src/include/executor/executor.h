@@ -259,6 +259,15 @@ extern void ExecEndNode(PlanState *node);
 extern void ExecShutdownNode(PlanState *node);
 extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
 
+/*
+ * Is the CachedPlan in es_cachedplan still valid?
+ */
+static inline bool
+ExecPlanStillValid(EState *estate)
+{
+	return estate->es_cachedplan == NULL ? true :
+		CachedPlanStillValid(estate->es_cachedplan);
+}
 
 /* ----------------------------------------------------------------
  *		ExecProcNode
@@ -580,6 +589,7 @@ extern void ExecCreateScanSlotFromOuterPlan(EState *estate,
 extern bool ExecRelationIsTargetRelation(EState *estate, Index scanrelid);
 
 extern Relation ExecOpenScanRelation(EState *estate, Index scanrelid, int eflags);
+extern Relation ExecOpenScanIndexRelation(EState *estate, Oid indexid, int lockmode);
 
 extern void ExecInitRangeTable(EState *estate, List *rangeTable, List *permInfos);
 extern void ExecCloseRangeTableRelations(EState *estate);
@@ -592,6 +602,7 @@ exec_rt_fetch(Index rti, EState *estate)
 }
 
 extern Relation ExecGetRangeTableRelation(EState *estate, Index rti);
+extern void ExecLockAppendPartRels(EState *estate, List *allpartrelids);
 extern void ExecInitResultRelation(EState *estate, ResultRelInfo *resultRelInfo,
 								   Index rti);
 

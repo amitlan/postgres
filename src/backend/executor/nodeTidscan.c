@@ -523,6 +523,8 @@ ExecInitTidScan(TidScan *node, EState *estate, int eflags)
 	 * open the scan relation
 	 */
 	currentRelation = ExecOpenScanRelation(estate, node->scan.scanrelid, eflags);
+	if (unlikely(currentRelation == NULL || !ExecPlanStillValid(estate)))
+		return tidstate;
 
 	tidstate->ss.ss_currentRelation = currentRelation;
 	tidstate->ss.ss_currentScanDesc = NULL; /* no heap scan here */

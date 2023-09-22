@@ -125,6 +125,9 @@ ExecInitSampleScan(SampleScan *node, EState *estate, int eflags)
 		ExecOpenScanRelation(estate,
 							 node->scan.scanrelid,
 							 eflags);
+	if (unlikely(scanstate->ss.ss_currentRelation == NULL ||
+				 !ExecPlanStillValid(estate)))
+		return scanstate;
 
 	/* we won't set up the HeapScanDesc till later */
 	scanstate->ss.ss_currentScanDesc = NULL;

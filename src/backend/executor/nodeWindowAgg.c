@@ -2461,6 +2461,8 @@ ExecInitWindowAgg(WindowAgg *node, EState *estate, int eflags)
 	 */
 	outerPlan = outerPlan(node);
 	outerPlanState(winstate) = ExecInitNode(outerPlan, estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return winstate;
 
 	/*
 	 * initialize source tuple type (which is also the tuple type that we'll

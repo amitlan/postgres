@@ -770,11 +770,15 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	 * open the scan relation
 	 */
 	currentRelation = ExecOpenScanRelation(estate, node->scan.scanrelid, eflags);
+	if (unlikely(currentRelation == NULL || !ExecPlanStillValid(estate)))
+		return scanstate;
 
 	/*
 	 * initialize child nodes
 	 */
 	outerPlanState(scanstate) = ExecInitNode(outerPlan(node), estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return scanstate;
 
 	/*
 	 * get the scan type from the relation descriptor.

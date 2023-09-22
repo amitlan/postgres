@@ -378,6 +378,8 @@ ExecInitTidRangeScan(TidRangeScan *node, EState *estate, int eflags)
 	 * open the scan relation
 	 */
 	currentRelation = ExecOpenScanRelation(estate, node->scan.scanrelid, eflags);
+	if (unlikely(currentRelation == NULL || !ExecPlanStillValid(estate)))
+		return tidrangestate;
 
 	tidrangestate->ss.ss_currentRelation = currentRelation;
 	tidrangestate->ss.ss_currentScanDesc = NULL;	/* no table scan here */
