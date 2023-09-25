@@ -52,6 +52,7 @@
 #include "miscadmin.h"
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/lmgr.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
@@ -601,6 +602,18 @@ ExecCheckPermissions(List *rangeTable, List *rteperminfos,
 			Assert(rte->rtekind == RTE_RELATION ||
 				   (rte->rtekind == RTE_SUBQUERY &&
 					rte->relkind == RELKIND_VIEW));
+
+			/*
+			 * Relations whose permissions need to be checked must already
+			 * have been locked by the parser or by GetCachedPlan() if a
+			 * cached plan is being executed.
+			 *
+			 * XXX Maybe we should we skip calling ExecCheckPermissions from
+			 * InitPlan in a parallel worker.
+			 */
+			Assert(IsParallelWorker() ||
+				   CheckRelationOidLockedByMe(rte->relid, AccessShareLock,
+											  true));
 
 			(void) getRTEPermissionInfo(rteperminfos, rte);
 			/* Many-to-one mapping not allowed */
