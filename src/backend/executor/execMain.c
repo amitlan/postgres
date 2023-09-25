@@ -604,6 +604,17 @@ ExecCheckPermissions(List *rangeTable, List *rteperminfos,
 				   (rte->rtekind == RTE_SUBQUERY &&
 					rte->relkind == RELKIND_VIEW));
 
+			/*
+			 * Relations whose permissions need to be checked must already
+			 * have been locked by the parser or by GetCachedPlan() if a
+			 * cached plan is being executed.
+			 *
+			 * XXX Maybe we should we skip calling ExecCheckPermissions from
+			 * InitPlan in a parallel worker.
+			 */
+			Assert(IsParallelWorker() ||
+				   CheckRelLockedByMe(rte->relid, AccessShareLock, true));
+
 			(void) getRTEPermissionInfo(rteperminfos, rte);
 			/* Many-to-one mapping not allowed */
 			Assert(!bms_is_member(rte->perminfoindex, indexset));
