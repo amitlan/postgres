@@ -950,7 +950,7 @@ ExecEndHashJoin(HashJoinState *node)
 	/*
 	 * Free hash table
 	 */
-	if (node->hj_HashTable)
+	if (node->hj_HashTable != NULL)
 	{
 		ExecHashTableDestroy(node->hj_HashTable);
 		node->hj_HashTable = NULL;
@@ -960,7 +960,9 @@ ExecEndHashJoin(HashJoinState *node)
 	 * clean up subtrees
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 	ExecEndNode(innerPlanState(node));
+	innerPlanState(node) = NULL;
 }
 
 /*

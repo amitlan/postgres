@@ -284,6 +284,7 @@ void
 ExecEndGatherMerge(GatherMergeState *node)
 {
 	ExecEndNode(outerPlanState(node));	/* let children clean up first */
+	outerPlanState(node) = NULL;
 	ExecShutdownGatherMerge(node);
 }
 

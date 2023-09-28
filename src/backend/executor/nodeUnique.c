@@ -168,6 +168,7 @@ void
 ExecEndUnique(UniqueState *node)
 {
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 

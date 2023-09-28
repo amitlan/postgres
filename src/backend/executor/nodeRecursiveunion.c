@@ -272,20 +272,36 @@ void
 ExecEndRecursiveUnion(RecursiveUnionState *node)
 {
 	/* Release tuplestores */
-	tuplestore_end(node->working_table);
-	tuplestore_end(node->intermediate_table);
+	if (node->working_table != NULL)
+	{
+		tuplestore_end(node->working_table);
+		node->working_table = NULL;
+	}
+	if (node->intermediate_table != NULL)
+	{
+		tuplestore_end(node->intermediate_table);
+		node->intermediate_table = NULL;
+	}
 
 	/* free subsidiary stuff including hashtable */
-	if (node->tempContext)
+	if (node->tempContext != NULL)
+	{
 		MemoryContextDelete(node->tempContext);
-	if (node->tableContext)
+		node->tempContext = NULL;
+	}
+	if (node->tableContext != NULL)
+	{
 		MemoryContextDelete(node->tableContext);
+		node->tableContext = NULL;
+	}
 
 	/*
 	 * close down subplans
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 	ExecEndNode(innerPlanState(node));
+	innerPlanState(node) = NULL;
 }
 
 /* ----------------------------------------------------------------

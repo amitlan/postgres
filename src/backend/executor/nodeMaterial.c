@@ -243,13 +243,16 @@ ExecEndMaterial(MaterialState *node)
 	 * Release tuplestore resources
 	 */
 	if (node->tuplestorestate != NULL)
+	{
 		tuplestore_end(node->tuplestorestate);
-	node->tuplestorestate = NULL;
+		node->tuplestorestate = NULL;
+	}
 
 	/*
 	 * shut down the subplan
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 /* ----------------------------------------------------------------

@@ -1128,12 +1128,17 @@ ExecEndMemoize(MemoizeState *node)
 	}
 
 	/* Remove the cache context */
-	MemoryContextDelete(node->tableContext);
+	if (node->tableContext != NULL)
+	{
+		MemoryContextDelete(node->tableContext);
+		node->tableContext = NULL;
+	}
 
 	/*
 	 * shut down the subplan
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 void
