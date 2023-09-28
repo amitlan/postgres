@@ -244,6 +244,7 @@ void
 ExecEndGather(GatherState *node)
 {
 	ExecEndNode(outerPlanState(node));	/* let children clean up first */
+	outerPlanState(node) = NULL;
 	ExecShutdownGather(node);
 }
 

@@ -625,8 +625,6 @@ ExecReScanBitmapHeapScan(BitmapHeapScanState *node)
 void
 ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 {
-	TableScanDesc scanDesc;
-
 	/*
 	 * When ending a parallel worker, copy the statistics gathered by the
 	 * worker back into shared memory so that it can be picked up by the main
@@ -651,37 +649,53 @@ ExecEndBitmapHeapScan(BitmapHeapScanState *node)
 	}
 
 	/*
-	 * extract information from the node
-	 */
-	scanDesc = node->ss.ss_currentScanDesc;
-
-	/*
 	 * close down subplans
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 
 	/*
 	 * release bitmaps and buffers if any
 	 */
-	if (node->tbmiterator)
+	if (node->tbmiterator != NULL)
+	{
 		tbm_end_iterate(node->tbmiterator);
-	if (node->prefetch_iterator)
+		node->tbmiterator = NULL;
+	}
+	if (node->prefetch_iterator != NULL)
+	{
 		tbm_end_iterate(node->prefetch_iterator);
-	if (node->tbm)
+		node->prefetch_iterator = NULL;
+	}
+	if (node->tbm != NULL)
+	{
 		tbm_free(node->tbm);
-	if (node->shared_tbmiterator)
+		node->tbm = NULL;
+	}
+	if (node->shared_tbmiterator != NULL)
+	{
 		tbm_end_shared_iterate(node->shared_tbmiterator);
-	if (node->shared_prefetch_iterator)
+		node->shared_tbmiterator = NULL;
+	}
+	if (node->shared_prefetch_iterator != NULL)
+	{
 		tbm_end_shared_iterate(node->shared_prefetch_iterator);
+		node->shared_prefetch_iterator = NULL;
+	}
 	if (node->pvmbuffer != InvalidBuffer)
+	{
 		ReleaseBuffer(node->pvmbuffer);
+		node->pvmbuffer = InvalidBuffer;
+	}
 
 	/*
-	 * close heap scan
+	 * close heap scan (no-op if we didn't start it)
 	 */
-	if (scanDesc)
-		table_endscan(scanDesc);
-
+	if (node->ss.ss_currentScanDesc != NULL)
+	{
+		table_endscan(node->ss.ss_currentScanDesc);
+		node->ss.ss_currentScanDesc = NULL;
+	}
 }
 
 /* ----------------------------------------------------------------

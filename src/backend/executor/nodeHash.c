@@ -412,13 +412,11 @@ ExecInitHash(Hash *node, EState *estate, int eflags)
 void
 ExecEndHash(HashState *node)
 {
-	PlanState  *outerPlan;
-
 	/*
 	 * shut down the subplan
 	 */
-	outerPlan = outerPlanState(node);
-	ExecEndNode(outerPlan);
+	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 

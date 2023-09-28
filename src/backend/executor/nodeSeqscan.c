@@ -183,18 +183,14 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 void
 ExecEndSeqScan(SeqScanState *node)
 {
-	TableScanDesc scanDesc;
-
 	/*
-	 * get information from node
+	 * close heap scan (no-op if we didn't start it)
 	 */
-	scanDesc = node->ss.ss_currentScanDesc;
-
-	/*
-	 * close heap scan
-	 */
-	if (scanDesc != NULL)
-		table_endscan(scanDesc);
+	if (node->ss.ss_currentScanDesc != NULL)
+	{
+		table_endscan(node->ss.ss_currentScanDesc);
+		node->ss.ss_currentScanDesc = NULL;
+	}
 }
 
 /* ----------------------------------------------------------------

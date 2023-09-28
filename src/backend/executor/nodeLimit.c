@@ -534,6 +534,7 @@ void
 ExecEndLimit(LimitState *node)
 {
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 

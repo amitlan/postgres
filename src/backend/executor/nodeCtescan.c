@@ -290,10 +290,11 @@ ExecEndCteScan(CteScanState *node)
 	/*
 	 * If I am the leader, free the tuplestore.
 	 */
-	if (node->leader == node)
+	if (node->leader != NULL && node->leader == node)
 	{
 		tuplestore_end(node->cte_table);
 		node->cte_table = NULL;
+		node->leader = NULL;
 	}
 }
 

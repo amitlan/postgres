@@ -331,6 +331,7 @@ ExecEndProjectSet(ProjectSetState *node)
 	 * shut down subplans
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 void
