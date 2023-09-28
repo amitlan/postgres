@@ -583,10 +583,14 @@ void
 ExecEndSetOp(SetOpState *node)
 {
 	/* free subsidiary stuff including hashtable */
-	if (node->tableContext)
+	if (node->tableContext != NULL)
+	{
 		MemoryContextDelete(node->tableContext);
+		node->tableContext = NULL;
+	}
 
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 

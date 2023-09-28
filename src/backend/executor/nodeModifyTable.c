@@ -4447,7 +4447,9 @@ ExecEndModifyTable(ModifyTableState *node)
 		for (j = 0; j < resultRelInfo->ri_NumSlotsInitialized; j++)
 		{
 			ExecDropSingleTupleTableSlot(resultRelInfo->ri_Slots[j]);
+			resultRelInfo->ri_Slots[j] = NULL;
 			ExecDropSingleTupleTableSlot(resultRelInfo->ri_PlanSlots[j]);
+			resultRelInfo->ri_PlanSlots[j] = NULL;
 		}
 	}
 
@@ -4455,12 +4457,16 @@ ExecEndModifyTable(ModifyTableState *node)
 	 * Close all the partitioned tables, leaf partitions, and their indices
 	 * and release the slot used for tuple routing, if set.
 	 */
-	if (node->mt_partition_tuple_routing)
+	if (node->mt_partition_tuple_routing != NULL)
 	{
 		ExecCleanupTupleRouting(node, node->mt_partition_tuple_routing);
+		node->mt_partition_tuple_routing = NULL;
 
-		if (node->mt_root_tuple_slot)
+		if (node->mt_root_tuple_slot != NULL)
+		{
 			ExecDropSingleTupleTableSlot(node->mt_root_tuple_slot);
+			node->mt_root_tuple_slot = NULL;
+		}
 	}
 
 	/*
@@ -4472,6 +4478,7 @@ ExecEndModifyTable(ModifyTableState *node)
 	 * shut down subplan
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 void

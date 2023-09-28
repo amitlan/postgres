@@ -368,7 +368,9 @@ ExecEndNestLoop(NestLoopState *node)
 	 * close down subplans
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 	ExecEndNode(innerPlanState(node));
+	innerPlanState(node) = NULL;
 
 	NL1_printf("ExecEndNestLoop: %s\n",
 			   "node processing ended");

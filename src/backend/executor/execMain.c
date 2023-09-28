@@ -3010,6 +3010,10 @@ EvalPlanQualEnd(EPQState *epqstate)
 	MemoryContext oldcontext;
 	ListCell   *l;
 
+	/* Nothing to do if no EvalPlanQualInit() was done to begin with. */
+	if (epqstate->parentestate == NULL)
+		return;
+
 	rtsize = epqstate->parentestate->es_range_table_size;
 
 	/*

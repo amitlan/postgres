@@ -192,8 +192,8 @@ ExecEndBitmapAnd(BitmapAndState *node)
 	 */
 	for (i = 0; i < nplans; i++)
 	{
-		if (bitmapplans[i])
-			ExecEndNode(bitmapplans[i]);
+		ExecEndNode(bitmapplans[i]);
+		bitmapplans[i] = NULL;
 	}
 }
 

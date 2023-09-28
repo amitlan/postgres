@@ -1079,8 +1079,16 @@ ExecEndIncrementalSort(IncrementalSortState *node)
 {
 	SO_printf("ExecEndIncrementalSort: shutting down sort node\n");
 
-	ExecDropSingleTupleTableSlot(node->group_pivot);
-	ExecDropSingleTupleTableSlot(node->transfer_tuple);
+	if (node->group_pivot != NULL)
+	{
+		ExecDropSingleTupleTableSlot(node->group_pivot);
+		node->group_pivot = NULL;
+	}
+	if (node->transfer_tuple != NULL)
+	{
+		ExecDropSingleTupleTableSlot(node->transfer_tuple);
+		node->transfer_tuple = NULL;
+	}
 
 	/*
 	 * Release tuplesort resources.
@@ -1100,6 +1108,7 @@ ExecEndIncrementalSort(IncrementalSortState *node)
 	 * Shut down the subplan.
 	 */
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 
 	SO_printf("ExecEndIncrementalSort: sort node shutdown\n");
 }

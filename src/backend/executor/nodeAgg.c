@@ -4304,7 +4304,6 @@ GetAggInitVal(Datum textInitVal, Oid transtype)
 void
 ExecEndAgg(AggState *node)
 {
-	PlanState  *outerPlan;
 	int			transno;
 	int			numGroupingSets = Max(node->maxsets, 1);
 	int			setno;
@@ -4314,7 +4313,7 @@ ExecEndAgg(AggState *node)
 	 * worker back into shared memory so that it can be picked up by the main
 	 * process to report in EXPLAIN ANALYZE.
 	 */
-	if (node->shared_info && IsParallelWorker())
+	if (node->shared_info != NULL && IsParallelWorker())
 	{
 		AggregateInstrumentation *si;
 
@@ -4327,10 +4326,16 @@ ExecEndAgg(AggState *node)
 
 	/* Make sure we have closed any open tuplesorts */
 
-	if (node->sort_in)
+	if (node->sort_in != NULL)
+	{
 		tuplesort_end(node->sort_in);
-	if (node->sort_out)
+		node->sort_in = NULL;
+	}
+	if (node->sort_out != NULL)
+	{
 		tuplesort_end(node->sort_out);
+		node->sort_out = NULL;
+	}
 
 	hashagg_reset_spill_state(node);
 
@@ -4346,19 +4351,25 @@ ExecEndAgg(AggState *node)
 
 		for (setno = 0; setno < numGroupingSets; setno++)
 		{
-			if (pertrans->sortstates[setno])
+			if (pertrans->sortstates[setno] != NULL)
 				tuplesort_end(pertrans->sortstates[setno]);
 		}
 	}
 
 	/* And ensure any agg shutdown callbacks have been called */
 	for (setno = 0; setno < numGroupingSets; setno++)
+	{
 		ReScanExprContext(node->aggcontexts[setno]);
-	if (node->hashcontext)
+		node->aggcontexts[setno] = NULL;
+	}
+	if (node->hashcontext != NULL)
+	{
 		ReScanExprContext(node->hashcontext);
+		node->hashcontext = NULL;
+	}
 
-	outerPlan = outerPlanState(node);
-	ExecEndNode(outerPlan);
+	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 void

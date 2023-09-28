@@ -387,6 +387,7 @@ ExecEndLockRows(LockRowsState *node)
 	/* We may have shut down EPQ already, but no harm in another call */
 	EvalPlanQualEnd(&node->lr_epqstate);
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 

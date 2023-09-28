@@ -333,7 +333,10 @@ ExecEndMergeAppend(MergeAppendState *node)
 	 * shut down each of the subscans
 	 */
 	for (i = 0; i < nplans; i++)
+	{
 		ExecEndNode(mergeplans[i]);
+		mergeplans[i] = NULL;
+	}
 }
 
 void

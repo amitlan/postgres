@@ -171,6 +171,7 @@ ExecEndSubqueryScan(SubqueryScanState *node)
 	 * close down subquery
 	 */
 	ExecEndNode(node->subplan);
+	node->subplan = NULL;
 }
 
 /* ----------------------------------------------------------------

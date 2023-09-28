@@ -470,8 +470,14 @@ ExecReScanTidScan(TidScanState *node)
 void
 ExecEndTidScan(TidScanState *node)
 {
-	if (node->ss.ss_currentScanDesc)
+	/*
+	 * close heap scan (no-op if we didn't start it)
+	 */
+	if (node->ss.ss_currentScanDesc != NULL)
+	{
 		table_endscan(node->ss.ss_currentScanDesc);
+		node->ss.ss_currentScanDesc = NULL;
+	}
 }
 
 /* ----------------------------------------------------------------

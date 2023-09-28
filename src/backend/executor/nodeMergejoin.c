@@ -1647,7 +1647,9 @@ ExecEndMergeJoin(MergeJoinState *node)
 	 * shut down the subplans
 	 */
 	ExecEndNode(innerPlanState(node));
+	innerPlanState(node) = NULL;
 	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 
 	MJ1_printf("ExecEndMergeJoin: %s\n",
 			   "node processing ended");

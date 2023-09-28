@@ -226,10 +226,8 @@ ExecInitGroup(Group *node, EState *estate, int eflags)
 void
 ExecEndGroup(GroupState *node)
 {
-	PlanState  *outerPlan;
-
-	outerPlan = outerPlanState(node);
-	ExecEndNode(outerPlan);
+	ExecEndNode(outerPlanState(node));
+	outerPlanState(node) = NULL;
 }
 
 void
