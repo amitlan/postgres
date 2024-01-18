@@ -1144,6 +1144,7 @@ typedef struct RangeTblEntry
 	 * Fields valid for a TableFunc RTE (else NULL):
 	 */
 	TableFunc  *tablefunc;
+	char	   *tablefunc_name;
 
 	/*
 	 * Fields valid for a values RTE (else NIL):
