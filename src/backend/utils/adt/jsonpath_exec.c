@@ -61,9 +61,11 @@
 
 #include "catalog/pg_collation.h"
 #include "catalog/pg_type.h"
+#include "executor/execExpr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/miscnodes.h"
+#include "nodes/nodeFuncs.h"
 #include "regex/regex.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
@@ -71,6 +73,8 @@
 #include "utils/float.h"
 #include "utils/formatting.h"
 #include "utils/jsonpath.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/timestamp.h"
 
 /*
@@ -153,6 +157,60 @@ typedef struct JsonValueListIterator
 	List	   *list;
 	ListCell   *next;
 } JsonValueListIterator;
+
+/* Structures for JSON_TABLE execution  */
+
+typedef enum JsonTablePlanStateType
+{
+	JSON_TABLE_SCAN_STATE = 0,
+	JSON_TABLE_JOIN_STATE,
+} JsonTablePlanStateType;
+
+typedef struct JsonTablePlanState
+{
+	JsonTablePlanStateType type;
+
+	struct JsonTablePlanState *parent;
+	struct JsonTablePlanState *nested;
+} JsonTablePlanState;
+
+typedef struct JsonTableScanState
+{
+	JsonTablePlanState plan;
+
+	MemoryContext mcxt;
+	JsonPath   *path;
+	List	   *args;
+	JsonValueList found;
+	JsonValueListIterator iter;
+	Datum		current;
+	int			ordinal;
+	bool		currentIsNull;
+	bool		outerJoin;
+	bool		errorOnError;
+	bool		advanceNested;
+	bool		reset;
+} JsonTableScanState;
+
+typedef struct JsonTableJoinState
+{
+	JsonTablePlanState plan;
+
+	JsonTablePlanState *left;
+	JsonTablePlanState *right;
+	bool		cross;
+	bool		advanceRight;
+} JsonTableJoinState;
+
+/* random number to identify JsonTableExecContext */
+#define JSON_TABLE_EXEC_CONTEXT_MAGIC		418352867
+
+typedef struct JsonTableExecContext
+{
+	int			magic;
+	JsonTableScanState **colexprscans;
+	JsonTableScanState *root;
+}			JsonTableExecContext;
 
 /* strict/lax flags is decomposed into four [un]wrap/error flags */
 #define jspStrictAbsenceOfErrors(cxt)	(!(cxt)->laxMode)
@@ -253,6 +311,7 @@ static JsonPathExecResult getArrayIndex(JsonPathExecContext *cxt,
 										JsonPathItem *jsp, JsonbValue *jb, int32 *index);
 static JsonBaseObjectInfo setBaseObject(JsonPathExecContext *cxt,
 										JsonbValue *jbv, int32 id);
+static void JsonValueListClear(JsonValueList *jvl);
 static void JsonValueListAppend(JsonValueList *jvl, JsonbValue *jbv);
 static int	JsonValueListLength(const JsonValueList *jvl);
 static bool JsonValueListIsEmpty(JsonValueList *jvl);
@@ -271,6 +330,32 @@ static int	compareDatetime(Datum val1, Oid typid1, Datum val2, Oid typid2,
 							bool useTz, bool *cast_error);
 static void checkTimezoneIsUsedForCast(bool useTz, const char *type1,
 									   const char *type2);
+
+
+static JsonTablePlanState *JsonTableInitPlanState(JsonTableExecContext * cxt,
+												  Node *plan,
+												  JsonTablePlanState *parent);
+static bool JsonTablePlanNextRow(JsonTablePlanState *state);
+static bool JsonTableScanNextRow(JsonTableScanState *scan);
+
+static void JsonTableInitOpaque(TableFuncScanState *state, int natts);
+static void JsonTableSetDocument(TableFuncScanState *state, Datum value);
+static bool JsonTableFetchRow(TableFuncScanState *state);
+static Datum JsonTableGetValue(TableFuncScanState *state, int colnum,
+							   Oid typid, int32 typmod, bool *isnull);
+static void JsonTableDestroyOpaque(TableFuncScanState *state);
+
+const TableFuncRoutine JsonbTableRoutine =
+{
+	JsonTableInitOpaque,
+	JsonTableSetDocument,
+	NULL,
+	NULL,
+	NULL,
+	JsonTableFetchRow,
+	JsonTableGetValue,
+	JsonTableDestroyOpaque
+};
 
 /****************** User interface to JsonPath executor ********************/
 
@@ -3384,6 +3469,13 @@ setBaseObject(JsonPathExecContext *cxt, JsonbValue *jbv, int32 id)
 }
 
 static void
+JsonValueListClear(JsonValueList *jvl)
+{
+	jvl->singleton = NULL;
+	jvl->list = NULL;
+}
+
+static void
 JsonValueListAppend(JsonValueList *jvl, JsonbValue *jbv)
 {
 	if (jvl->singleton)
@@ -3917,4 +4009,459 @@ JsonPathValue(Datum jb, JsonPath *jp, bool *empty, bool *error, List *vars)
 		return NULL;
 
 	return res;
+}
+
+/************************ JSON_TABLE functions ***************************/
+
+/*
+ * Returns private data from executor state. Ensure validity by check with
+ * MAGIC number.
+ */
+static inline JsonTableExecContext *
+GetJsonTableExecContext(TableFuncScanState *state, const char *fname)
+{
+	JsonTableExecContext *result;
+
+	if (!IsA(state, TableFuncScanState))
+		elog(ERROR, "%s called with invalid TableFuncScanState", fname);
+	result = (JsonTableExecContext *) state->opaque;
+	if (result->magic != JSON_TABLE_EXEC_CONTEXT_MAGIC)
+		elog(ERROR, "%s called with invalid TableFuncScanState", fname);
+
+	return result;
+}
+
+/* Recursively initialize JSON_TABLE scan / join state */
+static JsonTableJoinState *
+JsonTableInitJoinState(JsonTableExecContext * cxt, JsonTableSibling *plan,
+					   JsonTablePlanState *parent)
+{
+	JsonTableJoinState *join = palloc0(sizeof(*join));
+
+	join->plan.type = JSON_TABLE_JOIN_STATE;
+	/* parent and nested not set. */
+
+	join->cross = plan->cross;
+	join->left = JsonTableInitPlanState(cxt, plan->larg, parent);
+	join->right = JsonTableInitPlanState(cxt, plan->rarg, parent);
+
+	return join;
+}
+
+static JsonTableScanState *
+JsonTableInitScanState(JsonTableExecContext * cxt,
+					   JsonTablePlan *plan,
+					   JsonTablePlanState *parent,
+					   List *args, MemoryContext mcxt)
+{
+	JsonTableScanState *scan = palloc0(sizeof(*scan));
+	int			i;
+
+	scan->plan.type = JSON_TABLE_SCAN_STATE;
+	scan->plan.parent = parent;
+
+	scan->outerJoin = plan->outerJoin;
+	scan->errorOnError = plan->errorOnError;
+	scan->path = DatumGetJsonPathP(plan->path->value->constvalue);
+	scan->args = args;
+	scan->mcxt = AllocSetContextCreate(mcxt, "JsonTableExecContext",
+									   ALLOCSET_DEFAULT_SIZES);
+
+	/*
+	 * Set after settings scan->args and scan->mcxt, because the recursive
+	 * call wants to use those values.
+	 */
+	scan->plan.nested = plan->child ?
+		JsonTableInitPlanState(cxt, plan->child, (JsonTablePlanState *) scan) :
+		NULL;
+
+	scan->current = PointerGetDatum(NULL);
+	scan->currentIsNull = true;
+
+	for (i = plan->colMin; i <= plan->colMax; i++)
+		cxt->colexprscans[i] = scan;
+
+	return scan;
+}
+
+/* Recursively initialize JSON_TABLE scan state */
+static JsonTablePlanState *
+JsonTableInitPlanState(JsonTableExecContext * cxt, Node *plan,
+					   JsonTablePlanState *parent)
+{
+	JsonTablePlanState *state;
+
+	if (IsA(plan, JsonTableSibling))
+	{
+		JsonTableSibling *join = (JsonTableSibling *) plan;
+
+		state = (JsonTablePlanState *)
+			JsonTableInitJoinState(cxt, join, parent);
+	}
+	else
+	{
+		JsonTablePlan *scan = castNode(JsonTablePlan, plan);
+		JsonTableScanState *parent_scan = (JsonTableScanState *) parent;
+
+		Assert(parent_scan);
+		state = (JsonTablePlanState *)
+			JsonTableInitScanState(cxt, scan, parent, parent_scan->args,
+								   parent_scan->mcxt);
+	}
+
+	return state;
+}
+
+/*
+ * JsonTableInitOpaque
+ *		Fill in TableFuncScanState->opaque for JsonTable processor
+ */
+static void
+JsonTableInitOpaque(TableFuncScanState *state, int natts)
+{
+	JsonTableExecContext *cxt;
+	PlanState  *ps = &state->ss.ps;
+	TableFuncScan *tfs = castNode(TableFuncScan, ps->plan);
+	TableFunc  *tf = tfs->tablefunc;
+	JsonTablePlan *root = castNode(JsonTablePlan, tf->plan);
+	JsonExpr   *je = castNode(JsonExpr, tf->docexpr);
+	List	   *args = NIL;
+
+	cxt = palloc0(sizeof(JsonTableExecContext));
+	cxt->magic = JSON_TABLE_EXEC_CONTEXT_MAGIC;
+
+	if (state->passingvalexprs)
+	{
+		ListCell   *exprlc;
+		ListCell   *namelc;
+
+		Assert(list_length(state->passingvalexprs) ==
+			   list_length(je->passing_names));
+		forboth(exprlc, state->passingvalexprs,
+				namelc, je->passing_names)
+		{
+			ExprState  *state = lfirst_node(ExprState, exprlc);
+			String	   *name = lfirst_node(String, namelc);
+			JsonPathVariable *var = palloc(sizeof(*var));
+
+			var->name = pstrdup(name->sval);
+			var->typid = exprType((Node *) state->expr);
+			var->typmod = exprTypmod((Node *) state->expr);
+
+			/*
+			 * Evaluate the expression and save the value to be returned by
+			 * GetJsonPathVar().
+			 */
+			var->value = ExecEvalExpr(state, ps->ps_ExprContext,
+									  &var->isnull);
+
+			args = lappend(args, var);
+		}
+	}
+
+	cxt->colexprscans = palloc(sizeof(JsonTableScanState *) *
+							   list_length(tf->colvalexprs));
+
+	cxt->root = JsonTableInitScanState(cxt, root, NULL, args,
+									   CurrentMemoryContext);
+	state->opaque = cxt;
+}
+
+/* Reset scan iterator to the beginning of the item list */
+static void
+JsonTableRescan(JsonTableScanState *scan)
+{
+	JsonValueListInitIterator(&scan->found, &scan->iter);
+	scan->current = PointerGetDatum(NULL);
+	scan->currentIsNull = true;
+	scan->advanceNested = false;
+	scan->ordinal = 0;
+}
+
+/* Reset context item of a scan, execute JSON path and reset a scan */
+static void
+JsonTableResetContextItem(JsonTableScanState *scan, Datum item)
+{
+	MemoryContext oldcxt;
+	JsonPathExecResult res;
+	Jsonb	   *js = (Jsonb *) DatumGetJsonbP(item);
+
+	JsonValueListClear(&scan->found);
+
+	MemoryContextResetOnly(scan->mcxt);
+
+	oldcxt = MemoryContextSwitchTo(scan->mcxt);
+
+	res = executeJsonPath(scan->path, scan->args,
+						  GetJsonPathVar, CountJsonPathVars,
+						  js, scan->errorOnError, &scan->found,
+						  false /* FIXME */ );
+
+	MemoryContextSwitchTo(oldcxt);
+
+	if (jperIsError(res))
+	{
+		Assert(!scan->errorOnError);
+		JsonValueListClear(&scan->found);	/* EMPTY ON ERROR case */
+	}
+
+	JsonTableRescan(scan);
+}
+
+/*
+ * JsonTableSetDocument
+ *		Install the input document
+ */
+static void
+JsonTableSetDocument(TableFuncScanState *state, Datum value)
+{
+	JsonTableExecContext *cxt =
+		GetJsonTableExecContext(state, "JsonTableSetDocument");
+
+	JsonTableResetContextItem(cxt->root, value);
+}
+
+/* Recursively reset scan and its child nodes */
+static void
+JsonTableRescanRecursive(JsonTablePlanState *state)
+{
+	if (state->type == JSON_TABLE_JOIN_STATE)
+	{
+		JsonTableJoinState *join = (JsonTableJoinState *) state;
+
+		JsonTableRescanRecursive(join->left);
+		JsonTableRescanRecursive(join->right);
+		join->advanceRight = false;
+	}
+	else
+	{
+		JsonTableScanState *scan = (JsonTableScanState *) state;
+
+		Assert(state->type == JSON_TABLE_SCAN_STATE);
+		JsonTableRescan(scan);
+		if (scan->plan.nested)
+			JsonTableRescanRecursive(scan->plan.nested);
+	}
+}
+
+/*
+ * Fetch next row from a cross/union joined scan.
+ *
+ * Returns false at the end of a scan, true otherwise.
+ */
+static bool
+JsonTablePlanNextRow(JsonTablePlanState *state)
+{
+	JsonTableJoinState *join;
+
+	if (state->type == JSON_TABLE_SCAN_STATE)
+		return JsonTableScanNextRow((JsonTableScanState *) state);
+
+	join = (JsonTableJoinState *) state;
+	if (join->advanceRight)
+	{
+		/* fetch next inner row */
+		if (JsonTablePlanNextRow(join->right))
+			return true;
+
+		/* inner rows are exhausted */
+		if (join->cross)
+			join->advanceRight = false; /* next outer row */
+		else
+			return false;		/* end of scan */
+	}
+
+	while (!join->advanceRight)
+	{
+		/* fetch next outer row */
+		bool		more = JsonTablePlanNextRow(join->left);
+
+		if (join->cross)
+		{
+			if (!more)
+				return false;	/* end of scan */
+
+			JsonTableRescanRecursive(join->right);
+
+			if (!JsonTablePlanNextRow(join->right))
+				continue;		/* next outer row */
+
+			join->advanceRight = true;	/* next inner row */
+		}
+		else if (!more)
+		{
+			if (!JsonTablePlanNextRow(join->right))
+				return false;	/* end of scan */
+
+			join->advanceRight = true;	/* next inner row */
+		}
+
+		break;
+	}
+
+	return true;
+}
+
+/* Recursively set 'reset' flag of scan and its child nodes */
+static void
+JsonTablePlanReset(JsonTablePlanState *state)
+{
+	if (state->type == JSON_TABLE_JOIN_STATE)
+	{
+		JsonTableJoinState *join = (JsonTableJoinState *) state;
+
+		JsonTablePlanReset(join->left);
+		JsonTablePlanReset(join->right);
+		join->advanceRight = false;
+	}
+	else
+	{
+		JsonTableScanState *scan;
+
+		Assert(state->type == JSON_TABLE_SCAN_STATE);
+		scan = (JsonTableScanState *) state;
+		scan->reset = true;
+		scan->advanceNested = false;
+
+		if (scan->plan.nested)
+			JsonTablePlanReset(scan->plan.nested);
+	}
+}
+
+/*
+ * Fetch next row from a simple scan with outer/inner joined nested subscans.
+ *
+ * Returns false at the end of a scan, true otherwise.
+ */
+static bool
+JsonTableScanNextRow(JsonTableScanState *scan)
+{
+	/* reset context item if requested */
+	if (scan->reset)
+	{
+		JsonTableScanState *parent_scan =
+			(JsonTableScanState *) scan->plan.parent;
+
+		Assert(parent_scan && !parent_scan->currentIsNull);
+		JsonTableResetContextItem(scan, parent_scan->current);
+		scan->reset = false;
+	}
+
+	if (scan->advanceNested)
+	{
+		/* fetch next nested row */
+		scan->advanceNested = JsonTablePlanNextRow(scan->plan.nested);
+
+		if (scan->advanceNested)
+			return true;
+	}
+
+	for (;;)
+	{
+		/* fetch next row */
+		JsonbValue *jbv = JsonValueListNext(&scan->found, &scan->iter);
+		MemoryContext oldcxt;
+
+		if (!jbv)
+		{
+			scan->current = PointerGetDatum(NULL);
+			scan->currentIsNull = true;
+			return false;		/* end of scan */
+		}
+
+		/* set current row item */
+		oldcxt = MemoryContextSwitchTo(scan->mcxt);
+		scan->current = JsonbPGetDatum(JsonbValueToJsonb(jbv));
+		scan->currentIsNull = false;
+		MemoryContextSwitchTo(oldcxt);
+
+		scan->ordinal++;
+
+		if (!scan->plan.nested)
+			break;
+
+		JsonTablePlanReset(scan->plan.nested);
+
+		scan->advanceNested = JsonTablePlanNextRow(scan->plan.nested);
+
+		if (scan->advanceNested || scan->outerJoin)
+			break;
+	}
+
+	return true;
+}
+
+/*
+ * JsonTableFetchRow
+ *		Prepare the next "current" tuple for upcoming GetValue calls.
+ *		Returns false if no more rows can be returned.
+ */
+static bool
+JsonTableFetchRow(TableFuncScanState *state)
+{
+	JsonTableExecContext *cxt =
+		GetJsonTableExecContext(state, "JsonTableFetchRow");
+
+	return JsonTableScanNextRow(cxt->root);
+}
+
+/*
+ * JsonTableGetValue
+ *		Return the value for column number 'colnum' for the current row.
+ *
+ * This leaks memory, so be sure to reset often the context in which it's
+ * called.
+ */
+static Datum
+JsonTableGetValue(TableFuncScanState *state, int colnum,
+				  Oid typid, int32 typmod, bool *isnull)
+{
+	JsonTableExecContext *cxt =
+		GetJsonTableExecContext(state, "JsonTableGetValue");
+	ExprContext *econtext = state->ss.ps.ps_ExprContext;
+	ExprState  *estate = list_nth(state->colvalexprs, colnum);
+	JsonTableScanState *scan = cxt->colexprscans[colnum];
+	Datum		result;
+
+	if (scan->currentIsNull)	/* NULL from outer/union join */
+	{
+		result = (Datum) 0;
+		*isnull = true;
+	}
+	else if (estate)			/* regular column */
+	{
+		Datum		saved_caseValue = econtext->caseValue_datum;
+		bool		saved_caseIsNull = econtext->caseValue_isNull;
+
+		/* Pass the value for CaseTestExpr that may be present in colexpr */
+		econtext->caseValue_datum = scan->current;
+		econtext->caseValue_isNull = false;
+
+		result = ExecEvalExpr(estate, econtext, isnull);
+
+		econtext->caseValue_datum = saved_caseValue;
+		econtext->caseValue_isNull = saved_caseIsNull;
+	}
+	else
+	{
+		result = Int32GetDatum(scan->ordinal);	/* ordinality column */
+		*isnull = false;
+	}
+
+	return result;
+}
+
+/*
+ * JsonTableDestroyOpaque
+ */
+static void
+JsonTableDestroyOpaque(TableFuncScanState *state)
+{
+	JsonTableExecContext *cxt =
+		GetJsonTableExecContext(state, "JsonTableDestroyOpaque");
+
+	/* not valid anymore */
+	cxt->magic = 0;
+
+	state->opaque = NULL;
 }
