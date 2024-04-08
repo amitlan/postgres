@@ -8848,9 +8848,21 @@ get_json_expr_options(JsonExpr *jsexpr, deparse_context *context,
 			appendStringInfo(context->buf, " WITH CONDITIONAL WRAPPER");
 		else if (jsexpr->wrapper == JSW_UNCONDITIONAL)
 			appendStringInfo(context->buf, " WITH UNCONDITIONAL WRAPPER");
+		else if (jsexpr->wrapper == JSW_NONE || jsexpr->wrapper == JSW_UNSPEC)
+			/* The default */
+			appendStringInfo(context->buf, " WITHOUT WRAPPER");
 
 		if (jsexpr->omit_quotes)
 			appendStringInfo(context->buf, " OMIT QUOTES");
+
+		/*
+		 * Don't emit the default QUOTES behavior if the WRAPPER behavior is
+		 * incompatible.  transformJsonFuncExpr() only allows specifying
+		 * QUOTES behavior if WRAPPER behavior is either unspecified or is
+		 * WITHOUT WRAPPER.
+		 */
+		else if (jsexpr->wrapper == JSW_NONE || jsexpr->wrapper == JSW_UNSPEC)
+			appendStringInfo(context->buf, " KEEP QUOTES");
 	}
 
 	if (jsexpr->on_empty && jsexpr->on_empty->btype != default_behavior)
