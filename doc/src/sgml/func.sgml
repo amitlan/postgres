@@ -18691,9 +18691,12 @@ $.* ? (@ like_regex "^\\d+$")
      <row>
       <entry role="func_table_entry"><para role="func_signature">
         <indexterm><primary>json_exists</primary></indexterm>
-        <function>json_exists</function> (
-        <replaceable>context_item</replaceable>, <replaceable>path_expression</replaceable> <optional> <literal>PASSING</literal> { <replaceable>value</replaceable> <literal>AS</literal> <replaceable>varname</replaceable> } <optional>, ...</optional></optional>
-        <optional> { <literal>TRUE</literal> | <literal>FALSE</literal> |<literal> UNKNOWN</literal> | <literal>ERROR</literal> } <literal>ON ERROR</literal> </optional>)
+<synopsis>
+<function>JSON_EXISTS</function> (
+<replaceable>context_item</replaceable>, <replaceable>path_expression</replaceable>
+<optional> <literal>PASSING</literal> { <replaceable>value</replaceable> <literal>AS</literal> <replaceable>varname</replaceable> } <optional>, ...</optional></optional>
+<optional>{ <literal>TRUE</literal> | <literal>FALSE</literal> |<literal> UNKNOWN</literal> | <literal>ERROR</literal> } <literal>ON ERROR</literal> </optional>) <returnvalue>boolean</returnvalue>
+</synopsis>
        </para>
        <para>
         Returns true if the SQL/JSON <replaceable>path_expression</replaceable>
@@ -18713,15 +18716,15 @@ $.* ? (@ like_regex "^\\d+$")
         Examples:
        </para>
        <para>
-        <literal>select json_exists(jsonb '{"key1": [1,2,3]}', 'strict $.key1[*] ? (@ > 2)')</literal>
+        <literal>JSON_EXISTS(jsonb '{"key1": [1,2,3]}', 'strict $.key1[*] ? (@ > 2)')</literal>
         <returnvalue>t</returnvalue>
        </para>
        <para>
-        <literal>select json_exists(jsonb '{"a": [1,2,3]}', 'lax $.a[5]' ERROR ON ERROR)</literal>
+        <literal>JSON_EXISTS(jsonb '{"a": [1,2,3]}', 'lax $.a[5]' ERROR ON ERROR)</literal>
         <returnvalue>f</returnvalue>
        </para>
        <para>
-        <literal>select json_exists(jsonb '{"a": [1,2,3]}', 'strict $.a[5]' ERROR ON ERROR)</literal>
+        <literal>JSON_EXISTS(jsonb '{"a": [1,2,3]}', 'strict $.a[5]' ERROR ON ERROR)</literal>
         <returnvalue></returnvalue>
 <programlisting>
 ERROR:  jsonpath array subscript is out of bounds
@@ -18731,13 +18734,16 @@ ERROR:  jsonpath array subscript is out of bounds
      <row>
       <entry role="func_table_entry"><para role="func_signature">
         <indexterm><primary>json_query</primary></indexterm>
-        <function>json_query</function> (
-        <replaceable>context_item</replaceable>, <replaceable>path_expression</replaceable> <optional> <literal>PASSING</literal> { <replaceable>value</replaceable> <literal>AS</literal> <replaceable>varname</replaceable> } <optional>, ...</optional></optional>
-        <optional> <literal>RETURNING</literal> <replaceable>data_type</replaceable> <optional> <literal>FORMAT JSON</literal> <optional> <literal>ENCODING UTF8</literal> </optional> </optional> </optional>
-        <optional> { <literal>WITHOUT</literal> | <literal>WITH</literal> { <literal>CONDITIONAL</literal> | <optional><literal>UNCONDITIONAL</literal></optional> } } <optional> <literal>ARRAY</literal> </optional> <literal>WRAPPER</literal> </optional>
-        <optional> { <literal>KEEP</literal> | <literal>OMIT</literal> } <literal>QUOTES</literal> <optional> <literal>ON SCALAR STRING</literal> </optional> </optional>
-        <optional> { <literal>ERROR</literal> | <literal>NULL</literal> | <literal>EMPTY</literal> { <optional> <literal>ARRAY</literal> </optional> | <literal>OBJECT</literal> } | <literal>DEFAULT</literal> <replaceable>expression</replaceable> } <literal>ON EMPTY</literal> </optional>
-        <optional> { <literal>ERROR</literal> | <literal>NULL</literal> | <literal>EMPTY</literal> { <optional> <literal>ARRAY</literal> </optional> | <literal>OBJECT</literal> } | <literal>DEFAULT</literal> <replaceable>expression</replaceable> } <literal>ON ERROR</literal> </optional>)
+<synopsis>
+<function>JSON_QUERY</function> (
+<replaceable>context_item</replaceable>, <replaceable>path_expression</replaceable>
+<optional> <literal>PASSING</literal> { <replaceable>value</replaceable> <literal>AS</literal> <replaceable>varname</replaceable> } <optional>, ...</optional></optional>
+<optional> <literal>RETURNING</literal> <replaceable>data_type</replaceable> <optional> <literal>FORMAT JSON</literal> <optional> <literal>ENCODING UTF8</literal> </optional> </optional> </optional>
+<optional> { <literal>WITHOUT</literal> | <literal>WITH</literal> { <literal>CONDITIONAL</literal> | <optional><literal>UNCONDITIONAL</literal></optional> } } <optional> <literal>ARRAY</literal> </optional> <literal>WRAPPER</literal> </optional>
+<optional> { <literal>KEEP</literal> | <literal>OMIT</literal> } <literal>QUOTES</literal> <optional> <literal>ON SCALAR STRING</literal> </optional> </optional>
+<optional> { <literal>ERROR</literal> | <literal>NULL</literal> | <literal>EMPTY</literal> { <optional> <literal>ARRAY</literal> </optional> | <literal>OBJECT</literal> } | <literal>DEFAULT</literal> <replaceable>expression</replaceable> } <literal>ON EMPTY</literal> </optional>
+<optional> { <literal>ERROR</literal> | <literal>NULL</literal> | <literal>EMPTY</literal> { <optional> <literal>ARRAY</literal> </optional> | <literal>OBJECT</literal> } | <literal>DEFAULT</literal> <replaceable>expression</replaceable> } <literal>ON ERROR</literal> </optional>) <returnvalue>jsonb</returnvalue>
+</synopsis>
       </para>
        <para>
         Returns the result of applying the SQL/JSON
@@ -18746,6 +18752,7 @@ ERROR:  jsonpath array subscript is out of bounds
         <literal>PASSING</literal> <replaceable>value</replaceable>s.
        </para>
        <para>
+        Returns the result of applying the SQL/JSON
         If the path expression returns multiple SQL/JSON items, it might be
         necessary to wrap the result using the <literal>WITH WRAPPER</literal>
         clause to make it a valid JSON string.  If the wrapper is
@@ -18765,8 +18772,8 @@ ERROR:  jsonpath array subscript is out of bounds
        </para>
        <para>
         The <literal>RETURNING</literal> clause can be used to specify the
-        <replaceable>data_type</replaceable> of the result value.  By default,
-        the returned value will be of type <type>jsonb</type>.
+        <replaceable>data_type</replaceable> to coerce the result value to,
+        which is of type <type>jsonb</type> by default.
        </para>
        <para>
         The <literal>ON EMPTY</literal> clause specifies the behavior if
@@ -18777,9 +18784,9 @@ ERROR:  jsonpath array subscript is out of bounds
        <para>
         The <literal>ON ERROR</literal> clause specifies the
         behavior if an error occurs when evaluating
-        <replaceable>path_expression</replaceable>, including the operation to
-        coerce the result value to the output type, or during the execution of
-        <literal>ON EMPTY</literal> behavior (that is caused by empty result
+        <replaceable>path_expression</replaceable>, when coercing the result
+        value to the <literal>RETURNING</literal> type, or during the execution
+        of <literal>ON EMPTY</literal> behavior (that is caused by empty result
         of <replaceable>path_expression</replaceable> evaluation).  The default
         when <literal>ON ERROR</literal> is not specified is to return a null
         value.
@@ -18788,15 +18795,15 @@ ERROR:  jsonpath array subscript is out of bounds
         Examples:
        </para>
        <para>
-        <literal>select json_query(jsonb '[1,[2,3],null]', 'lax $[*][1]' WITH CONDITIONAL WRAPPER)</literal>
+        <literal>JSON_QUERY(jsonb '[1,[2,3],null]', 'lax $[*][1]' WITH CONDITIONAL WRAPPER)</literal>
         <returnvalue>[3]</returnvalue>
        </para>
        <para>
-        <literal>select json_query(jsonb '{"a": "[1, 2]"}', 'lax $.a' OMIT QUOTES);</literal>
+        <literal>JSON_QUERY(jsonb '{"a": "[1, 2]"}', 'lax $.a' OMIT QUOTES);</literal>
         <returnvalue>[1, 2]</returnvalue>
        </para>
        <para>
-        <literal>select json_query(jsonb '{"a": "[1, 2]"}', 'lax $.a' RETURNING int[] OMIT QUOTES ERROR ON ERROR);</literal>
+        <literal>JSON_QUERY(jsonb '{"a": "[1, 2]"}', 'lax $.a' RETURNING int[] OMIT QUOTES ERROR ON ERROR);</literal>
         <returnvalue></returnvalue>
 <programlisting>
 ERROR:  malformed array literal: "[1, 2]"
@@ -18808,12 +18815,14 @@ DETAIL:  Missing "]" after array dimensions.
      <row>
       <entry role="func_table_entry"><para role="func_signature">
         <indexterm><primary>json_value</primary></indexterm>
-        <function>json_value</function> (
-        <replaceable>context_item</replaceable>, <replaceable>path_expression</replaceable>
-        <optional> <literal>PASSING</literal> { <replaceable>value</replaceable> <literal>AS</literal> <replaceable>varname</replaceable> } <optional>, ...</optional></optional>
-        <optional> <literal>RETURNING</literal> <replaceable>data_type</replaceable> </optional>
-        <optional> { <literal>ERROR</literal> | <literal>NULL</literal> | <literal>DEFAULT</literal> <replaceable>expression</replaceable> } <literal>ON EMPTY</literal> </optional>
-        <optional> { <literal>ERROR</literal> | <literal>NULL</literal> | <literal>DEFAULT</literal> <replaceable>expression</replaceable> } <literal>ON ERROR</literal> </optional>)
+<synopsis>
+<function>JSON_VALUE</function> (
+<replaceable>context_item</replaceable>, <replaceable>path_expression</replaceable>
+<optional> <literal>PASSING</literal> { <replaceable>value</replaceable> <literal>AS</literal> <replaceable>varname</replaceable> } <optional>, ...</optional></optional>
+<optional> <literal>RETURNING</literal> <replaceable>data_type</replaceable> </optional>
+<optional> { <literal>ERROR</literal> | <literal>NULL</literal> | <literal>DEFAULT</literal> <replaceable>expression</replaceable> } <literal>ON EMPTY</literal> </optional>
+<optional> { <literal>ERROR</literal> | <literal>NULL</literal> | <literal>DEFAULT</literal> <replaceable>expression</replaceable> } <literal>ON ERROR</literal> </optional>) <returnvalue>text</returnvalue>
+</synopsis>
        </para>
        <para>
         Returns the result of applying the SQL/JSON
@@ -18825,36 +18834,36 @@ DETAIL:  Missing "]" after array dimensions.
         The extracted value must be a single <acronym>SQL/JSON</acronym>
         scalar item; an error is thrown if that's not the case.  If you expect
         that extracted value might be an object or an array, use the
-        <function>json_query</function> function instead.
+        <function>JSON_QUERY</function> function instead.
        </para>
        <para>
         The <literal>RETURNING</literal> clause can be used to specify the
-        <replaceable>data_type</replaceable> of the result value. By default,
-        the returned value will be of type <type>text</type>.
+        <replaceable>data_type</replaceable> to coerce the result value to,
+        which is of type <type>text</type> by default.
        </para>
        <para>
         The <literal>ON ERROR</literal> and <literal>ON EMPTY</literal>
         clauses have similar semantics as mentioned in the description of
-        <function>json_query</function>.
+        <function>JSON_QUERY</function>.
        </para>
        <para>
-        Note that scalar strings returned by <function>json_value</function>
+        Note that scalar strings returned by <function>JSON_VALUE</function>
         always have their quotes removed, equivalent to specifying
-        <literal>OMIT QUOTES</literal> in <function>json_query</function>.
+        <literal>OMIT QUOTES</literal> in <function>JSON_QUERY</function>.
        </para>
        <para>
         Examples:
        </para>
        <para>
-        <literal>select json_value(jsonb '"123.45"', '$' RETURNING float)</literal>
+        <literal>JSON_VALUE(jsonb '"123.45"', '$' RETURNING float)</literal>
         <returnvalue>123.45</returnvalue>
        </para>
        <para>
-        <literal>select json_value(jsonb '"03:04 2015-02-01"', '$.datetime("HH24:MI&nbsp;YYYY-MM-DD")' RETURNING date)</literal>
+        <literal>JSON_VALUE(jsonb '"03:04 2015-02-01"', '$.datetime("HH24:MI&nbsp;YYYY-MM-DD")' RETURNING date)</literal>
         <returnvalue>2015-02-01</returnvalue>
        </para>
        <para>
-        <literal>select json_value(jsonb '[1,2]', 'strict $[*]' DEFAULT 9 ON ERROR)</literal>
+        <literal>JSON_VALUE(jsonb '[1,2]', 'strict $[*]' DEFAULT 9 ON ERROR)</literal>
         <returnvalue>9</returnvalue>
       </para></entry>
      </row>
