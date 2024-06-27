@@ -431,6 +431,9 @@ overexplain_range_table(PlannedStmt *plannedstmt, ExplainState *es)
 			case RTE_GROUP:
 				kind = "group";
 				break;
+			case RTE_GRAPH_TABLE:
+				kind = "property graph";
+				break;
 		}
 
 		/* Begin group for this specific RTE */
