@@ -3709,11 +3709,9 @@ makeJsonConstructorExpr(ParseState *pstate, JsonConstructorType type,
 /*
  * Transform JSON_OBJECT() constructor.
  *
- * JSON_OBJECT() is transformed into json[b]_build_object[_ext]() call
- * depending on the output JSON format. The first two arguments of
- * json[b]_build_object_ext() are absent_on_null and check_unique.
- *
- * Then function call result is coerced to the target type.
+ * JSON_OBJECT() is transformed into a JsonConstructorExpr node of type
+ * JSCTOR_JSON_OBJECT.  The result is coerced to the target type given
+ * by ctor->output.
  */
 static Node *
 transformJsonObjectConstructor(ParseState *pstate, JsonObjectConstructor *ctor)
@@ -4004,11 +4002,9 @@ transformJsonArrayAgg(ParseState *pstate, JsonArrayAgg *agg)
 /*
  * Transform JSON_ARRAY() constructor.
  *
- * JSON_ARRAY() is transformed into json[b]_build_array[_ext]() call
- * depending on the output JSON format. The first argument of
- * json[b]_build_array_ext() is absent_on_null.
- *
- * Then function call result is coerced to the target type.
+ * JSON_ARRAY() is transformed into a JsonConstructorExpr node of type
+ * JSCTOR_JSON_ARRAY.  The result is coerced to the target type given
+ * by ctor->output.
  */
 static Node *
 transformJsonArrayConstructor(ParseState *pstate, JsonArrayConstructor *ctor)
