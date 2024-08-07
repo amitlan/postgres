@@ -507,7 +507,7 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 	}
 
 	/* run it (if needed) and produce output */
-	ExplainOnePlan(plan, into, es, queryString, params, queryEnv,
+	ExplainOnePlan(plan, NULL, into, es, queryString, params, queryEnv,
 				   &planduration, (es->buffers ? &bufusage : NULL),
 				   es->memory ? &mem_counters : NULL);
 }
@@ -615,7 +615,8 @@ ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
  * to call it.
  */
 void
-ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
+ExplainOnePlan(PlannedStmt *plannedstmt, CachedPlan *cplan,
+			   IntoClause *into, ExplainState *es,
 			   const char *queryString, ParamListInfo params,
 			   QueryEnvironment *queryEnv, const instr_time *planduration,
 			   const BufferUsage *bufusage,
@@ -671,7 +672,7 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 		dest = None_Receiver;
 
 	/* Create a QueryDesc for the query */
-	queryDesc = CreateQueryDesc(plannedstmt, queryString,
+	queryDesc = CreateQueryDesc(plannedstmt, cplan, queryString,
 								GetActiveSnapshot(), InvalidSnapshot,
 								dest, params, queryEnv, instrument_option);
 

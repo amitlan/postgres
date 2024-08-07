@@ -154,6 +154,9 @@ static Plan *set_append_references(PlannerInfo *root,
 static Plan *set_mergeappend_references(PlannerInfo *root,
 										MergeAppend *mplan,
 										int rtoffset);
+static void set_part_prune_references(PartitionPruneInfo *pinfo,
+									  PlannerGlobal *glob,
+									  int rtoffset);
 static void set_hash_references(PlannerInfo *root, Plan *plan, int rtoffset);
 static Relids offset_relid_set(Relids relids, int rtoffset);
 static Node *fix_scan_expr(PlannerInfo *root, Node *node,
@@ -1783,20 +1786,8 @@ set_append_references(PlannerInfo *root,
 	aplan->apprelids = offset_relid_set(aplan->apprelids, rtoffset);
 
 	if (aplan->part_prune_info)
-	{
-		foreach(l, aplan->part_prune_info->prune_infos)
-		{
-			List	   *prune_infos = lfirst(l);
-			ListCell   *l2;
-
-			foreach(l2, prune_infos)
-			{
-				PartitionedRelPruneInfo *pinfo = lfirst(l2);
-
-				pinfo->rtindex += rtoffset;
-			}
-		}
-	}
+		set_part_prune_references(aplan->part_prune_info, root->glob,
+								  rtoffset);
 
 	/* We don't need to recurse to lefttree or righttree ... */
 	Assert(aplan->plan.lefttree == NULL);
@@ -1859,26 +1850,41 @@ set_mergeappend_references(PlannerInfo *root,
 	mplan->apprelids = offset_relid_set(mplan->apprelids, rtoffset);
 
 	if (mplan->part_prune_info)
-	{
-		foreach(l, mplan->part_prune_info->prune_infos)
-		{
-			List	   *prune_infos = lfirst(l);
-			ListCell   *l2;
-
-			foreach(l2, prune_infos)
-			{
-				PartitionedRelPruneInfo *pinfo = lfirst(l2);
-
-				pinfo->rtindex += rtoffset;
-			}
-		}
-	}
+		set_part_prune_references(mplan->part_prune_info, root->glob,
+								  rtoffset);
 
 	/* We don't need to recurse to lefttree or righttree ... */
 	Assert(mplan->plan.lefttree == NULL);
 	Assert(mplan->plan.righttree == NULL);
 
 	return (Plan *) mplan;
+}
+
+/*
+ * Updates RT indexes in PartitionedRelPruneInfos contained in pinfo and adds
+ * the RT indexes of "prunable" relations into glob->prunableRelids.
+ */
+static void
+set_part_prune_references(PartitionPruneInfo *pinfo, PlannerGlobal *glob,
+						  int rtoffset)
+{
+	ListCell   *l;
+
+	foreach(l, pinfo->prune_infos)
+	{
+		List	   *prune_infos = lfirst(l);
+		ListCell   *l2;
+
+		foreach(l2, prune_infos)
+		{
+			PartitionedRelPruneInfo *prelinfo = lfirst(l2);
+
+			prelinfo->rtindex += rtoffset;
+			if (prelinfo->initial_pruning_steps != NIL)
+				glob->prunableRelids = bms_add_members(glob->prunableRelids,
+													   prelinfo->present_part_rtis);
+		}
+	}
 }
 
 /*

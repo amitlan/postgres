@@ -42,6 +42,7 @@
 #include "storage/condition_variable.h"
 #include "utils/hsearch.h"
 #include "utils/queryenvironment.h"
+#include "utils/plancache.h"
 #include "utils/reltrigger.h"
 #include "utils/sharedtuplestore.h"
 #include "utils/snapshot.h"
@@ -633,6 +634,7 @@ typedef struct EState
 										 * ExecRowMarks, or NULL if none */
 	List	   *es_rteperminfos;	/* List of RTEPermissionInfo */
 	PlannedStmt *es_plannedstmt;	/* link to top of plan tree */
+	CachedPlan *es_cachedplan;	/* CachedPlan supplying the plannedstmt */
 	const char *es_sourceText;	/* Source text from QueryDesc */
 
 	JunkFilter *es_junkFilter;	/* top-level junk filter, if any */

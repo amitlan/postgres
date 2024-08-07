@@ -52,6 +52,7 @@
 #include "miscadmin.h"
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/lmgr.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
@@ -597,6 +598,21 @@ ExecCheckPermissions(List *rangeTable, List *rteperminfos,
 				   (rte->rtekind == RTE_SUBQUERY &&
 					rte->relkind == RELKIND_VIEW));
 
+			/*
+			 * Ensure that we have at least an AccessShareLock on relations
+			 * whose permissions need to be checked.
+			 *
+			 * Skip this check in a parallel worker because locks won't be
+			 * taken until ExecInitNode() performs plan initialization.
+			 *
+			 * XXX: ExecCheckPermissions() in a parallel worker may be
+			 * redundant with the checks done in the leader process, so this
+			 * should be reviewed to ensure it’s necessary.
+			 */
+			Assert(IsParallelWorker() ||
+				   CheckRelationOidLockedByMe(rte->relid, AccessShareLock,
+											  true));
+
 			(void) getRTEPermissionInfo(rteperminfos, rte);
 			/* Many-to-one mapping not allowed */
 			Assert(!bms_is_member(rte->perminfoindex, indexset));
@@ -829,6 +845,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 {
 	CmdType		operation = queryDesc->operation;
 	PlannedStmt *plannedstmt = queryDesc->plannedstmt;
+	CachedPlan *cachedplan = queryDesc->cplan;
 	Plan	   *plan = plannedstmt->planTree;
 	List	   *rangeTable = plannedstmt->rtable;
 	EState	   *estate = queryDesc->estate;
@@ -848,6 +865,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos);
 
 	estate->es_plannedstmt = plannedstmt;
+	estate->es_cachedplan = cachedplan;
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.

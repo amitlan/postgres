@@ -634,6 +634,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		PartitionedRelPruneInfo *pinfo = lfirst(lc);
 		RelOptInfo *subpart = find_base_rel(root, pinfo->rtindex);
 		Bitmapset  *present_parts;
+		Bitmapset  *present_part_rtis;
 		int			nparts = subpart->nparts;
 		int		   *subplan_map;
 		int		   *subpart_map;
@@ -650,7 +651,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		subpart_map = (int *) palloc(nparts * sizeof(int));
 		memset(subpart_map, -1, nparts * sizeof(int));
 		relid_map = (Oid *) palloc0(nparts * sizeof(Oid));
-		present_parts = NULL;
+		present_parts = present_part_rtis = NULL;
 
 		i = -1;
 		while ((i = bms_next_member(subpart->live_parts, i)) >= 0)
@@ -664,15 +665,35 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 			subplan_map[i] = subplanidx = relid_subplan_map[partrel->relid] - 1;
 			subpart_map[i] = subpartidx = relid_subpart_map[partrel->relid] - 1;
 			relid_map[i] = planner_rt_fetch(partrel->relid, root)->relid;
+
+			/*
+			 * Track the RT indexes of partitions to ensure they are included
+			 * in the prunableRelids set of relations that are locked during
+			 * execution. This ensures that if the plan is cached, these
+			 * partitions are locked when the plan is reused.
+			 *
+			 * Partitions without a subplan and sub-partitioned partitions
+			 * where none of the sub-partitions have a subplan due to
+			 * constraint exclusion are not included in this set. Instead,
+			 * they are added to the unprunableRelids set, and the relations
+			 * in this set are locked by AcquireExecutorLocks() before
+			 * executing a cached plan.
+			 */
 			if (subplanidx >= 0)
 			{
 				present_parts = bms_add_member(present_parts, i);
+				present_part_rtis = bms_add_member(present_part_rtis,
+												   partrel->relid);
 
 				/* Record finding this subplan  */
 				subplansfound = bms_add_member(subplansfound, subplanidx);
 			}
 			else if (subpartidx >= 0)
+			{
 				present_parts = bms_add_member(present_parts, i);
+				present_part_rtis = bms_add_member(present_part_rtis,
+												   partrel->relid);
+			}
 		}
 
 		/*
@@ -684,6 +705,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 
 		/* Record the maps and other information. */
 		pinfo->present_parts = present_parts;
+		pinfo->present_part_rtis = present_part_rtis;
 		pinfo->nparts = nparts;
 		pinfo->subplan_map = subplan_map;
 		pinfo->subpart_map = subpart_map;

@@ -71,6 +71,10 @@ typedef struct PlannedStmt
 
 	List	   *rtable;			/* list of RangeTblEntry nodes */
 
+	Bitmapset  *unprunableRelids;	/* RT indexes of relations that are not
+									 * subject to runtime pruning; for
+									 * AcquireExecutorLocks() */
+
 	List	   *permInfos;		/* list of RTEPermissionInfo nodes for rtable
 								 * entries needing one */
 
@@ -1458,6 +1462,13 @@ typedef struct PartitionedRelPruneInfo
 
 	/* Indexes of all partitions which subplans or subparts are present for */
 	Bitmapset  *present_parts;
+
+	/*
+	 * RT indexes of all partitions which subplans or subparts are present
+	 * for; only used during planning to help in the construction of
+	 * PlannerGlobal.prunableRelids.
+	 */
+	Bitmapset  *present_part_rtis;
 
 	/* Length of the following arrays: */
 	int			nparts;

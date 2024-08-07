@@ -2113,7 +2113,6 @@ get_rel_relam(Oid relid)
 	return result;
 }
 
-
 /*				---------- TRANSFORM CACHE ----------						 */
 
 Oid
