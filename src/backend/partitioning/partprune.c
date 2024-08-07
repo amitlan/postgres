@@ -634,6 +634,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		PartitionedRelPruneInfo *pinfo = lfirst(lc);
 		RelOptInfo *subpart = find_base_rel(root, pinfo->rtindex);
 		Bitmapset  *present_parts;
+		Bitmapset  *present_part_rtis;
 		int			nparts = subpart->nparts;
 		int		   *subplan_map;
 		int		   *subpart_map;
@@ -650,7 +651,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		subpart_map = (int *) palloc(nparts * sizeof(int));
 		memset(subpart_map, -1, nparts * sizeof(int));
 		relid_map = (Oid *) palloc0(nparts * sizeof(Oid));
-		present_parts = NULL;
+		present_parts = present_part_rtis = NULL;
 
 		i = -1;
 		while ((i = bms_next_member(subpart->live_parts, i)) >= 0)
@@ -667,12 +668,16 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 			if (subplanidx >= 0)
 			{
 				present_parts = bms_add_member(present_parts, i);
+				present_part_rtis = bms_add_member(present_part_rtis, partrel->relid);
 
 				/* Record finding this subplan  */
 				subplansfound = bms_add_member(subplansfound, subplanidx);
 			}
 			else if (subpartidx >= 0)
+			{
 				present_parts = bms_add_member(present_parts, i);
+				present_part_rtis = bms_add_member(present_part_rtis, partrel->relid);
+			}
 		}
 
 		/*
@@ -684,6 +689,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 
 		/* Record the maps and other information. */
 		pinfo->present_parts = present_parts;
+		pinfo->present_part_rtis = present_part_rtis;
 		pinfo->nparts = nparts;
 		pinfo->subplan_map = subplan_map;
 		pinfo->subpart_map = subpart_map;
