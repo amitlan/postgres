@@ -834,6 +834,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 {
 	CmdType		operation = queryDesc->operation;
 	PlannedStmt *plannedstmt = queryDesc->plannedstmt;
+	CachedPlan *cachedplan = queryDesc->cachedplan;
 	Plan	   *plan = plannedstmt->planTree;
 	List	   *rangeTable = plannedstmt->rtable;
 	EState	   *estate = queryDesc->estate;
@@ -853,6 +854,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos);
 
 	estate->es_plannedstmt = plannedstmt;
+	estate->es_cachedplan = cachedplan;
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.
@@ -1402,7 +1404,7 @@ ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo)
 
 			/*
 			 * All ancestors up to the root target relation must have been
-			 * locked by the planner or AcquireExecutorLocks().
+			 * locked by the planner or the executor.
 			 */
 			ancRel = table_open(ancOid, NoLock);
 			rInfo = makeNode(ResultRelInfo);

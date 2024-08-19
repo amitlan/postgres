@@ -71,6 +71,10 @@ typedef struct PlannedStmt
 
 	List	   *rtable;			/* list of RangeTblEntry nodes */
 
+	Bitmapset  *unprunableRelids;	/* RT indexes of relations that are not
+									 * subject to runtime pruning; for
+									 * AcquireExecutorLocks() */
+
 	List	   *permInfos;		/* list of RTEPermissionInfo nodes for rtable
 								 * entries needing one */
 

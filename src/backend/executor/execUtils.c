@@ -752,6 +752,16 @@ ExecInitRangeTable(EState *estate, List *rangeTable, List *permInfos)
 	estate->es_rowmarks = NULL;
 }
 
+static bool
+ExecShouldLockRelation(EState *estate, Index rtindex)
+{
+	if (estate->es_cachedplan == NULL ||
+		bms_is_member(rtindex, estate->es_plannedstmt->unprunableRelids))
+		return false;
+
+	return CachedPlanRequiresLocking(estate->es_cachedplan);
+}
+
 /*
  * ExecGetRangeTableRelation
  *		Open the Relation for a range table entry, if not already done
@@ -773,7 +783,7 @@ ExecGetRangeTableRelation(EState *estate, Index rti)
 
 		Assert(rte->rtekind == RTE_RELATION);
 
-		if (!IsParallelWorker())
+		if (!IsParallelWorker() && !ExecShouldLockRelation(estate, rti))
 		{
 			/*
 			 * In a normal query, we should already have the appropriate lock,
@@ -789,9 +799,17 @@ ExecGetRangeTableRelation(EState *estate, Index rti)
 		else
 		{
 			/*
+			 * Lock relation either if we are a parallel worker or if
+			 * ExecShouldLockRelation() says we should.
+			 *
 			 * If we are a parallel worker, we need to obtain our own local
 			 * lock on the relation.  This ensures sane behavior in case the
 			 * parent process exits before we do.
+			 *
+			 * ExecShouldLockRelation() would return true if the RT index is
+			 * that of a prunable relation and we're running a cached generic
+			 * plan.  AcquireExecutorLocks() of plancache.c would have locked
+			 * only the unprunable relations in the plan tree.
 			 */
 			rel = table_open(rte->relid, rte->rellockmode);
 		}
