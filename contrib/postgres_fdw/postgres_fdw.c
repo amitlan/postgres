@@ -2144,7 +2144,11 @@ postgresEndForeignModify(EState *estate,
 {
 	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
 
-	/* If fmstate is NULL, we are in EXPLAIN; nothing to do */
+	/*
+	 * fmstate could be NULL under two conditions: during an EXPLAIN
+	 * operation or if BeginForeignModify() hasn't been invoked.
+	 * In either case, no action is required.
+	 */
 	if (fmstate == NULL)
 		return;
 
@@ -2650,8 +2654,9 @@ postgresBeginDirectModify(ForeignScanState *node, int eflags)
 {
 	ForeignScan *fsplan = (ForeignScan *) node->ss.ps.plan;
 	EState	   *estate = node->ss.ps.state;
+	Relation	rel = node->ss.ss_currentRelation;
 	PgFdwDirectModifyState *dmstate;
-	Index		rtindex;
+	Index		rtindex = node->resultRelInfo->ri_RangeTableIndex;
 	Oid			userid;
 	ForeignTable *table;
 	UserMapping *user;
@@ -2664,23 +2669,31 @@ postgresBeginDirectModify(ForeignScanState *node, int eflags)
 		return;
 
 	/*
+	 * Open the foreign table using the RT index given in the ResultRelInfo if
+	 * the ScanState doesn't provide it.  If the plan becomes invalid as a
+	 * result of taking a lock in ExecOpenScanRelation(), do nothing, in which
+	 * case node->fdw_state remains NULL.
+	 */
+	if (rel == NULL)
+	{
+		Assert(fsplan->scan.scanrelid == 0);
+		rel = ExecOpenScanRelation(estate, rtindex, eflags);
+		if (unlikely(rel == NULL || !ExecPlanStillValid(estate)))
+			return;
+	}
+
+	/*
 	 * We'll save private state in node->fdw_state.
 	 */
 	dmstate = (PgFdwDirectModifyState *) palloc0(sizeof(PgFdwDirectModifyState));
 	node->fdw_state = (void *) dmstate;
+	dmstate->rel = rel;
 
 	/*
 	 * Identify which user to do the remote access as.  This should match what
 	 * ExecCheckPermissions() does.
 	 */
 	userid = OidIsValid(fsplan->checkAsUser) ? fsplan->checkAsUser : GetUserId();
-
-	/* Get info about foreign table. */
-	rtindex = node->resultRelInfo->ri_RangeTableIndex;
-	if (fsplan->scan.scanrelid == 0)
-		dmstate->rel = ExecOpenScanRelation(estate, rtindex, eflags);
-	else
-		dmstate->rel = node->ss.ss_currentRelation;
 	table = GetForeignTable(RelationGetRelid(dmstate->rel));
 	user = GetUserMapping(userid, table->serverid);
 
@@ -2811,7 +2824,10 @@ postgresEndDirectModify(ForeignScanState *node)
 {
 	PgFdwDirectModifyState *dmstate = (PgFdwDirectModifyState *) node->fdw_state;
 
-	/* if dmstate is NULL, we are in EXPLAIN; nothing to do */
+	/*
+	 * Nothing to do if dmstate is NULL, either because we are in EXPLAIN or
+	 * dmstate wasn't initialized due to aborted plan initialization.
+	 */
 	if (dmstate == NULL)
 		return;
 

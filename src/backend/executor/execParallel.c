@@ -1263,9 +1263,7 @@ ExecParallelGetQueryDesc(shm_toc *toc, DestReceiver *receiver,
 	 * if it should take locks on certain relations, but paraller workers
 	 * always take locks anyway.
 	 */
-	return CreateQueryDesc(pstmt,
-						   NULL,
-						   queryString,
+	return CreateQueryDesc(pstmt, NULL, queryString,
 						   GetActiveSnapshot(), InvalidSnapshot,
 						   receiver, paramLI, NULL, instrument_options);
 }

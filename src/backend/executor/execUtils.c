@@ -146,6 +146,7 @@ CreateExecutorState(void)
 	estate->es_top_eflags = 0;
 	estate->es_instrument = 0;
 	estate->es_finished = false;
+	estate->es_aborted = false;
 
 	estate->es_exprcontexts = NIL;
 
@@ -691,6 +692,8 @@ ExecRelationIsTargetRelation(EState *estate, Index scanrelid)
  *
  *		Open the heap relation to be scanned by a base-level scan plan node.
  *		This should be called during the node's ExecInit routine.
+ *
+ *		NULL is returned if the relation is found to have been dropped.
  * ----------------------------------------------------------------
  */
 Relation
@@ -700,6 +703,8 @@ ExecOpenScanRelation(EState *estate, Index scanrelid, int eflags)
 
 	/* Open the relation. */
 	rel = ExecGetRangeTableRelation(estate, scanrelid);
+	if (unlikely(rel == NULL || !ExecPlanStillValid(estate)))
+		return rel;
 
 	/*
 	 * Complain if we're attempting a scan of an unscannable relation, except
@@ -713,6 +718,26 @@ ExecOpenScanRelation(EState *estate, Index scanrelid, int eflags)
 				 errmsg("materialized view \"%s\" has not been populated",
 						RelationGetRelationName(rel)),
 				 errhint("Use the REFRESH MATERIALIZED VIEW command.")));
+
+	return rel;
+}
+
+/* ----------------------------------------------------------------
+ *		ExecOpenScanIndexRelation
+ *
+ *		Open the index relation to be scanned by an index scan plan node.
+ *		This should be called during the node's ExecInit routine.
+ * ----------------------------------------------------------------
+ */
+Relation
+ExecOpenScanIndexRelation(EState *estate, Oid indexid, int lockmode)
+{
+	Relation	rel;
+
+	/* Open the index. */
+	rel = index_open(indexid, lockmode);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		elog(DEBUG2, "CachedPlan invalidated on locking index %u", indexid);
 
 	return rel;
 }
@@ -776,8 +801,12 @@ ExecShouldLockRelation(EState *estate, Index rtindex)
  * ExecGetRangeTableRelation
  *		Open the Relation for a range table entry, if not already done
  *
- * The Relations will be closed again in ExecEndPlan().
+ * The Relations will be closed in ExecEndPlan().
+ *
+ * The returned value may be NULL if the relation is a prunable relation
+ * that has not been locked and may have been concurrently dropped.
  */
+
 Relation
 ExecGetRangeTableRelation(EState *estate, Index rti)
 {
@@ -820,8 +849,14 @@ ExecGetRangeTableRelation(EState *estate, Index rti)
 			 * that of a prunable relation and we're running a cached generic
 			 * plan.  AcquireExecutorLocks() of plancache.c would have locked
 			 * only the unprunable relations in the plan tree.
+			 *
+			 * Note that we use try_table_open() here, because without a lock
+			 * held on the relation, it may have disappeared from under us.
 			 */
-			rel = table_open(rte->relid, rte->rellockmode);
+			rel = try_table_open(rte->relid, rte->rellockmode);
+			if (unlikely(!ExecPlanStillValid(estate)))
+				elog(DEBUG2, "CachedPlan invalidated on locking relation %u",
+					 rte->relid);
 		}
 
 		estate->es_relations[rti - 1] = rel;
@@ -845,6 +880,9 @@ ExecInitResultRelation(EState *estate, ResultRelInfo *resultRelInfo,
 	Relation	resultRelationDesc;
 
 	resultRelationDesc = ExecGetRangeTableRelation(estate, rti);
+	if (unlikely(resultRelationDesc == NULL ||
+				 !ExecPlanStillValid(estate)))
+		return;
 	InitResultRelInfo(resultRelInfo,
 					  resultRelationDesc,
 					  rti,

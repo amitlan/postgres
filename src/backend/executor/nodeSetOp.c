@@ -528,6 +528,8 @@ ExecInitSetOp(SetOp *node, EState *estate, int eflags)
 	if (node->strategy == SETOP_HASHED)
 		eflags &= ~EXEC_FLAG_REWIND;
 	outerPlanState(setopstate) = ExecInitNode(outerPlan(node), estate, eflags);
+	if (unlikely(!ExecPlanStillValid(estate)))
+		return setopstate;
 	outerDesc = ExecGetResultType(outerPlanState(setopstate));
 
 	/*

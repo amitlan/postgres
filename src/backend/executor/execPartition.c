@@ -1794,6 +1794,9 @@ adjust_partition_colnos_using_map(List *colnos, AttrMap *attrMap)
  * If subplans are indeed pruned, subplan_map arrays contained in the returned
  * PartitionPruneState are re-sequenced to not count those, though only if the
  * maps will be needed for subsequent execution pruning passes.
+ *
+ * Returns NULL if the plan has become invalid after taking the locks to
+ * create the PartitionPruneState in CreatePartitionPruneState().
  */
 PartitionPruneState *
 ExecInitPartitionPruning(PlanState *planstate,
@@ -1809,6 +1812,8 @@ ExecInitPartitionPruning(PlanState *planstate,
 
 	/* Create the working data structure for pruning */
 	prunestate = CreatePartitionPruneState(planstate, pruneinfo);
+	if (!ExecPlanStillValid(estate))
+		return NULL;
 
 	/*
 	 * Perform an initial partition prune pass, if required.
@@ -1860,6 +1865,9 @@ ExecInitPartitionPruning(PlanState *planstate,
  * stored in each PartitionedRelPruningData can be re-used each time we
  * re-evaluate which partitions match the pruning steps provided in each
  * PartitionedRelPruneInfo.
+ *
+ * Returns NULL if the plan has become invalid after taking a lock to create
+ * a PartitionedRelPruningData.
  */
 static PartitionPruneState *
 CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
@@ -1935,6 +1943,8 @@ CreatePartitionPruneState(PlanState *planstate, PartitionPruneInfo *pruneinfo)
 			 * duration of this executor run.
 			 */
 			partrel = ExecGetRangeTableRelation(estate, pinfo->rtindex);
+			if (unlikely(partrel == NULL || !ExecPlanStillValid(estate)))
+				return NULL;
 			partkey = RelationGetPartitionKey(partrel);
 			partdesc = PartitionDirectoryLookup(estate->es_partition_directory,
 												partrel);
