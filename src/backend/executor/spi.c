@@ -70,7 +70,8 @@ static int	_SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 static ParamListInfo _SPI_convert_params(int nargs, Oid *argtypes,
 										 Datum *Values, const char *Nulls);
 
-static int	_SPI_pquery(QueryDesc *queryDesc, bool fire_triggers, uint64 tcount);
+static int	_SPI_pquery(QueryDesc *queryDesc, bool fire_triggers, uint64 tcount,
+						CachedPlanSource *plansource, int query_index);
 
 static void _SPI_error_callback(void *arg);
 
@@ -1682,7 +1683,8 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 					  query_string,
 					  plansource->commandTag,
 					  stmt_list,
-					  cplan);
+					  cplan,
+					  plansource);
 
 	/*
 	 * Set up options for portal.  Default SCROLL type is chosen the same way
@@ -2494,6 +2496,7 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 		CachedPlanSource *plansource = (CachedPlanSource *) lfirst(lc1);
 		List	   *stmt_list;
 		ListCell   *lc2;
+		int			i = 0;
 
 		spicallbackarg.query = plansource->query_string;
 
@@ -2691,8 +2694,9 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 										options->params,
 										_SPI_current->queryEnv,
 										0);
-				res = _SPI_pquery(qdesc, fire_triggers,
-								  canSetTag ? options->tcount : 0);
+
+				res = _SPI_pquery(qdesc, fire_triggers, canSetTag ? options->tcount : 0,
+								  plansource, i);
 				FreeQueryDesc(qdesc);
 			}
 			else
@@ -2789,6 +2793,8 @@ _SPI_execute_plan(SPIPlanPtr plan, const SPIExecuteOptions *options,
 				my_res = res;
 				goto fail;
 			}
+
+			i++;
 		}
 
 		/* Done with this plan, so release refcount */
@@ -2866,7 +2872,8 @@ _SPI_convert_params(int nargs, Oid *argtypes,
 }
 
 static int
-_SPI_pquery(QueryDesc *queryDesc, bool fire_triggers, uint64 tcount)
+_SPI_pquery(QueryDesc *queryDesc, bool fire_triggers, uint64 tcount,
+			CachedPlanSource *plansource, int query_index)
 {
 	int			operation = queryDesc->operation;
 	int			eflags;
@@ -2922,7 +2929,7 @@ _SPI_pquery(QueryDesc *queryDesc, bool fire_triggers, uint64 tcount)
 	else
 		eflags = EXEC_FLAG_SKIP_TRIGGERS;
 
-	ExecutorStart(queryDesc, eflags);
+	ExecutorStartExt(queryDesc, eflags, plansource, query_index);
 
 	ExecutorRun(queryDesc, ForwardScanDirection, tcount, true);
 
