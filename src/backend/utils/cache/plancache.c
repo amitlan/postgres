@@ -1294,7 +1294,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 }
 
 /*
- * Create a fresh CachedPlan for the given query from the provided
+ * Create a fresh CachedPlan for the query_index'th query in the provided
  * CachedPlanSource.
  *
  * The created CachedPlan is standalone, meaning it is not tracked in the
@@ -1311,36 +1311,44 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
  */
 
 CachedPlan *
-GetSingleCachedPlan(Query *query, CachedPlanSource *plansource,
+GetSingleCachedPlan(CachedPlanSource *plansource, int query_index,
 					QueryEnvironment *queryEnv)
 {
-	List *query_list,
-		 *plist;
+	List *query_list = plansource->query_list,
+		 *plan_list;
 	CachedPlan *plan = plansource->gplan;
 	MemoryContext oldcxt = CurrentMemoryContext,
 		plan_context;
 	PlannedStmt *plannedstmt;
 
 	Assert(ActiveSnapshotSet());
+
+	/* Sanity checks */
 	if (plan == NULL)
 		elog(ERROR, "GetSingleCachedPlan() called in the wrong context: plan is NULL");
 	else if  (plan->is_valid)
 		elog(ERROR, "GetSingleCachedPlan() called in the wrong context: plan->is_valid");
-	else if (!plansource->is_valid)
-		elog(ERROR, "GetSingleCachedPlan() called in the wrong context: !plansource->is_valid");
 
 	/*
-	 * Build a new generic plan for this query.
+	 * plansource might have become invalid sine GetCachedPlan().
+	 *
+	 * Read the description in BuildCachedPlan() of why we need to revalidate
+	 * the query_list.
 	 */
-	query_list = list_make1(query);
+	if (!plansource->is_valid)
+		query_list = RevalidateCachedQuery(plansource, queryEnv);
+	Assert(query_list != NIL);
 
 	/*
-	 * Generate the plan.
+	 * Build a new generic plan for the query_index'th query, but make a copy
+	 * to be scribbled on by the planner
 	 */
-	plist = pg_plan_queries(list_make1(query), plansource->query_string,
-							plansource->cursor_options, NULL);
+	query_list = list_make1(copyObject(list_nth_node(Query, query_list,
+													 query_index)));
+	plan_list = pg_plan_queries(query_list, plansource->query_string,
+								plansource->cursor_options, NULL);
 
-	list_free(query_list);
+	list_free_deep(query_list);
 
 	/*
 	 * Make a dedicated memory context for the CachedPlan and its subsidiary
@@ -1356,18 +1364,18 @@ GetSingleCachedPlan(Query *query, CachedPlanSource *plansource,
 	 * Copy plan into the new context.
 	 */
 	MemoryContextSwitchTo(plan_context);
-	plist = copyObject(plist);
+	plan_list = copyObject(plan_list);
 
 	/*
 	 * Create and fill the CachedPlan struct within the new context.
 	 */
 	plan = (CachedPlan *) palloc(sizeof(CachedPlan));
 	plan->magic = CACHEDPLAN_MAGIC;
-	plan->stmt_list = plist;
+	plan->stmt_list = plan_list;
 
 	plan->planRoleId = GetUserId();
-	Assert(list_length(plist) == 1);
-	plannedstmt = linitial_node(PlannedStmt, plist);
+	Assert(list_length(plan_list) == 1);
+	plannedstmt = linitial_node(PlannedStmt, plan_list);
 
 	/*
 	 * CachedPlan is dependent on role either if RLS affected the rewrite

@@ -233,8 +233,8 @@ extern CachedPlan *GetCachedPlan(CachedPlanSource *plansource,
 								 ParamListInfo boundParams,
 								 ResourceOwner owner,
 								 QueryEnvironment *queryEnv);
-extern CachedPlan *GetSingleCachedPlan(Query *query,
-									   CachedPlanSource *plansource,
+extern CachedPlan *GetSingleCachedPlan(CachedPlanSource *plansource,
+									   int query_index,
 									   QueryEnvironment *queryEnv);
 
 extern void ReleaseCachedPlan(CachedPlan *plan, ResourceOwner owner);

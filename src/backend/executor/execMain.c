@@ -155,26 +155,36 @@ ExecutorStartExt(QueryDesc *queryDesc, int eflags,
 	while (1)
 	{
 		ExecutorStart(queryDesc, eflags);
-		if (CachedPlanValid(queryDesc->cplan))
-			break;
+		if (!CachedPlanValid(queryDesc->cplan))
+		{
+			CachedPlan *cplan;
 
-		/*
-		 * Mark execution as aborted to ensure that AFTER trigger
-		 * state is properly reset.
-		 */
-		queryDesc->estate->es_aborted = true;
+			/*
+			 * The plan got invalidated, so try with a new updated plan.
+			 *
+			 * But first undo what ExecutorStart() would've done.  Mark
+			 * execution as aborted to ensure that AFTER trigger state is
+			 * properly reset.
+			 */
+			queryDesc->estate->es_aborted = true;
+			ExecutorEnd(queryDesc);
 
-		ExecutorEnd(queryDesc);
+			cplan = GetSingleCachedPlan(plansource, query_index,
+										queryDesc->queryEnv);
 
-		queryDesc->cplan = GetSingleCachedPlan(list_nth_node(Query,
-															 plansource->query_list,
-															 query_index),
-											   plansource,
-											   queryDesc->queryEnv);
-		queryDesc->plannedstmt = linitial_node(PlannedStmt,
-											   queryDesc->cplan->stmt_list);
-		queryDesc->cplan->refcount = 1;
-		queryDesc->cplan_release = true;
+			/*
+			 * Install the new transient cplan into the QueryDesc replacing
+			 * the old one so that executor initialization code can see it.
+			 * Mark it as in use by us and ask FreeQueryDesc() to release it.
+			 */
+			cplan->refcount = 1;
+			queryDesc->cplan = cplan;
+			queryDesc->cplan_release = true;
+			queryDesc->plannedstmt = linitial_node(PlannedStmt,
+												   queryDesc->cplan->stmt_list);
+		}
+		else
+			break;	/* ExecutorStart() succeeded! */
 	}
 }
 
