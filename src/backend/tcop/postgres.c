@@ -1200,8 +1200,10 @@ exec_simple_query(const char *query_string)
 		querytree_list = pg_analyze_and_rewrite_fixedparams(parsetree, query_string,
 															NULL, 0, NULL);
 
+		/* Creating a oneshot plan. */
 		plantree_list = pg_plan_queries(querytree_list, query_string,
-										CURSOR_OPT_PARALLEL_OK, NULL);
+										CURSOR_OPT_PARALLEL_OK | CURSOR_OPT_ONESHOT_PLAN,
+										NULL);
 
 		/*
 		 * Done with the snapshot used for parsing/planning.

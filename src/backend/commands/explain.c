@@ -487,7 +487,8 @@ standard_ExplainOneQuery(Query *query, int cursorOptions,
 		bufusage_start = pgBufferUsage;
 	INSTR_TIME_SET_CURRENT(planstart);
 
-	/* plan the query */
+	/* create a oneshot plan for the query */
+	cursorOptions |= CURSOR_OPT_ONESHOT_PLAN;
 	plan = pg_plan_query(query, queryString, cursorOptions, params);
 
 	INSTR_TIME_SET_CURRENT(planduration);

@@ -149,6 +149,9 @@ typedef struct PlannerGlobal
 	/* redo plan when TransactionXmin changes? */
 	bool		transientPlan;
 
+	/* plan is "oneshot", i.e., won't be saved for reuse */
+	bool		oneShotPlan;
+
 	/* is plan specific to current role? */
 	bool		dependsOnRole;
 

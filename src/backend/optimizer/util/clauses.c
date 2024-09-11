@@ -63,6 +63,7 @@ typedef struct
 	List	   *active_fns;
 	Node	   *case_val;
 	bool		estimate;
+	bool		oneShotPlan;
 } eval_const_expressions_context;
 
 typedef struct
@@ -2256,9 +2257,15 @@ eval_const_expressions(PlannerInfo *root, Node *node)
 	eval_const_expressions_context context;
 
 	if (root)
+	{
 		context.boundParams = root->glob->boundParams;	/* bound Params */
+		context.oneShotPlan = root->glob->oneShotPlan;	/* via cursor options */
+	}
 	else
+	{
 		context.boundParams = NULL;
+		context.oneShotPlan = false;
+	}
 	context.root = root;		/* for inlined-function dependencies */
 	context.active_fns = NIL;	/* nothing being recursively simplified */
 	context.case_val = NULL;	/* no CASE being examined */
@@ -4479,7 +4486,8 @@ evaluate_function(Oid funcid, Oid result_type, int32 result_typmod,
 	 */
 	if (funcform->provolatile == PROVOLATILE_IMMUTABLE)
 		 /* okay */ ;
-	else if (context->estimate && funcform->provolatile == PROVOLATILE_STABLE)
+	else if ((context->estimate || context->oneShotPlan) &&
+			 funcform->provolatile == PROVOLATILE_STABLE)
 		 /* okay */ ;
 	else
 		return NULL;

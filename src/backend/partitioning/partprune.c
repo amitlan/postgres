@@ -119,6 +119,9 @@ typedef struct GeneratePruningStepsContext
 									 * values, *other than* exec params */
 	bool		has_exec_param; /* clauses include any PARAM_EXEC params */
 	bool		contradictory;	/* clauses were proven self-contradictory */
+	bool		oneShotPlan;	/* are we creating a "oneshot" plan such that
+								 * it's safe to prune with stable comparison
+								 * operator? */
 	/* Working state: */
 	int			next_step_id;
 } GeneratePruningStepsContext;
@@ -146,7 +149,8 @@ static List *make_partitionedrel_pruneinfo(PlannerInfo *root,
 										   Bitmapset **matchedsubplans);
 static void gen_partprune_steps(RelOptInfo *rel, List *clauses,
 								PartClauseTarget target,
-								GeneratePruningStepsContext *context);
+								GeneratePruningStepsContext *context,
+								bool oneShotPlan);
 static List *gen_partprune_steps_internal(GeneratePruningStepsContext *context,
 										  List *clauses);
 static PartitionPruneStep *gen_prune_step_op(GeneratePruningStepsContext *context,
@@ -539,7 +543,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		 * that would require per-scan pruning.
 		 */
 		gen_partprune_steps(subpart, partprunequal, PARTTARGET_INITIAL,
-							&context);
+							&context, root->glob->oneShotPlan);
 
 		if (context.contradictory)
 		{
@@ -573,7 +577,7 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		{
 			/* ... OK, we'd better think about it */
 			gen_partprune_steps(subpart, partprunequal, PARTTARGET_EXEC,
-								&context);
+								&context, root->glob->oneShotPlan);
 
 			if (context.contradictory)
 			{
@@ -712,12 +716,13 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
  */
 static void
 gen_partprune_steps(RelOptInfo *rel, List *clauses, PartClauseTarget target,
-					GeneratePruningStepsContext *context)
+					GeneratePruningStepsContext *context, bool oneShotPlan)
 {
 	/* Initialize all output values to zero/false/NULL */
 	memset(context, 0, sizeof(GeneratePruningStepsContext));
 	context->rel = rel;
 	context->target = target;
+	context->oneShotPlan = oneShotPlan;
 
 	/*
 	 * If this partitioned table is in turn a partition, and it shares any
@@ -745,9 +750,11 @@ gen_partprune_steps(RelOptInfo *rel, List *clauses, PartClauseTarget target,
  *		partitions' indexes in the rel's part_rels array.
  *
  * Callers must ensure that 'rel' is a partitioned table.
+ *
+ * oneShotPlan must match PlannerGlobal.oneShotPlan.
  */
 Bitmapset *
-prune_append_rel_partitions(RelOptInfo *rel)
+prune_append_rel_partitions(RelOptInfo *rel, bool oneShotPlan)
 {
 	List	   *clauses = rel->baserestrictinfo;
 	List	   *pruning_steps;
@@ -773,7 +780,7 @@ prune_append_rel_partitions(RelOptInfo *rel)
 	 * set.
 	 */
 	gen_partprune_steps(rel, clauses, PARTTARGET_PLANNER,
-						&gcontext);
+						&gcontext, oneShotPlan);
 	if (gcontext.contradictory)
 		return NULL;
 	pruning_steps = gcontext.steps;
@@ -2055,7 +2062,8 @@ match_clause_to_partition_key(GeneratePruningStepsContext *context,
 		 * assume anything that's in a btree or hash opclass is at least
 		 * stable, but we need to check for immutability.)
 		 */
-		if (op_volatile(opno) != PROVOLATILE_IMMUTABLE)
+		if (op_volatile(opno) != PROVOLATILE_IMMUTABLE &&
+			(op_volatile(opno) != PROVOLATILE_STABLE || !context->oneShotPlan))
 		{
 			context->has_mutable_op = true;
 

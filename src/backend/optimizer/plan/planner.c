@@ -413,6 +413,13 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 		tuple_fraction = 0.0;
 	}
 
+	/*
+	 * Tell subquery_planner() if the plan is "oneshot" so it may calculate
+	 * stable functions during eval_const_expressions()
+	 */
+	if (cursorOptions & CURSOR_OPT_ONESHOT_PLAN)
+		glob->oneShotPlan = true;
+
 	/* primary planning entry point (may recurse for subqueries) */
 	root = subquery_planner(glob, parse, NULL, false, tuple_fraction, NULL);
 

@@ -104,7 +104,8 @@ static List *RevalidateCachedQuery(CachedPlanSource *plansource,
 								   QueryEnvironment *queryEnv);
 static bool CheckCachedPlan(CachedPlanSource *plansource);
 static CachedPlan *BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
-								   ParamListInfo boundParams, QueryEnvironment *queryEnv);
+								   ParamListInfo boundParams, QueryEnvironment *queryEnv,
+								   bool custom);
 static bool choose_custom_plan(CachedPlanSource *plansource,
 							   ParamListInfo boundParams);
 static double cached_plan_cost(CachedPlan *plan, bool include_planner);
@@ -901,10 +902,13 @@ CheckCachedPlan(CachedPlanSource *plansource)
  * Planning work is done in the caller's memory context.  The finished plan
  * is in a child memory context, which typically should get reparented
  * (unless this is a one-shot plan, in which case we don't copy the plan).
+ *
+ * Pass true for custom if creating a custom plan.
  */
 static CachedPlan *
 BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
-				ParamListInfo boundParams, QueryEnvironment *queryEnv)
+				ParamListInfo boundParams, QueryEnvironment *queryEnv,
+				bool custom)
 {
 	CachedPlan *plan;
 	List	   *plist;
@@ -913,6 +917,7 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	MemoryContext plan_context;
 	MemoryContext oldcxt = CurrentMemoryContext;
 	ListCell   *lc;
+	int			cursor_options = plansource->cursor_options;
 
 	/*
 	 * Normally the querytree should be valid already, but if it's not,
@@ -959,8 +964,10 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	/*
 	 * Generate the plan.
 	 */
-	plist = pg_plan_queries(qlist, plansource->query_string,
-							plansource->cursor_options, boundParams);
+	if (custom)
+		cursor_options |= CURSOR_OPT_ONESHOT_PLAN;
+	plist = pg_plan_queries(qlist, plansource->query_string, cursor_options,
+							boundParams);
 
 	/* Release snapshot if we got one */
 	if (snapshot_set)
@@ -1196,7 +1203,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 		else
 		{
 			/* Build a new generic plan */
-			plan = BuildCachedPlan(plansource, qlist, NULL, queryEnv);
+			plan = BuildCachedPlan(plansource, qlist, NULL, queryEnv, false);
 			/* Just make real sure plansource->gplan is clear */
 			ReleaseGenericPlan(plansource);
 			/* Link the new generic plan into the plansource */
@@ -1241,7 +1248,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 	if (customplan)
 	{
 		/* Build a custom plan */
-		plan = BuildCachedPlan(plansource, qlist, boundParams, queryEnv);
+		plan = BuildCachedPlan(plansource, qlist, boundParams, queryEnv, true);
 		/* Accumulate total costs of custom plans */
 		plansource->total_custom_cost += cached_plan_cost(plan, true);
 
