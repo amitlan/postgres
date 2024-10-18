@@ -19,6 +19,7 @@
 #include "nodes/lockoptions.h"
 #include "nodes/parsenodes.h"
 #include "utils/memutils.h"
+#include "utils/plancache.h"
 
 
 /*
@@ -198,6 +199,8 @@ ExecGetJunkAttribute(TupleTableSlot *slot, AttrNumber attno, bool *isNull)
  * prototypes from functions in execMain.c
  */
 extern void ExecutorStart(QueryDesc *queryDesc, int eflags);
+extern void ExecutorStartExt(QueryDesc *queryDesc, int eflags,
+							 CachedPlanSource *plansource, int query_index);
 extern void standard_ExecutorStart(QueryDesc *queryDesc, int eflags);
 extern void ExecutorRun(QueryDesc *queryDesc,
 						ScanDirection direction, uint64 count, bool execute_once);
@@ -261,6 +264,19 @@ extern void ExecEndNode(PlanState *node);
 extern void ExecShutdownNode(PlanState *node);
 extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
 
+/*
+ * Is the CachedPlan in es_cachedplan still valid?
+ *
+ * Called from InitPlan() because invalidation messages that affect the plan
+ * might be received after locks have been taken on runtime-prunable relations.
+ * The caller should take appropriate action if the plan has become invalid.
+ */
+static inline bool
+ExecPlanStillValid(EState *estate)
+{
+	return estate->es_cachedplan == NULL ? true :
+		CachedPlanValid(estate->es_cachedplan);
+}
 
 /* ----------------------------------------------------------------
  *		ExecProcNode
