@@ -18,6 +18,8 @@
 #include "access/tupdesc.h"
 #include "lib/ilist.h"
 #include "nodes/params.h"
+#include "nodes/parsenodes.h"
+#include "nodes/plannodes.h"
 #include "tcop/cmdtag.h"
 #include "utils/queryenvironment.h"
 #include "utils/resowner.h"
@@ -159,6 +161,12 @@ typedef struct CachedPlan
 	int			generation;		/* parent's generation number for this plan */
 	int			refcount;		/* count of live references to this struct */
 	MemoryContext context;		/* context containing this CachedPlan */
+
+	/*
+	 * If the plan is not associated with a CachedPlanSource, it is saved in
+	 * a separate global list.
+	 */
+	dlist_node	node;			/* list link, if is_standalone */
 } CachedPlan;
 
 /*
@@ -224,6 +232,10 @@ extern CachedPlan *GetCachedPlan(CachedPlanSource *plansource,
 								 ParamListInfo boundParams,
 								 ResourceOwner owner,
 								 QueryEnvironment *queryEnv);
+extern PlannedStmt *UpdateCachedPlan(CachedPlanSource *plansource,
+									 int query_index,
+									 QueryEnvironment *queryEnv);
+
 extern void ReleaseCachedPlan(CachedPlan *plan, ResourceOwner owner);
 
 extern bool CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,
@@ -251,6 +263,19 @@ static inline bool
 CachedPlanRequiresLocking(CachedPlan *cplan)
 {
 	return !cplan->is_oneshot && cplan->is_generic;
+}
+
+/*
+ * CachedPlanValid
+ *      Returns whether a cached generic plan is still valid.
+ *
+ * Invoked by the executor to check if the plan has not been invalidated after
+ * taking locks during the initialization of the plan.
+ */
+static inline bool
+CachedPlanValid(CachedPlan *cplan)
+{
+	return cplan->is_valid;
 }
 
 #endif							/* PLANCACHE_H */
