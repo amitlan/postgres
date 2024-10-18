@@ -1763,8 +1763,16 @@ register_partpruneinfo(PlannerInfo *root, int part_prune_index, int rtoffset)
 		foreach(l2, prune_infos)
 		{
 			PartitionedRelPruneInfo *prelinfo = lfirst(l2);
+			int		i;
 
 			prelinfo->rtindex += rtoffset;
+			for (i = 0; i < prelinfo->nparts; i++)
+			{
+				prelinfo->rti_map[i] += rtoffset;
+				if (prelinfo->initial_pruning_steps)
+					glob->prunableRelids = bms_add_member(glob->prunableRelids,
+														  prelinfo->rti_map[i]);
+			}
 		}
 	}
 
