@@ -1418,9 +1418,9 @@ typedef struct PlanRowMark
  * hierarchies among its children, we have an unordered List of those Lists.
  *
  * relids				RelOptInfo.relids of the parent plan node (e.g. Append
- *						or MergeAppend) to which his PartitionPruneInfo node
- *						belongs. Used to ensure that the pruning logic matches
- *						the parent plan's apprelids.
+ *						or MergeAppend) to which this PartitionPruneInfo node
+ *						belongs.  The pruning logic ensures that this matches
+ *						the parent plan node's apprelids.
  * prune_infos			List of Lists containing PartitionedRelPruneInfo nodes,
  *						one sublist per run-time-prunable partition hierarchy
  *						appearing in the parent plan node's subplans.
