@@ -654,7 +654,8 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 		PlannedStmt *pstmt = lfirst_node(PlannedStmt, p);
 
 		if (pstmt->commandType != CMD_UTILITY)
-			ExplainOnePlan(pstmt, into, es, query_string, paramLI, pstate->p_queryEnv,
+			ExplainOnePlan(pstmt, cplan, into, es, query_string, paramLI,
+						   pstate->p_queryEnv,
 						   &planduration, (es->buffers ? &bufusage : NULL),
 						   es->memory ? &mem_counters : NULL);
 		else

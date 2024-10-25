@@ -116,6 +116,14 @@ typedef struct PlannerGlobal
 	/* "flat" rangetable for executor */
 	List	   *finalrtable;
 
+	/*
+	 * RT indexes of all relation RTEs in finalrtable (RTE_RELATION and
+	 * RTE_SUBQUERY RTEs of views) and of those that are subject to runtime
+	 * pruning at plan initialization time ("initial" pruning).
+	 */
+	Bitmapset  *allRelids;
+	Bitmapset  *prunableRelids;
+
 	/* "flat" list of RTEPermissionInfos */
 	List	   *finalrteperminfos;
 

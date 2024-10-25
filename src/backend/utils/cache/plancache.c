@@ -104,7 +104,8 @@ static List *RevalidateCachedQuery(CachedPlanSource *plansource,
 								   QueryEnvironment *queryEnv);
 static bool CheckCachedPlan(CachedPlanSource *plansource);
 static CachedPlan *BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
-								   ParamListInfo boundParams, QueryEnvironment *queryEnv);
+								   ParamListInfo boundParams, QueryEnvironment *queryEnv,
+								   bool generic);
 static bool choose_custom_plan(CachedPlanSource *plansource,
 							   ParamListInfo boundParams);
 static double cached_plan_cost(CachedPlan *plan, bool include_planner);
@@ -815,8 +816,11 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
  * Caller must have already called RevalidateCachedQuery to verify that the
  * querytree is up to date.
  *
- * On a "true" return, we have acquired the locks needed to run the plan.
- * (We must do this for the "true" result to be race-condition-free.)
+ * On a "true" return, we have acquired locks on the "unprunableRelids" set
+ * for all plans in plansource->stmt_list. However, the plans are not fully
+ * race-condition-free until the executor acquires locks on the prunable
+ * relations that survive initial runtime pruning during executor
+ * initialization.
  */
 static bool
 CheckCachedPlan(CachedPlanSource *plansource)
@@ -893,10 +897,10 @@ CheckCachedPlan(CachedPlanSource *plansource)
  * or it can be set to NIL if we need to re-copy the plansource's query_list.
  *
  * To build a generic, parameter-value-independent plan, pass NULL for
- * boundParams.  To build a custom plan, pass the actual parameter values via
- * boundParams.  For best effect, the PARAM_FLAG_CONST flag should be set on
- * each parameter value; otherwise the planner will treat the value as a
- * hint rather than a hard constant.
+ * boundParams, and true for generic.  To build a custom plan, pass the actual
+ * parameter values via boundParams, and false for generic.  For best effect,
+ * the PARAM_FLAG_CONST flag should be set on each parameter value; otherwise
+ * the planner will treat the value as a hint rather than a hard constant.
  *
  * Planning work is done in the caller's memory context.  The finished plan
  * is in a child memory context, which typically should get reparented
@@ -904,7 +908,8 @@ CheckCachedPlan(CachedPlanSource *plansource)
  */
 static CachedPlan *
 BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
-				ParamListInfo boundParams, QueryEnvironment *queryEnv)
+				ParamListInfo boundParams, QueryEnvironment *queryEnv,
+				bool generic)
 {
 	CachedPlan *plan;
 	List	   *plist;
@@ -1026,6 +1031,7 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	plan->refcount = 0;
 	plan->context = plan_context;
 	plan->is_oneshot = plansource->is_oneshot;
+	plan->is_generic = generic;
 	plan->is_saved = false;
 	plan->is_valid = true;
 
@@ -1153,8 +1159,10 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
  * plan or a custom plan for the given parameters: the caller does not know
  * which it will get.
  *
- * On return, the plan is valid and we have sufficient locks to begin
- * execution.
+ * On return, the plan is valid, but not all locks are acquired if a cached
+ * generic plan is being reused. In such cases, locks on relations subject
+ * to initial runtime pruning are deferred until the execution startup phase,
+ * specifically when ExecDoInitialPruning() performs initial pruning.
  *
  * On return, the refcount of the plan has been incremented; a later
  * ReleaseCachedPlan() call is expected.  If "owner" is not NULL then
@@ -1196,7 +1204,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 		else
 		{
 			/* Build a new generic plan */
-			plan = BuildCachedPlan(plansource, qlist, NULL, queryEnv);
+			plan = BuildCachedPlan(plansource, qlist, NULL, queryEnv, true);
 			/* Just make real sure plansource->gplan is clear */
 			ReleaseGenericPlan(plansource);
 			/* Link the new generic plan into the plansource */
@@ -1241,7 +1249,7 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 	if (customplan)
 	{
 		/* Build a custom plan */
-		plan = BuildCachedPlan(plansource, qlist, boundParams, queryEnv);
+		plan = BuildCachedPlan(plansource, qlist, boundParams, queryEnv, false);
 		/* Accumulate total costs of custom plans */
 		plansource->total_custom_cost += cached_plan_cost(plan, true);
 
@@ -1776,7 +1784,7 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 	foreach(lc1, stmt_list)
 	{
 		PlannedStmt *plannedstmt = lfirst_node(PlannedStmt, lc1);
-		ListCell   *lc2;
+		int			rtindex;
 
 		if (plannedstmt->commandType == CMD_UTILITY)
 		{
@@ -1794,13 +1802,16 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 			continue;
 		}
 
-		foreach(lc2, plannedstmt->rtable)
+		rtindex = -1;
+		while ((rtindex = bms_next_member(plannedstmt->unprunableRelids,
+										  rtindex)) >= 0)
 		{
-			RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc2);
+			RangeTblEntry *rte = list_nth_node(RangeTblEntry,
+											   plannedstmt->rtable,
+											   rtindex - 1);
 
-			if (!(rte->rtekind == RTE_RELATION ||
-				  (rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid))))
-				continue;
+			Assert(rte->rtekind == RTE_RELATION ||
+				   (rte->rtekind == RTE_SUBQUERY && OidIsValid(rte->relid)));
 
 			/*
 			 * Acquire the appropriate type of lock on each relation OID. Note
