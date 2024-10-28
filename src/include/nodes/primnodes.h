@@ -2182,6 +2182,8 @@ typedef struct GraphPropertyRef
 	const char *elvarname;
 	Oid			propid;
 	Oid			typeId;
+	int32		typmod;
+	Oid			collation;
 	ParseLoc	location;
 } GraphPropertyRef;
 
