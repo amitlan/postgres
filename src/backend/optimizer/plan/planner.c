@@ -253,7 +253,8 @@ static void create_partitionwise_grouping_paths(PlannerInfo *root,
 												GroupPathExtraData *extra);
 static bool group_by_has_partkey(RelOptInfo *input_rel,
 								 List *targetList,
-								 List *groupClause);
+								 List *groupClause,
+								 bool *collation_incompatible);
 static int	common_prefix_cmp(const void *a, const void *b);
 static List *generate_setop_child_grouplist(SetOperationStmt *op,
 											List *targetlist);
@@ -4090,23 +4091,30 @@ create_ordinary_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	if (extra->patype != PARTITIONWISE_AGGREGATE_NONE &&
 		IS_PARTITIONED_REL(input_rel))
 	{
+		bool		collation_incompatible = false;
+		bool		group_by_contains_partkey =
+			group_by_has_partkey(input_rel, extra->targetList,
+								 root->parse->groupClause,
+								 &collation_incompatible);
+
 		/*
 		 * If this is the topmost relation or if the parent relation is doing
 		 * full partitionwise aggregation, then we can do full partitionwise
 		 * aggregation provided that the GROUP BY clause contains all of the
-		 * partitioning columns at this level.  Otherwise, we can do at most
-		 * partial partitionwise aggregation.  But if partial aggregation is
-		 * not supported in general then we can't use it for partitionwise
-		 * aggregation either.
+		 * partitioning columns at this level and the collation used by GROUP
+		 * BY matches the partitioning collation.  Otherwise, we can do at most
+		 * partial partitionwise aggregation, but again only if the collation
+		 * is compatible.  If partial aggregation is not supported in general
+		 * then we can't use it for partitionwise aggregation either.
 		 *
 		 * Check parse->groupClause not processed_groupClause, because it's
 		 * okay if some of the partitioning columns were proved redundant.
 		 */
 		if (extra->patype == PARTITIONWISE_AGGREGATE_FULL &&
-			group_by_has_partkey(input_rel, extra->targetList,
-								 root->parse->groupClause))
+			group_by_contains_partkey)
 			patype = PARTITIONWISE_AGGREGATE_FULL;
-		else if ((extra->flags & GROUPING_CAN_PARTIAL_AGG) != 0)
+		else if ((extra->flags & GROUPING_CAN_PARTIAL_AGG) != 0 &&
+				 !collation_incompatible)
 			patype = PARTITIONWISE_AGGREGATE_PARTIAL;
 		else
 			patype = PARTITIONWISE_AGGREGATE_NONE;
@@ -8105,13 +8113,18 @@ create_partitionwise_grouping_paths(PlannerInfo *root,
 /*
  * group_by_has_partkey
  *
- * Returns true, if all the partition keys of the given relation are part of
- * the GROUP BY clauses, false otherwise.
+ * Returns true if all the partition keys of the given relation are part of
+ * the GROUP BY clauses, including having matching collation, false otherwise.
+ *
+ * Returns false also if a collation mismatch is detected between a partition
+ * key and its corresponding expression in groupClause, in which case.
+ * *collation_incompatible is set to true.
  */
 static bool
 group_by_has_partkey(RelOptInfo *input_rel,
 					 List *targetList,
-					 List *groupClause)
+					 List *groupClause,
+					 bool *collation_incompatible)
 {
 	List	   *groupexprs = get_sortgrouplist_exprs(groupClause, targetList);
 	int			cnt = 0;
@@ -8134,13 +8147,43 @@ group_by_has_partkey(RelOptInfo *input_rel,
 
 		foreach(lc, partexprs)
 		{
+			ListCell   *lg;
 			Expr	   *partexpr = lfirst(lc);
+			Oid			partcoll = input_rel->part_scheme->partcollation[cnt];
 
-			if (list_member(groupexprs, partexpr))
+			foreach(lg, groupexprs)
 			{
-				found = true;
-				break;
+				Expr	   *groupexpr = lfirst(lg);
+				Oid			groupcoll = exprCollation((Node *) groupexpr);
+
+				/*
+				 * Note: we can assume there is at most one RelabelType node;
+				 * eval_const_expressions() will have simplified if more than one.
+				 */
+				if (IsA(groupexpr, RelabelType))
+					groupexpr = ((RelabelType *) groupexpr)->arg;
+
+				if (equal(groupexpr, partexpr))
+				{
+
+					/*
+					 * Reject a match if the grouping collation does not match
+					 * the partitioning collation.
+					 */
+					if (OidIsValid(partcoll) && OidIsValid(groupcoll) &&
+						partcoll != groupcoll)
+					{
+						*collation_incompatible = true;
+						return false;
+					}
+
+					found = true;
+					break;
+				}
 			}
+
+			if (found)
+				break;
 		}
 
 		/*
