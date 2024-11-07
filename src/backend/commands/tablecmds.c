@@ -377,7 +377,8 @@ static List *MergeCheckConstraint(List *constraints, const char *name, Node *exp
 static void MergeChildAttribute(List *inh_columns, int exist_attno, int newcol_attno, const ColumnDef *newdef);
 static ColumnDef *MergeInheritedAttribute(List *inh_columns, int exist_attno, const ColumnDef *newdef);
 static void MergeAttributesIntoExisting(Relation child_rel, Relation parent_rel, bool ispartition);
-static void MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel);
+static void MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel,
+										 bool child_is_partition);
 static void StoreCatalogInheritance(Oid relationId, List *supers,
 									bool child_is_partition);
 static void StoreCatalogInheritance1(Oid relationId, Oid parentOid,
@@ -16153,7 +16154,7 @@ CreateInheritance(Relation child_rel, Relation parent_rel, bool ispartition)
 	MergeAttributesIntoExisting(child_rel, parent_rel, ispartition);
 
 	/* Match up the constraints and bump coninhcount as needed */
-	MergeConstraintsIntoExisting(child_rel, parent_rel);
+	MergeConstraintsIntoExisting(child_rel, parent_rel, ispartition);
 
 	/*
 	 * OK, it looks valid.  Make the catalog entries that show inheritance.
@@ -16358,7 +16359,8 @@ MergeAttributesIntoExisting(Relation child_rel, Relation parent_rel, bool ispart
  * XXX See MergeWithExistingConstraint too if you change this code.
  */
 static void
-MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
+MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel,
+							 bool child_is_partition)
 {
 	Relation	constraintrel;
 	SysScanDesc parent_scan;
@@ -16455,8 +16457,13 @@ MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
 
 			/*
 			 * If the child constraint is "no inherit" then cannot merge
+			 * because that would prevent lower-level children from inheriting
+			 * it.  That's not a concern if the child table is a leaf partition
+			 * which cannot have child tables, so we allow the merge.
 			 */
-			if (child_con->connoinherit)
+			if (child_con->connoinherit &&
+				(!child_is_partition ||
+				 RELKIND_HAS_PARTITIONS(child_rel->rd_rel->relkind)))
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("constraint \"%s\" conflicts with non-inherited constraint on child table \"%s\"",

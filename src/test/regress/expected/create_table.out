@@ -257,6 +257,57 @@ CREATE TABLE partitioned (
 	CONSTRAINT check_a CHECK (a > 0) NO INHERIT
 ) PARTITION BY RANGE (a);
 ERROR:  cannot add NO INHERIT constraint to partitioned table "partitioned"
+-- also when creating the partitioned table as partition
+CREATE TABLE partitioned_with_not_null (
+	a int NOT NULL
+) PARTITION BY RANGE (a);
+CREATE TABLE partitioned_with_not_null_part1
+	PARTITION OF partitioned_with_not_null (
+	a NOT NULL NO INHERIT
+) FOR VALUES FROM (1) TO (2)
+PARTITION BY LIST (a);	-- not ok
+ERROR:  not-null constraints on partitioned tables cannot be NO INHERIT
+-- fine if the partition is a leaf partition though
+CREATE TABLE partitioned_with_not_null_part1
+	PARTITION OF partitioned_with_not_null (
+	a NOT NULL NO INHERIT
+) FOR VALUES FROM (1) TO (2);	-- ok
+-- test cases with check constraint
+CREATE TABLE partitioned_with_check (
+	a int NOT NULL,
+	CONSTRAINT check_a CHECK (a > 0)
+) PARTITION BY RANGE (a);
+CREATE TABLE partitioned_with_check_part1
+	PARTITION OF partitioned_with_check (
+	CONSTRAINT check_a CHECK (a > 0) NO INHERIT
+) FOR VALUES FROM (1) TO (2)
+PARTITION BY LIST (a);	-- not ok
+ERROR:  constraint "check_a" conflicts with inherited constraint on relation "partitioned_with_check_part1"
+-- fine if the partition is a leaf partition though
+CREATE TABLE partitioned_with_check_part1
+	PARTITION OF partitioned_with_check (
+	CONSTRAINT check_a CHECK (a > 0) NO INHERIT
+) FOR VALUES FROM (1) TO (2);	-- ok
+NOTICE:  merging constraint "check_a" with inherited definition
+-- similar tests for plain inheritance
+CREATE TABLE ct_parent_with_check_notnull (
+	a int NOT NULL,
+	CONSTRAINT check_a CHECK (a > 0));
+CREATE TABLE ct_child1_with_noinherit_check (
+	a int,
+	CONSTRAINT check_a CHECK (a > 0) NO INHERIT
+) INHERITS (ct_parent_with_check_notnull);	-- not ok
+NOTICE:  merging column "a" with inherited definition
+ERROR:  constraint "check_a" conflicts with inherited constraint on relation "ct_child1_with_noinherit_check"
+CREATE TABLE ct_child2_with_noinherit_not_null (
+	a int NOT NULL NO INHERIT,
+	CONSTRAINT check_a CHECK (a > 0)
+) INHERITS (ct_parent_with_check_notnull);	-- not ok
+NOTICE:  merging column "a" with inherited definition
+NOTICE:  merging constraint "check_a" with inherited definition
+ERROR:  cannot define not-null constraint on column "a" with NO INHERIT
+DETAIL:  The column has an inherited not-null constraint.
+DROP TABLE partitioned_with_not_null, partitioned_with_check, ct_parent_with_check_notnull;
 -- some checks after successful creation of a partitioned table
 CREATE FUNCTION plusone(a int) RETURNS INT AS $$ SELECT a+1; $$ LANGUAGE SQL;
 CREATE TABLE partitioned (

@@ -194,6 +194,58 @@ CREATE TABLE partitioned (
 	CONSTRAINT check_a CHECK (a > 0) NO INHERIT
 ) PARTITION BY RANGE (a);
 
+-- also when creating the partitioned table as partition
+CREATE TABLE partitioned_with_not_null (
+	a int NOT NULL
+) PARTITION BY RANGE (a);
+
+CREATE TABLE partitioned_with_not_null_part1
+	PARTITION OF partitioned_with_not_null (
+	a NOT NULL NO INHERIT
+) FOR VALUES FROM (1) TO (2)
+PARTITION BY LIST (a);	-- not ok
+
+-- fine if the partition is a leaf partition though
+CREATE TABLE partitioned_with_not_null_part1
+	PARTITION OF partitioned_with_not_null (
+	a NOT NULL NO INHERIT
+) FOR VALUES FROM (1) TO (2);	-- ok
+
+-- test cases with check constraint
+CREATE TABLE partitioned_with_check (
+	a int NOT NULL,
+	CONSTRAINT check_a CHECK (a > 0)
+) PARTITION BY RANGE (a);
+
+CREATE TABLE partitioned_with_check_part1
+	PARTITION OF partitioned_with_check (
+	CONSTRAINT check_a CHECK (a > 0) NO INHERIT
+) FOR VALUES FROM (1) TO (2)
+PARTITION BY LIST (a);	-- not ok
+
+-- fine if the partition is a leaf partition though
+CREATE TABLE partitioned_with_check_part1
+	PARTITION OF partitioned_with_check (
+	CONSTRAINT check_a CHECK (a > 0) NO INHERIT
+) FOR VALUES FROM (1) TO (2);	-- ok
+
+-- similar tests for plain inheritance
+CREATE TABLE ct_parent_with_check_notnull (
+	a int NOT NULL,
+	CONSTRAINT check_a CHECK (a > 0));
+
+CREATE TABLE ct_child1_with_noinherit_check (
+	a int,
+	CONSTRAINT check_a CHECK (a > 0) NO INHERIT
+) INHERITS (ct_parent_with_check_notnull);	-- not ok
+
+CREATE TABLE ct_child2_with_noinherit_not_null (
+	a int NOT NULL NO INHERIT,
+	CONSTRAINT check_a CHECK (a > 0)
+) INHERITS (ct_parent_with_check_notnull);	-- not ok
+
+DROP TABLE partitioned_with_not_null, partitioned_with_check, ct_parent_with_check_notnull;
+
 -- some checks after successful creation of a partitioned table
 CREATE FUNCTION plusone(a int) RETURNS INT AS $$ SELECT a+1; $$ LANGUAGE SQL;
 

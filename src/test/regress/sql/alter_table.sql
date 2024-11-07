@@ -2484,14 +2484,6 @@ ALTER TABLE list_parted ATTACH PARTITION part_1 FOR VALUES IN (1);
 SELECT attislocal, attinhcount FROM pg_attribute WHERE attrelid = 'part_1'::regclass AND attnum > 0;
 SELECT conislocal, coninhcount FROM pg_constraint WHERE conrelid = 'part_1'::regclass AND conname = 'check_a';
 
--- check that NOT NULL NO INHERIT cannot be merged to a normal NOT NULL
-CREATE TABLE part_fail (a int NOT NULL NO INHERIT,
-	b char(2) COLLATE "C",
-	CONSTRAINT check_a CHECK (a > 0)
-);
-ALTER TABLE list_parted ATTACH PARTITION part_fail FOR VALUES IN (2);
-DROP TABLE part_fail;
-
 -- check that the new partition won't overlap with an existing partition
 CREATE TABLE fail_part (LIKE part_1 INCLUDING CONSTRAINTS);
 ALTER TABLE list_parted ATTACH PARTITION fail_part FOR VALUES IN (1);
@@ -2737,6 +2729,27 @@ ALTER TABLE hash_parted ATTACH PARTITION fail_part FOR VALUES WITH (MODULUS 0, R
 ALTER TABLE hash_parted ATTACH PARTITION fail_part FOR VALUES WITH (MODULUS 8, REMAINDER 8);
 ALTER TABLE hash_parted ATTACH PARTITION fail_part FOR VALUES WITH (MODULUS 3, REMAINDER 2);
 DROP TABLE fail_part;
+
+--
+-- Prevent marking a constraint as NO INHERIT on a child table when it
+-- inherits a constraint with the same name from its parent, to ensure that
+-- the grandchildren consistently inherit the constraint.
+--
+CREATE TABLE parent_with_check_notnull (a int NOT NULL, CONSTRAINT check_a CHECK (a > 0));
+CREATE TABLE child1_with_noinherit_check (a int, CONSTRAINT check_a CHECK (a > 0) NO INHERIT);
+ALTER TABLE child1_with_noinherit_check INHERIT parent_with_check_notnull;	-- not ok
+CREATE TABLE child2_with_noinherit_notnull (a int NOT NULL NO INHERIT, CONSTRAINT check_a CHECK (a > 0));
+ALTER TABLE child2_with_noinherit_notnull INHERIT parent_with_check_notnull;	-- not ok
+DROP TABLE parent_with_check_notnull, child1_with_noinherit_check, child2_with_noinherit_notnull;
+
+-- No need to have that restriction for leaf partitions though, because they
+-- cannot have any children of their own
+CREATE TABLE parted_parent_with_check_notnull (a int, CONSTRAINT check_a CHECK (a > 0)) PARTITION BY LIST (a);
+CREATE TABLE part1_with_noinherit_check (a int, CONSTRAINT check_a CHECK (a > 0) NO INHERIT);
+ALTER TABLE parted_parent_with_check_notnull ATTACH PARTITION part1_with_noinherit_check FOR VALUES IN (1);	-- ok
+CREATE TABLE part2_with_noinherit_notnull (a int NOT NULL NO INHERIT, CONSTRAINT check_a CHECK (a > 0));
+ALTER TABLE parted_parent_with_check_notnull ATTACH PARTITION part2_with_noinherit_notnull FOR VALUES IN (2);	-- ok
+DROP TABLE parted_parent_with_check_notnull;
 
 --
 -- DETACH PARTITION
