@@ -927,6 +927,7 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 	bool		snapshot_set;
 	bool		is_transient;
 	MemoryContext plan_context;
+	MemoryContext stmt_context;
 	MemoryContext oldcxt = CurrentMemoryContext;
 	ListCell   *lc;
 
@@ -994,16 +995,22 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 											 "CachedPlan",
 											 ALLOCSET_START_SMALL_SIZES);
 		MemoryContextCopyAndSetIdentifier(plan_context, plansource->query_string);
-
-		/*
-		 * Copy plan into the new context.
-		 */
-		MemoryContextSwitchTo(plan_context);
-
-		plist = copyObject(plist);
 	}
 	else
 		plan_context = CurrentMemoryContext;
+
+	stmt_context = AllocSetContextCreate(CurrentMemoryContext,
+										 "CachedPlan PlannedStmts",
+										 ALLOCSET_START_SMALL_SIZES);
+	MemoryContextCopyAndSetIdentifier(stmt_context, plansource->query_string);
+	MemoryContextSetParent(stmt_context, plan_context);
+
+	MemoryContextSwitchTo(stmt_context);
+	plist = copyObject(plist);
+
+	MemoryContextSwitchTo(plan_context);
+	if (!plansource->is_oneshot)
+		plist = list_copy(plist);
 
 	/*
 	 * Create and fill the CachedPlan struct within the new context.
@@ -1041,6 +1048,7 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 		plan->saved_xmin = InvalidTransactionId;
 	plan->refcount = 0;
 	plan->context = plan_context;
+	plan->stmt_context = stmt_context;
 	plan->is_oneshot = plansource->is_oneshot;
 	plan->is_generic = generic;
 	plan->is_saved = false;
@@ -1362,13 +1370,14 @@ UpdateCachedPlan(CachedPlanSource *plansource, int query_index,
 
 	/*
 	 * Planning work is done in the caller's memory context.  The resulting
-	 * PlannedStmt is then copied into plan->context.
+	 * PlannedStmt is then copied into plan->stmt_context.
 	 */
 	plan_list = pg_plan_queries(query_list, plansource->query_string,
 								plansource->cursor_options, NULL);
 	Assert(list_length(plan_list) == list_length(plan->stmt_list));
 
-	oldcxt = MemoryContextSwitchTo(plan->context);
+	MemoryContextReset(plan->stmt_context);
+	oldcxt = MemoryContextSwitchTo(plan->stmt_context);
 	forboth (l1, plan_list, l2, plan->stmt_list)
 	{
 		PlannedStmt *plannedstmt = lfirst(l1);

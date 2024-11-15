@@ -161,6 +161,9 @@ typedef struct CachedPlan
 	int			generation;		/* parent's generation number for this plan */
 	int			refcount;		/* count of live references to this struct */
 	MemoryContext context;		/* context containing this CachedPlan */
+	MemoryContext stmt_context;	/* context containing the PlannedStmts in
+								 * stmt_list, but not the List itself which
+								 * is in the above context */
 
 	/*
 	 * If the plan is not associated with a CachedPlanSource, it is saved in
