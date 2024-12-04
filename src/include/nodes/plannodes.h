@@ -74,6 +74,10 @@ typedef struct PlannedStmt
 
 	List	   *rtable;			/* list of RangeTblEntry nodes */
 
+	Bitmapset  *unprunableRelids;	/* RT indexes of relations that are not
+									 * subject to runtime pruning; set for
+									 * AcquireExecutorLocks(). */
+
 	List	   *permInfos;		/* list of RTEPermissionInfo nodes for rtable
 								 * entries needing one */
 
@@ -1475,6 +1479,9 @@ typedef struct PartitionedRelPruneInfo
 
 	/* subpart index by partition index, or -1 */
 	int		   *subpart_map pg_node_attr(array_size(nparts));
+
+	/* RT index by partition index, or 0 if not a leaf partition */
+	int		   *leafpart_rti_map pg_node_attr(array_size(nparts));
 
 	/* relation OID by partition index, or 0 */
 	Oid		   *relid_map pg_node_attr(array_size(nparts));

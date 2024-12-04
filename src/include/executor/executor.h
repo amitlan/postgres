@@ -19,6 +19,7 @@
 #include "nodes/lockoptions.h"
 #include "nodes/parsenodes.h"
 #include "utils/memutils.h"
+#include "utils/plancache.h"
 
 
 /*
@@ -198,6 +199,9 @@ ExecGetJunkAttribute(TupleTableSlot *slot, AttrNumber attno, bool *isNull)
  * prototypes from functions in execMain.c
  */
 extern void ExecutorStart(QueryDesc *queryDesc, int eflags);
+extern void ExecutorStartCachedPlan(QueryDesc *queryDesc, int eflags,
+									CachedPlanSource *plansource,
+									int query_index);
 extern void standard_ExecutorStart(QueryDesc *queryDesc, int eflags);
 extern void ExecutorRun(QueryDesc *queryDesc,
 						ScanDirection direction, uint64 count, bool execute_once);
@@ -261,6 +265,30 @@ extern void ExecEndNode(PlanState *node);
 extern void ExecShutdownNode(PlanState *node);
 extern void ExecSetTupleBound(int64 tuples_needed, PlanState *child_node);
 
+/*
+ * Is the CachedPlan in es_cachedplan still valid?
+ *
+ * Called from InitPlan() because invalidation messages that affect the plan
+ * might be received after locks have been taken on runtime-prunable relations.
+ * The caller should take appropriate action if the plan has become invalid.
+ */
+static inline bool
+ExecPlanStillValid(EState *estate)
+{
+	return estate->es_cachedplan == NULL ? true :
+		CachedPlanValid(estate->es_cachedplan);
+}
+
+/*
+ * Locks are needed only if running a cached plan that might contain unlocked
+ * relations, such as a reused generic plan.
+ */
+static inline bool
+ExecShouldLockRelations(EState *estate)
+{
+	return estate->es_cachedplan == NULL ? false :
+		CachedPlanRequiresLocking(estate->es_cachedplan);
+}
 
 /* ----------------------------------------------------------------
  *		ExecProcNode
@@ -590,7 +618,8 @@ extern bool ExecRelationIsTargetRelation(EState *estate, Index scanrelid);
 
 extern Relation ExecOpenScanRelation(EState *estate, Index scanrelid, int eflags);
 
-extern void ExecInitRangeTable(EState *estate, List *rangeTable, List *permInfos);
+extern void ExecInitRangeTable(EState *estate, List *rangeTable, List *permInfos,
+							   Bitmapset *unpruned_relids);
 extern void ExecCloseRangeTableRelations(EState *estate);
 extern void ExecCloseResultRelations(EState *estate);
 

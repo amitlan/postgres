@@ -907,6 +907,7 @@ execute_sql_string(const char *sql, const char *filename)
 				QueryDesc  *qdesc;
 
 				qdesc = CreateQueryDesc(stmt,
+										NULL,
 										sql,
 										GetActiveSnapshot(), NULL,
 										dest, NULL, NULL, 0);
