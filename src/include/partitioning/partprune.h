@@ -26,6 +26,7 @@ struct RelOptInfo;
  *		Stores information needed at runtime for pruning computations
  *		related to a single partitioned table.
  *
+ * initialized		Has the information in this struct been initialized?
  * strategy			Partition strategy, e.g. LIST, RANGE, HASH.
  * partnatts		Number of columns in the partition key.
  * nparts			Number of partitions in this partitioned table.
@@ -48,6 +49,7 @@ struct RelOptInfo;
  */
 typedef struct PartitionPruneContext
 {
+	bool		initialized;
 	char		strategy;
 	int			partnatts;
 	int			nparts;
