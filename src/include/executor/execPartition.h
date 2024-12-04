@@ -133,11 +133,12 @@ typedef struct PartitionPruneState
 	PartitionPruningData *partprunedata[FLEXIBLE_ARRAY_MEMBER];
 } PartitionPruneState;
 
-extern PartitionPruneState *ExecInitPartitionPruning(PlanState *planstate,
-													 int n_total_subplans,
-													 int part_prune_index,
-													 Bitmapset *relids,
-													 Bitmapset **initially_valid_subplans);
+void ExecDoInitialPruning(EState *estate);
+extern PartitionPruneState *ExecInitPartitionExecPruning(PlanState *planstate,
+														 int n_total_subplans,
+														 int part_prune_index,
+														 Bitmapset *relids,
+														 Bitmapset **initially_valid_subplans);
 extern Bitmapset *ExecFindMatchingSubPlans(PartitionPruneState *prunestate,
 										   bool initial_prune);
 
