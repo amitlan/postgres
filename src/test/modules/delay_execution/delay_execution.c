@@ -41,7 +41,7 @@ static int	executor_start_lock_id = 0;
 
 /* Save previous hook users to be a good citizen */
 static planner_hook_type prev_planner_hook = NULL;
-static ExecutorStart_hook_type prev_ExecutorStart_hook = NULL;
+static ExecutorStartCachedPlan_hook_type prev_ExecutorStartCachedPlan_hook = NULL;
 
 
 /* planner_hook function to provide the desired delay */
@@ -79,7 +79,9 @@ delay_execution_planner(Query *parse, const char *query_string,
 
 /* ExecutorStart_hook function to provide the desired delay */
 static void
-delay_execution_ExecutorStart(QueryDesc *queryDesc, int eflags)
+delay_execution_ExecutorStartCachedPlan(QueryDesc *queryDesc, int eflags,
+										CachedPlanSource *plansource,
+										int query_index)
 {
 	/* If enabled, delay by taking and releasing the specified lock */
 	if (executor_start_lock_id != 0)
@@ -97,13 +99,15 @@ delay_execution_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	}
 
 	/* Now start the executor, possibly via a previous hook user */
-	if (prev_ExecutorStart_hook)
-		prev_ExecutorStart_hook(queryDesc, eflags);
+	if (prev_ExecutorStartCachedPlan_hook)
+		prev_ExecutorStartCachedPlan_hook(queryDesc, eflags, plansource,
+										  query_index);
 	else
-		standard_ExecutorStart(queryDesc, eflags);
+		standard_ExecutorStartCachedPlan(queryDesc, eflags, plansource,
+										 query_index);
 
 	if (executor_start_lock_id != 0)
-		elog(NOTICE, "Finished ExecutorStart(): CachedPlan is %s",
+		elog(NOTICE, "Finished ExecutorStartCachedPlan(): CachedPlan is %s",
 			 CachedPlanValid(queryDesc->cplan) ? "valid" : "not valid");
 }
 
@@ -139,6 +143,6 @@ _PG_init(void)
 	/* Install our hooks. */
 	prev_planner_hook = planner_hook;
 	planner_hook = delay_execution_planner;
-	prev_ExecutorStart_hook = ExecutorStart_hook;
-	ExecutorStart_hook = delay_execution_ExecutorStart;
+	prev_ExecutorStartCachedPlan_hook = ExecutorStartCachedPlan_hook;
+	ExecutorStartCachedPlan_hook = delay_execution_ExecutorStartCachedPlan;
 }

@@ -68,6 +68,7 @@
 
 /* Hooks for plugins to get control in ExecutorStart/Run/Finish/End */
 ExecutorStart_hook_type ExecutorStart_hook = NULL;
+ExecutorStartCachedPlan_hook_type ExecutorStartCachedPlan_hook = NULL;
 ExecutorRun_hook_type ExecutorRun_hook = NULL;
 ExecutorFinish_hook_type ExecutorFinish_hook = NULL;
 ExecutorEnd_hook_type ExecutorEnd_hook = NULL;
@@ -123,6 +124,16 @@ static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
 void
 ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
+	EState	   *estate;
+	MemoryContext oldcontext;
+	PlannedStmt *plannedstmt = queryDesc->plannedstmt;
+	List	   *rangeTable = plannedstmt->rtable;
+	CachedPlan *cachedplan = queryDesc->cplan;
+
+	/* sanity checks: queryDesc must not be started already */
+	Assert(queryDesc != NULL);
+	Assert(queryDesc->estate == NULL);
+
 	/*
 	 * In some cases (e.g. an EXECUTE statement or an execute message with the
 	 * extended query protocol) the query_id won't be reported, so do it now.
@@ -132,100 +143,6 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 	 * reported.
 	 */
 	pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
-
-	if (ExecutorStart_hook)
-		(*ExecutorStart_hook) (queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
-}
-
-/*
- * ExecutorStartCachedPlan
- *		Start execution for a given query in the CachedPlanSource, replanning
- *		if the plan is invalidated due to deferred locks taken during the
- *		plan's initialization
- *
- * This function handles cases where the CachedPlan given in queryDesc->cplan
- * might become invalid during the initialization of the plan given in
- * queryDesc->plannedstmt, particularly when prunable relations in it are
- * locked after performing initial pruning. If the locks invalidate the plan,
- * the function calls UpdateCachedPlan() to replan all queries in the
- * CachedPlan, and then retries initialization.
- *
- * The function repeats the process until ExecutorStart() successfully
- * initializes the plan, that is without the CachedPlan becoming invalid.
- */
-void
-ExecutorStartCachedPlan(QueryDesc *queryDesc, int eflags,
-						CachedPlanSource *plansource,
-						int query_index)
-{
-	if (unlikely(queryDesc->cplan == NULL))
-		elog(ERROR, "ExecutorStartCachedPlan(): missing CachedPlan");
-	if (unlikely(plansource == NULL))
-		elog(ERROR, "ExecutorStartCachedPlan(): missing CachedPlanSource");
-
-	/*
-	 * Loop and retry with an updated plan until no further invalidation
-	 * occurs.
-	 */
-	while (1)
-	{
-		ExecutorStart(queryDesc, eflags);
-		if (!CachedPlanValid(queryDesc->cplan))
-		{
-			/*
-			 * Clean up the current execution state before creating the new
-			 * plan to retry ExecutorStart().  Mark execution as aborted to
-			 * ensure that AFTER trigger state is properly reset.
-			 */
-			queryDesc->estate->es_aborted = true;
-			ExecutorEnd(queryDesc);
-
-			/* Retry ExecutorStart() with an updated plan tree. */
-			queryDesc->plannedstmt = UpdateCachedPlan(plansource, query_index,
-													  queryDesc->queryEnv);
-		}
-		else
-			/*
-			 * Exit the loop if the plan is initialized successfully and no
-			 * sinval messages were received that invalidated the CachedPlan.
-			 */
-			break;
-	}
-}
-
-void
-standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
-{
-	EState	   *estate;
-	MemoryContext oldcontext;
-
-	/* sanity checks: queryDesc must not be started already */
-	Assert(queryDesc != NULL);
-	Assert(queryDesc->estate == NULL);
-
-	/* caller must ensure the query's snapshot is active */
-	Assert(GetActiveSnapshot() == queryDesc->snapshot);
-
-	/*
-	 * If the transaction is read-only, we need to check if any writes are
-	 * planned to non-temporary tables.  EXPLAIN is considered read-only.
-	 *
-	 * Don't allow writes in parallel mode.  Supporting UPDATE and DELETE
-	 * would require (a) storing the combo CID hash in shared memory, rather
-	 * than synchronizing it just once at the start of parallelism, and (b) an
-	 * alternative to heap_update()'s reliance on xmax for mutual exclusion.
-	 * INSERT may have no such troubles, but we forbid it to simplify the
-	 * checks.
-	 *
-	 * We have lower-level defenses in CommandCounterIncrement and elsewhere
-	 * against performing unsafe operations in parallel mode, but this gives a
-	 * more user-friendly error message.
-	 */
-	if ((XactReadOnly || IsInParallelMode()) &&
-		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
-		ExecCheckXactReadOnly(queryDesc->plannedstmt);
 
 	/*
 	 * Build EState, switch into per-query memory context for startup.
@@ -306,12 +223,155 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	estate->es_instrument = queryDesc->instrument_options;
 	estate->es_jit_flags = queryDesc->plannedstmt->jitFlags;
 
+	estate->es_part_prune_infos = plannedstmt->partPruneInfos;
+
+	/*
+	 * Do permissions checks
+	 */
+	ExecCheckPermissions(rangeTable, plannedstmt->permInfos, true);
+
+	/*
+	 * initialize the node's execution state
+	 */
+	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos,
+					   bms_copy(plannedstmt->unprunableRelids));
+
+	/*
+	 * Perform runtime "initial" pruning to identify which child subplans,
+	 * corresponding to the children of plan nodes that contain
+	 * PartitionPruneInfo such as Append, will not be executed. The results,
+	 * which are bitmapsets of indexes of the child subplans that will be
+	 * executed, are saved in es_part_prune_results.  These results correspond
+	 * to each PartitionPruneInfo entry, and the es_part_prune_results list is
+	 * parallel to es_part_prune_infos.
+	 *
+	 * This will also add the RT indexes of surviving leaf partitions to
+	 * es_unpruned_relids.
+	 */
+	ExecDoInitialPruning(estate, cachedplan);
+
+	MemoryContextSwitchTo(oldcontext);
+
+	if (cachedplan && !CachedPlanValid(cachedplan))
+		return;
+
+	if (ExecutorStart_hook)
+		(*ExecutorStart_hook) (queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+}
+
+/*
+ * ExecutorStartCachedPlan
+ *		Start execution for a given query in the CachedPlanSource, replanning
+ *		if the plan is invalidated due to deferred locks taken during the
+ *		plan's initialization
+ *
+ * This function handles cases where the CachedPlan given in queryDesc->cplan
+ * might become invalid during the initialization of the plan given in
+ * queryDesc->plannedstmt, particularly when prunable relations in it are
+ * locked after performing initial pruning. If the locks invalidate the plan,
+ * the function calls UpdateCachedPlan() to replan all queries in the
+ * CachedPlan, and then retries initialization.
+ *
+ * The function repeats the process until ExecutorStart() successfully
+ * initializes the plan, that is without the CachedPlan becoming invalid.
+ */
+void
+ExecutorStartCachedPlan(QueryDesc *queryDesc, int eflags,
+						CachedPlanSource *plansource,
+						int query_index)
+{
+	if (ExecutorStartCachedPlan_hook)
+		(*ExecutorStartCachedPlan_hook) (queryDesc, eflags, plansource,
+										 query_index);
+	else
+		standard_ExecutorStartCachedPlan(queryDesc, eflags, plansource,
+										 query_index);
+
+}
+
+void
+standard_ExecutorStartCachedPlan(QueryDesc *queryDesc, int eflags,
+								 CachedPlanSource *plansource,
+								 int query_index)
+{
+	if (unlikely(queryDesc->cplan == NULL))
+		elog(ERROR, "ExecutorStartCachedPlan(): missing CachedPlan");
+	if (unlikely(plansource == NULL))
+		elog(ERROR, "ExecutorStartCachedPlan(): missing CachedPlanSource");
+
+	/*
+	 * Loop and retry with an updated plan until no further invalidation
+	 * occurs.
+	 */
+	while (1)
+	{
+		ExecutorStart(queryDesc, eflags);
+		if (!CachedPlanValid(queryDesc->cplan))
+		{
+			/*
+			 * Clean up the current execution state before creating the new
+			 * plan to retry ExecutorStart().  Mark execution as aborted to
+			 * ensure that AFTER trigger state is properly reset.
+			 */
+			queryDesc->estate->es_aborted = true;
+			ExecutorEnd(queryDesc);
+
+			/* Retry ExecutorStart() with an updated plan tree. */
+			queryDesc->plannedstmt = UpdateCachedPlan(plansource, query_index,
+													  queryDesc->queryEnv);
+		}
+		else
+			/*
+			 * Exit the loop if the plan is initialized successfully and no
+			 * sinval messages were received that invalidated the CachedPlan.
+			 */
+			break;
+	}
+}
+
+void
+standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	MemoryContext oldcontext;
+	EState	   *estate;
+
+	/* sanity checks: queryDesc must not be started already */
+	Assert(queryDesc != NULL);
+	Assert(queryDesc->estate != NULL);
+
+	/* caller must ensure the query's snapshot is active */
+	Assert(GetActiveSnapshot() == queryDesc->snapshot);
+
+	/*
+	 * If the transaction is read-only, we need to check if any writes are
+	 * planned to non-temporary tables.  EXPLAIN is considered read-only.
+	 *
+	 * Don't allow writes in parallel mode.  Supporting UPDATE and DELETE
+	 * would require (a) storing the combo CID hash in shared memory, rather
+	 * than synchronizing it just once at the start of parallelism, and (b) an
+	 * alternative to heap_update()'s reliance on xmax for mutual exclusion.
+	 * INSERT may have no such troubles, but we forbid it to simplify the
+	 * checks.
+	 *
+	 * We have lower-level defenses in CommandCounterIncrement and elsewhere
+	 * against performing unsafe operations in parallel mode, but this gives a
+	 * more user-friendly error message.
+	 */
+	if ((XactReadOnly || IsInParallelMode()) &&
+		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		ExecCheckXactReadOnly(queryDesc->plannedstmt);
+
 	/*
 	 * Set up an AFTER-trigger statement context, unless told not to, or
 	 * unless it's EXPLAIN-only mode (when ExecutorFinish won't be called).
 	 */
 	if (!(eflags & (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY)))
 		AfterTriggerBeginQuery();
+
+	estate = queryDesc->estate;
+	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
 
 	/*
 	 * Initialize the plan state tree
@@ -928,46 +988,14 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 {
 	CmdType		operation = queryDesc->operation;
 	PlannedStmt *plannedstmt = queryDesc->plannedstmt;
-	CachedPlan *cachedplan = queryDesc->cplan;
 	Plan	   *plan = plannedstmt->planTree;
-	List	   *rangeTable = plannedstmt->rtable;
 	EState	   *estate = queryDesc->estate;
 	PlanState  *planstate;
 	TupleDesc	tupType;
 	ListCell   *l;
 	int			i;
 
-	/*
-	 * Do permissions checks
-	 */
-	ExecCheckPermissions(rangeTable, plannedstmt->permInfos, true);
-
-	/*
-	 * initialize the node's execution state
-	 */
-	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos,
-					   bms_copy(plannedstmt->unprunableRelids));
-
 	estate->es_plannedstmt = plannedstmt;
-	estate->es_cachedplan = cachedplan;
-	estate->es_part_prune_infos = plannedstmt->partPruneInfos;
-
-	/*
-	 * Perform runtime "initial" pruning to identify which child subplans,
-	 * corresponding to the children of plan nodes that contain
-	 * PartitionPruneInfo such as Append, will not be executed. The results,
-	 * which are bitmapsets of indexes of the child subplans that will be
-	 * executed, are saved in es_part_prune_results.  These results correspond
-	 * to each PartitionPruneInfo entry, and the es_part_prune_results list is
-	 * parallel to es_part_prune_infos.
-	 *
-	 * This will also add the RT indexes of surviving leaf partitions to
-	 * es_unpruned_relids.
-	 */
-	ExecDoInitialPruning(estate);
-
-	if (!ExecPlanStillValid(estate))
-		return;
 
 	/*
 	 * Next, build the ExecRowMark array from the PlanRowMark(s), if any.
@@ -2961,9 +2989,6 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	 * the snapshot, rangetable, and external Param info.  They need their own
 	 * copies of local state, including a tuple table, es_param_exec_vals,
 	 * result-rel info, etc.
-	 *
-	 * es_cachedplan is not copied because EPQ plan execution does not acquire
-	 * any new locks that could invalidate the CachedPlan.
 	 */
 	rcestate->es_direction = ForwardScanDirection;
 	rcestate->es_snapshot = parentestate->es_snapshot;

@@ -1813,7 +1813,7 @@ adjust_partition_colnos_using_map(List *colnos, AttrMap *attrMap)
  * use the same index to retrieve the pruning results.
  */
 void
-ExecDoInitialPruning(EState *estate)
+ExecDoInitialPruning(EState *estate, CachedPlan *cplan)
 {
 	ListCell   *lc;
 	List	   *locked_relids = NIL;
@@ -1842,7 +1842,7 @@ ExecDoInitialPruning(EState *estate)
 		else
 			validsubplan_rtis = all_leafpart_rtis;
 
-		if (ExecShouldLockRelations(estate))
+		if (cplan && CachedPlanRequiresLocking(cplan))
 		{
 			int		rtindex = -1;
 
@@ -1857,6 +1857,7 @@ ExecDoInitialPruning(EState *estate)
 				locked_relids = lappend_int(locked_relids, rtindex);
 			}
 		}
+
 		estate->es_unpruned_relids = bms_add_members(estate->es_unpruned_relids,
 													 validsubplan_rtis);
 		estate->es_part_prune_results = lappend(estate->es_part_prune_results,
@@ -1867,7 +1868,7 @@ ExecDoInitialPruning(EState *estate)
 	 * Release the useless locks if the plan won't be executed.  This is the
 	 * same as what CheckCachedPlan() in plancache.c does.
 	 */
-	if (!ExecPlanStillValid(estate))
+	if (cplan && !CachedPlanValid(cplan))
 	{
 		foreach(lc, locked_relids)
 		{

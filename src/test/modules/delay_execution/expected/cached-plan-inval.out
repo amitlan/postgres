@@ -32,8 +32,7 @@ t
 (1 row)
 
 step s1exec: <... completed>
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is not valid
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
 QUERY PLAN                           
 -------------------------------------
 LockRows                             
@@ -48,7 +47,7 @@ starting permutation: s1prep2 s2lock s1exec2 s2dropi s2unlock
 step s1prep2: SET plan_cache_mode = force_generic_plan;
 		  PREPARE q2 AS SELECT * FROM foov WHERE a = one() or a = two();
 		  EXPLAIN (COSTS OFF) EXECUTE q2;
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
 QUERY PLAN                                        
 --------------------------------------------------
 Append                                            
@@ -81,8 +80,7 @@ t
 (1 row)
 
 step s1exec2: <... completed>
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is not valid
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
 QUERY PLAN                                  
 --------------------------------------------
 Append                                      
@@ -98,9 +96,9 @@ starting permutation: s1prep3 s2lock s1exec3 s2dropi s2unlock
 step s1prep3: SET plan_cache_mode = force_generic_plan;
 		  PREPARE q3 AS UPDATE foov SET a = a WHERE a = one() or a = two();
 		  EXPLAIN (COSTS OFF) EXECUTE q3;
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
 QUERY PLAN                                                    
 --------------------------------------------------------------
 Nested Loop                                                   
@@ -178,10 +176,9 @@ t
 (1 row)
 
 step s1exec3: <... completed>
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is not valid
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
 QUERY PLAN                                                   
 -------------------------------------------------------------
 Nested Loop                                                  
@@ -233,7 +230,7 @@ step s1prep4: SET plan_cache_mode = force_generic_plan;
 		  SET enable_seqscan TO off;
 		  PREPARE q4 AS SELECT * FROM generate_series(1, 1) WHERE EXISTS (SELECT * FROM foov WHERE a = $1 FOR UPDATE);
 		  EXPLAIN (COSTS OFF) EXECUTE q4 (1);
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
 QUERY PLAN                                                     
 ---------------------------------------------------------------
 Result                                                         
@@ -264,8 +261,7 @@ t
 (1 row)
 
 step s1exec4: <... completed>
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is not valid
-s1: NOTICE:  Finished ExecutorStart(): CachedPlan is valid
+s1: NOTICE:  Finished ExecutorStartCachedPlan(): CachedPlan is valid
 QUERY PLAN                                   
 ---------------------------------------------
 Result                                       

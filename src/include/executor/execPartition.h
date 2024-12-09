@@ -17,6 +17,7 @@
 #include "nodes/parsenodes.h"
 #include "nodes/plannodes.h"
 #include "partitioning/partprune.h"
+#include "utils/plancache.h"
 
 /* See execPartition.c for the definitions. */
 typedef struct PartitionDispatchData *PartitionDispatch;
@@ -136,7 +137,7 @@ typedef struct PartitionPruneState
 	PartitionPruningData *partprunedata[FLEXIBLE_ARRAY_MEMBER];
 } PartitionPruneState;
 
-void ExecDoInitialPruning(EState *estate);
+void ExecDoInitialPruning(EState *estate, CachedPlan *cplan);
 extern PartitionPruneState *ExecInitPartitionExecPruning(PlanState *planstate,
 														 int n_total_subplans,
 														 int part_prune_index,
