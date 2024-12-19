@@ -2342,7 +2342,6 @@ InvalidateConstraintCacheCallBack(Datum arg, int cacheid, uint32 hashvalue)
 	}
 }
 
-
 /*
  * Prepare execution plan for a query to enforce an RI restriction
  */
