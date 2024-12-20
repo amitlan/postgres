@@ -31,9 +31,17 @@
 #include "access/tableam.h"
 #include "executor/executor.h"
 #include "executor/nodeSeqscan.h"
+#include "miscadmin.h"
 #include "utils/rel.h"
 
 static TupleTableSlot *SeqNext(SeqScanState *node);
+static TupleTableSlot *ExecSeqScanNoQualNoProj(PlanState *pstate);
+static TupleTableSlot *ExecSeqScanNoQual(PlanState *pstate);
+static TupleTableSlot *ExecSeqScanNoProj(PlanState *pstate);
+static TupleTableSlot *ExecSeqScanNoEPQ(PlanState *pstate);
+static pg_attribute_always_inline TupleTableSlot *ExecSeqScanNoEPQImpl(PlanState *pstate,
+																	   ExprState *qual,
+																	   ProjectionInfo *projInfo);
 
 /* ----------------------------------------------------------------
  *						Scan Support
@@ -114,6 +122,147 @@ ExecSeqScan(PlanState *pstate)
 					(ExecScanRecheckMtd) SeqRecheck);
 }
 
+/*
+ * ExecSeqScanNoEPQImpl
+ *		A specialized version of ExecScan() for use in plans where
+ *		ExecInitSeqScan() determines that the node cannot be invoked by
+ *		EvalPlanQual().
+ *
+ * This function is marked with the always-inline attribute to allow compilers
+ * to create specialized versions for different combinations of qual (NULL or
+ * non-NULL) and projInfo (NULL or non-NULL). By inlining, unnecessary branches
+ * can be eliminated in each of the ExecSeqScan*() functions below.
+ *
+ * ExecInitSeqScan() assigns the appropriate variant to pstate->ExecProcNode of
+ * the SeqScan node minimizing execution-time overhead for checking qual and
+ * projInfo.
+ */
+static pg_attribute_always_inline TupleTableSlot *
+ExecSeqScanNoEPQImpl(PlanState *pstate, ExprState *qual,
+					 ProjectionInfo *projInfo)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+	ExprContext *econtext;
+
+	econtext = node->ss.ps.ps_ExprContext;
+
+	/*
+	 * If we have neither a qual to check nor a projection to do, just skip
+	 * all the overhead and return the raw scan tuple.
+	 */
+	if (!qual && !projInfo)
+	{
+		ResetExprContext(econtext);
+		return SeqNext(node);
+	}
+
+	/*
+	 * Reset per-tuple memory context to free any expression evaluation
+	 * storage allocated in the previous tuple cycle.
+	 */
+	ResetExprContext(econtext);
+
+	/*
+	 * get a tuple from the access method.  Loop until we obtain a tuple that
+	 * passes the qualification.
+	 */
+	for (;;)
+	{
+		TupleTableSlot *slot;
+
+		CHECK_FOR_INTERRUPTS();
+
+		slot = SeqNext(node);
+
+		/*
+		 * if the slot returned by the accessMtd contains NULL, then it means
+		 * there is nothing more to scan so we just return an empty slot,
+		 * being careful to use the projection result slot so it has correct
+		 * tupleDesc.
+		 */
+		if (TupIsNull(slot))
+		{
+			if (projInfo)
+				return ExecClearTuple(projInfo->pi_state.resultslot);
+			else
+				return slot;
+		}
+
+		/*
+		 * place the current tuple into the expr context
+		 */
+		econtext->ecxt_scantuple = slot;
+
+		/*
+		 * check that the current tuple satisfies the qual-clause
+		 *
+		 * check for non-null qual here to avoid a function call to ExecQual()
+		 * when the qual is null ... saves only a few cycles, but they add up
+		 * ...
+		 */
+		if (qual == NULL || ExecQual(qual, econtext))
+		{
+			/*
+			 * Found a satisfactory scan tuple.
+			 */
+			if (projInfo)
+			{
+				/*
+				 * Form a projection tuple, store it in the result tuple slot
+				 * and return it.
+				 */
+				return ExecProject(projInfo);
+			}
+			else
+			{
+				/*
+				 * Here, we aren't projecting, so just return scan tuple.
+				 */
+				return slot;
+			}
+		}
+		else
+			InstrCountFiltered1(node, 1);
+
+		/*
+		 * Tuple fails qual, so free per-tuple memory and try again.
+		 */
+		ResetExprContext(econtext);
+	}
+}
+
+/*
+ * Variants of ExecSeqScan() used when no EvalPlanQual() is necessary,
+ * specialized based on the presence of qual and projection as described in
+ * the comment above ExecSeqScanNoEPQImpl().
+ */
+static TupleTableSlot *
+ExecSeqScanNoQualNoProj(PlanState *pstate)
+{
+	Assert(pstate->qual == NULL && pstate->ps_ProjInfo == NULL);
+	return ExecSeqScanNoEPQImpl(pstate, NULL, NULL);
+}
+
+static TupleTableSlot *
+ExecSeqScanNoQual(PlanState *pstate)
+{
+	Assert(pstate->qual == NULL);
+	return ExecSeqScanNoEPQImpl(pstate, NULL, pstate->ps_ProjInfo);
+}
+
+static TupleTableSlot *
+ExecSeqScanNoProj(PlanState *pstate)
+{
+	Assert(pstate->ps_ProjInfo == NULL);
+	return ExecSeqScanNoEPQImpl(pstate, pstate->qual, NULL);
+}
+
+static TupleTableSlot *
+ExecSeqScanNoEPQ(PlanState *pstate)
+{
+	Assert(pstate->qual != NULL && pstate->ps_ProjInfo != NULL);
+	return ExecSeqScanNoEPQImpl(pstate, pstate->qual, pstate->ps_ProjInfo);
+}
 
 /* ----------------------------------------------------------------
  *		ExecInitSeqScan
@@ -137,7 +286,6 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	scanstate = makeNode(SeqScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecSeqScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -170,6 +318,23 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	 */
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
+
+	/*
+	 * When EvalPlanQual() is not in use, assign ExecProcNode for this node
+	 * based on the presence of qual and projection. Each ExecSeqScan*()
+	 * variant is optimized for the specific combination of these conditions.
+	 */
+	if (estate->es_epq_active != NULL)
+		scanstate->ss.ps.ExecProcNode = ExecSeqScan;
+	else if (scanstate->ss.ps.qual == NULL &&
+			 scanstate->ss.ps.ps_ProjInfo == NULL)
+		scanstate->ss.ps.ExecProcNode = ExecSeqScanNoQualNoProj;
+	else if (scanstate->ss.ps.qual == NULL)
+		scanstate->ss.ps.ExecProcNode = ExecSeqScanNoQual;
+	else if (scanstate->ss.ps.ps_ProjInfo == NULL)
+		scanstate->ss.ps.ExecProcNode = ExecSeqScanNoProj;
+	else
+		scanstate->ss.ps.ExecProcNode = ExecSeqScanNoEPQ;
 
 	return scanstate;
 }
