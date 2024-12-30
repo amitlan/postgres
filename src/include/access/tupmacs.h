@@ -15,7 +15,8 @@
 #define TUPMACS_H
 
 #include "catalog/pg_type_d.h"	/* for TYPALIGN macros */
-
+#include "port/pg_bitutils.h"
+#include "varatt.h"
 
 /*
  * Check a tuple's null bitmap to determine whether the attribute is null.
@@ -26,6 +27,49 @@ static inline bool
 att_isnull(int ATT, const bits8 *BITS)
 {
 	return !(BITS[ATT >> 3] & (1 << (ATT & 0x07)));
+}
+
+/*
+ * populate_isnull_array
+ *		Transform a tuple's null bitmap into a boolean array.
+ *
+ * Caller must ensure that the isnull array is sized so it contains
+ * at least as many elements as there are bits in the 'bits' array.
+ * This is required because we always round 'natts' up to the next multiple
+ * of 8.
+ */
+static inline void
+populate_isnull_array(const bits8 *bits, int natts, bool *isnull)
+{
+	int			nbytes = (natts + 7) >> 3;
+
+	/*
+	 * Multiplying an inverted NULL bitmap byte by this value results in the
+	 * lowest bit in each byte being set the same as each bit of the inverted
+	 * byte.  We perform this as 2 32-bit operations rather than a single
+	 * 64-bit operation as multiplying by the required value to do this in
+	 * 64-bits would result in overflowing a uint64 in some cases.
+	 */
+#define SPREAD_BITS_MULTIPLIER_32 0x204081U
+
+	for (int i = 0; i < nbytes; i++, isnull += 8)
+	{
+		uint64		isnull_8;
+		bits8		nullbyte = ~bits[i];
+
+		/* convert the lower 4 bits of null bitmap word into 32 bit int */
+		isnull_8 = (nullbyte & 0xf) * SPREAD_BITS_MULTIPLIER_32;
+
+		/*
+		 * convert the upper 4 bits of null bitmap word into 32 bit int, shift
+		 * into the upper 32 bit
+		 */
+		isnull_8 |= ((uint64) ((nullbyte >> 4) * SPREAD_BITS_MULTIPLIER_32)) << 32;
+
+		/* mask out all other bits apart from the lowest bit of each byte */
+		isnull_8 &= UINT64CONST(0x0101010101010101);
+		memcpy(isnull, &isnull_8, sizeof(uint64));
+	}
 }
 
 #ifndef FRONTEND
@@ -68,6 +112,151 @@ fetch_att(const void *T, bool attbyval, int attlen)
 	}
 	else
 		return PointerGetDatum(T);
+}
+
+/*
+ * Same, but no error checking for invalid attlens for byval types.  This
+ * is safe to use when attlen comes from CompactAttribute as we validate the
+ * length when populating that struct.
+ */
+static inline Datum
+fetch_att_noerr(const void *T, bool attbyval, int attlen)
+{
+	if (attbyval)
+	{
+		switch (attlen)
+		{
+			case sizeof(int32):
+				return Int32GetDatum(*((const int32 *) T));
+			case sizeof(int16):
+				return Int16GetDatum(*((const int16 *) T));
+			case sizeof(char):
+				return CharGetDatum(*((const char *) T));
+			default:
+				Assert(attlen == sizeof(int64));
+				return Int64GetDatum(*((const int64 *) T));
+		}
+	}
+	else
+		return PointerGetDatum(T);
+}
+
+
+/*
+ * align_fetch_then_add
+ *		Applies all the functionality of att_pointer_alignby(),
+ *		fetch_att_noerr() and att_addlength_pointer() resulting in *off
+ *		pointer to the perhaps unaligned number of bytes into 'tupptr', ready
+ *		to deform the next attribute.
+ *
+ * tupptr: pointer to the beginning of the tuple, after the header and any
+ * NULL bitmask.
+ * off: offset in bytes for reading tuple data, possibly unaligned.
+ * attbyval, attlen, attalignby are values from CompactAttribute.
+ */
+static inline Datum
+align_fetch_then_add(const char *tupptr, uint32 *off, bool attbyval, int attlen,
+					 uint8 attalignby)
+{
+	Datum		res;
+
+	if (attlen > 0)
+	{
+		const char *offset_ptr;
+
+		*off = TYPEALIGN(attalignby, *off);
+		offset_ptr = tupptr + *off;
+		*off += attlen;
+		if (attbyval)
+		{
+			switch (attlen)
+			{
+				case sizeof(char):
+					return CharGetDatum(*((const char *) offset_ptr));
+				case sizeof(int16):
+					return Int16GetDatum(*((const int16 *) offset_ptr));
+				case sizeof(int32):
+					return Int32GetDatum(*((const int32 *) offset_ptr));
+				default:
+
+					/*
+					 * populate_compact_attribute_internal() should have
+					 * checked
+					 */
+					Assert(attlen == sizeof(int64));
+					return Int64GetDatum(*((const int64 *) offset_ptr));
+			}
+		}
+		return PointerGetDatum(offset_ptr);
+	}
+	else if (attlen == -1)
+	{
+		if (!VARATT_IS_SHORT(tupptr + *off))
+			*off = TYPEALIGN(attalignby, *off);
+
+		res = PointerGetDatum(tupptr + *off);
+		*off += VARSIZE_ANY(DatumGetPointer(res));
+		return res;
+	}
+	else
+	{
+		Assert(attlen == -2);
+		*off = TYPEALIGN(attalignby, *off);
+		res = PointerGetDatum(tupptr + *off);
+		*off += strlen(tupptr + *off) + 1;
+		return res;
+	}
+}
+
+/*
+ * first_null_attr
+ *		Inspect a NULL bitmask from a tuple and return the 0-based attnum of the
+ *		first NULL attribute.  Returns natts if no NULLs were found.
+ *
+ * We expect that 'bits' contains at least one 0 bit somewhere in the mask,
+ * not necessarily < natts.
+ */
+static inline int
+first_null_attr(const bits8 *bits, int natts)
+{
+	int			lastByte = natts >> 3;
+	int			bytenum;
+	int			res;
+
+#ifdef USE_ASSERT_CHECKING
+	int			firstnull_check = natts;
+
+	/* Do it the slow way and check we get the same answer. */
+	for (int i = 0; i < natts; i++)
+	{
+		if (att_isnull(i, bits))
+		{
+			firstnull_check = i;
+			break;
+		}
+	}
+#endif
+
+	/* Process all bytes up to just before the byte for the natts index */
+	for (bytenum = 0; bytenum < lastByte; bytenum++)
+	{
+		/* break if there's any NULL attrs (a 0 bit) */
+		if (bits[bytenum] != 0xFF)
+			break;
+	}
+
+	res = bytenum << 3;
+	res += pg_rightmost_one_pos32(~bits[bytenum]);
+
+	/*
+	 * Since we did no masking to mask out bits beyond natts, we may have
+	 * found a bit higher than natts, so we must cap to natts
+	 */
+	res = Min(res, natts);
+
+	Assert(res == firstnull_check);
+
+	return res;
 }
 #endif							/* FRONTEND */
 
