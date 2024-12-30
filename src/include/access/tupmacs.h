@@ -15,6 +15,7 @@
 #define TUPMACS_H
 
 #include "catalog/pg_type_d.h"	/* for TYPALIGN macros */
+#include "port/pg_bitutils.h"
 
 
 /*
@@ -68,6 +69,70 @@ fetch_att(const void *T, bool attbyval, int attlen)
 	}
 	else
 		return PointerGetDatum(T);
+}
+
+/*
+ * first_null_attr
+ *		Inspect a NULL bitmask from a tuple and return the 0-based attnum of the
+ *		first NULL attribute.  Returns natts if no NULLs were found.
+ *
+ * We expect that 'bits' contains at least one 0 bit somewhere in the mask,
+ * not necessarily < natts.
+ */
+static inline int
+first_null_attr(const bits8 *bits, int natts)
+{
+	int			lastByte = natts >> 3;
+	uint8		mask;
+	int			res = natts;
+	uint8		byte;
+
+#ifdef USE_ASSERT_CHECKING
+	int			firstnull_check = natts;
+
+	/* Do it the slow way and check we get the same answer. */
+	for (int i = 0; i < natts; i++)
+	{
+		if (att_isnull(i, bits))
+		{
+			firstnull_check = i;
+			break;
+		}
+	}
+#endif
+
+	/* Process all bytes up to just before the byte for the natts index */
+	for (int bytenum = 0; bytenum < lastByte; bytenum++)
+	{
+		if (bits[bytenum] != 0xFF)
+		{
+			byte = ~bits[bytenum];
+			res = bytenum << 3;
+			res += pg_rightmost_one_pos[byte];
+
+			Assert(res == firstnull_check);
+			return res;
+		}
+	}
+
+	/*
+	 * Create a mask with all bits beyond natts's bit set to off.  This
+	 * assumes the code above will have found a 0-bit before we run off the
+	 * end of the bits array.  Tuples without any NULLs won't have a bitmask
+	 * to mark NULLs.
+	 */
+	mask = 0xFF & ((((uint8) 1) << (natts & 7)) - 1);
+	byte = (~bits[lastByte]) & mask;
+
+	if (byte != 0)
+	{
+		res = lastByte << 3;
+		res += pg_rightmost_one_pos[byte];
+	}
+
+	Assert(res == firstnull_check);
+
+	return res;
 }
 #endif							/* FRONTEND */
 
