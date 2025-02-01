@@ -31,33 +31,44 @@
 /* Context for transformJsonTableColumns() */
 typedef struct JsonTableParseContext
 {
-	ParseState *pstate;
-	JsonTable  *jt;
-	TableFunc  *tf;
+	ParseState *pstate;			/* parsing state */
+	JsonTable  *jt;				/* untransformed node */
+	TableFunc  *tf;				/* transformed node	*/
 	List	   *pathNames;		/* list of all path and columns names */
 	int			pathNameId;		/* path name id counter */
 } JsonTableParseContext;
 
 static JsonTablePlan *transformJsonTableColumns(JsonTableParseContext *cxt,
+												JsonTablePlanSpec *planspec,
 												List *columns,
-												List *passingArgs,
-												JsonTablePathSpec *pathspec);
-static JsonTablePlan *transformJsonTableNestedColumns(JsonTableParseContext *cxt,
-													  List *passingArgs,
-													  List *columns);
+												List *passing_Args,
+												JsonTablePathSpec * pathspec);
 static JsonFuncExpr *transformJsonTableColumn(JsonTableColumn *jtc,
 											  Node *contextItemExpr,
-											  List *passingArgs);
+											  List *passingArgs,
+											  bool errorOnError);
 static bool isCompositeType(Oid typid);
-static JsonTablePlan *makeJsonTablePathScan(JsonTablePathSpec *pathspec,
-											bool errorOnError,
-											int colMin, int colMax,
-											JsonTablePlan *childplan);
+static JsonTablePlan *makeParentJsonTablePathScan(JsonTableParseContext *cxt,
+												  JsonTablePathSpec * pathspec,
+												  List *columns,
+												  List *passing_Args);
 static void CheckDuplicateColumnOrPathNames(JsonTableParseContext *cxt,
 											List *columns);
 static bool LookupPathOrColumnName(JsonTableParseContext *cxt, char *name);
 static char *generateJsonTablePathName(JsonTableParseContext *cxt);
-static JsonTablePlan *makeJsonTableSiblingJoin(JsonTablePlan *lplan,
+static JsonTablePlan *transformJsonTableNestedColumns(JsonTableParseContext *cxt,
+													  JsonTablePlanSpec *plan,
+													  List *columns,
+													  List *passing_Args);
+static void validateJsonTableChildPlan(ParseState *pstate,
+									   JsonTablePlanSpec *plan,
+									   List *columns);
+static JsonTablePlan *transformJsonTableNestedColumn(JsonTableParseContext *cxt,
+													 JsonTableColumn *jtc,
+													 JsonTablePlanSpec *planspec,
+													 List *passing_Args);
+static JsonTablePlan *makeJsonTableSiblingJoin(bool cross,
+											   JsonTablePlan *lplan,
 											   JsonTablePlan *rplan);
 
 /*
@@ -76,6 +87,7 @@ transformJsonTable(ParseState *pstate, JsonTable *jt)
 	TableFunc  *tf;
 	JsonFuncExpr *jfe;
 	JsonExpr   *je;
+	JsonTablePlanSpec *plan = jt->planspec;
 	JsonTablePathSpec *rootPathSpec = jt->pathspec;
 	bool		is_lateral;
 	JsonTableParseContext cxt = {pstate};
@@ -94,8 +106,21 @@ transformJsonTable(ParseState *pstate, JsonTable *jt)
 				parser_errposition(pstate, jt->on_error->location));
 
 	cxt.pathNameId = 0;
+
 	if (rootPathSpec->name == NULL)
+	{
+		if (jt->planspec != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("invalid JSON_TABLE expression"),
+					 errdetail("JSON_TABLE path must contain"
+							   " explicit AS pathname specification if"
+							   " explicit PLAN clause is used"),
+					 parser_errposition(pstate, rootPathSpec->location)));
+
 		rootPathSpec->name = generateJsonTablePathName(&cxt);
+	}
+
 	cxt.pathNames = list_make1(rootPathSpec->name);
 	CheckDuplicateColumnOrPathNames(&cxt, jt->columns);
 
@@ -135,7 +160,7 @@ transformJsonTable(ParseState *pstate, JsonTable *jt)
 	 */
 	cxt.jt = jt;
 	cxt.tf = tf;
-	tf->plan = (Node *) transformJsonTableColumns(&cxt, jt->columns,
+	tf->plan = (Node *) transformJsonTableColumns(&cxt, plan, jt->columns,
 												  jt->passing,
 												  rootPathSpec);
 
@@ -246,24 +271,89 @@ generateJsonTablePathName(JsonTableParseContext *cxt)
  * their type/collation information to cxt->tf.
  */
 static JsonTablePlan *
-transformJsonTableColumns(JsonTableParseContext *cxt, List *columns,
-						  List *passingArgs,
+transformJsonTableColumns(JsonTableParseContext *cxt,
+						  JsonTablePlanSpec *planspec,
+						  List *columns,
+						  List *passing_Args,
 						  JsonTablePathSpec *pathspec)
 {
+	JsonTablePathScan *scan;
+	JsonTablePlanSpec *childPlanSpec;
+	bool		defaultPlan = planspec == NULL ||
+				planspec->plan_type == JSTP_DEFAULT;
+
+	if (defaultPlan)
+		childPlanSpec = planspec;
+	else
+	{
+		/* validate parent and child plans */
+		JsonTablePlanSpec *parentPlanSpec;
+
+		if (planspec->plan_type == JSTP_JOINED)
+		{
+			if (planspec->join_type != JSTP_JOIN_INNER &&
+				planspec->join_type != JSTP_JOIN_OUTER)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("invalid JSON_TABLE plan clause"),
+						 errdetail("Expected INNER or OUTER."),
+						 parser_errposition(cxt->pstate, planspec->location)));
+
+			parentPlanSpec = planspec->plan1;
+			childPlanSpec = planspec->plan2;
+
+			Assert(parentPlanSpec->plan_type != JSTP_JOINED);
+			Assert(parentPlanSpec->pathname);
+		}
+		else
+		{
+			parentPlanSpec = planspec;
+			childPlanSpec = NULL;
+		}
+
+		if (strcmp(parentPlanSpec->pathname, pathspec->name) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("invalid JSON_TABLE plan"),
+					 errdetail("PATH name mismatch: expected %s but %s is given.",
+							   pathspec->name, parentPlanSpec->pathname),
+					 parser_errposition(cxt->pstate, planspec->location)));
+
+		validateJsonTableChildPlan(cxt->pstate, childPlanSpec, columns);
+	}
+
+	/* transform only non-nested columns */
+	scan = (JsonTablePathScan *) makeParentJsonTablePathScan(cxt, pathspec,
+															 columns,
+															 passing_Args);
+
+	if (childPlanSpec || defaultPlan)
+	{
+		/* transform recursively nested columns */
+		scan->child = transformJsonTableNestedColumns(cxt, childPlanSpec,
+													  columns, passing_Args);
+		if (scan->child)
+			scan->outerJoin = planspec == NULL ||
+				(planspec->join_type & JSTP_JOIN_OUTER);
+		/* else: default plan case, no children found */
+	}
+
+	return (JsonTablePlan *) scan;
+}
+
+/* Append transformed non-nested JSON_TABLE columns to the TableFunc node */
+static void
+appendJsonTableColumns(JsonTableParseContext *cxt, List *columns, List *passingArgs)
+{
+	ListCell   *col;
 	ParseState *pstate = cxt->pstate;
 	JsonTable  *jt = cxt->jt;
 	TableFunc  *tf = cxt->tf;
-	ListCell   *col;
 	bool		ordinality_found = false;
-	bool		errorOnError = jt->on_error &&
-		jt->on_error->btype == JSON_BEHAVIOR_ERROR;
+	JsonBehavior *on_error = jt->on_error;
+	bool		errorOnError = on_error &&
+		on_error->btype == JSON_BEHAVIOR_ERROR;
 	Oid			contextItemTypid = exprType(tf->docexpr);
-	int			colMin,
-				colMax;
-	JsonTablePlan *childplan;
-
-	/* Start of column range */
-	colMin = list_length(tf->colvalexprs);
 
 	foreach(col, columns)
 	{
@@ -273,12 +363,9 @@ transformJsonTableColumns(JsonTableParseContext *cxt, List *columns,
 		Oid			typcoll = InvalidOid;
 		Node	   *colexpr;
 
-		if (rawc->coltype != JTC_NESTED)
-		{
-			Assert(rawc->name);
+		if (rawc->name)
 			tf->colnames = lappend(tf->colnames,
 								   makeString(pstrdup(rawc->name)));
-		}
 
 		/*
 		 * Determine the type and typmod for the new column. FOR ORDINALITY
@@ -324,7 +411,7 @@ transformJsonTableColumns(JsonTableParseContext *cxt, List *columns,
 					param->typeMod = -1;
 
 					jfe = transformJsonTableColumn(rawc, (Node *) param,
-												   passingArgs);
+												  passingArgs, errorOnError);
 
 					colexpr = transformExpr(pstate, (Node *) jfe,
 											EXPR_KIND_FROM_FUNCTION);
@@ -349,56 +436,21 @@ transformJsonTableColumns(JsonTableParseContext *cxt, List *columns,
 		tf->colcollations = lappend_oid(tf->colcollations, typcoll);
 		tf->colvalexprs = lappend(tf->colvalexprs, colexpr);
 	}
-
-	/* End of column range. */
-	if (list_length(tf->colvalexprs) == colMin)
-	{
-		/* No columns in this Scan beside the nested ones. */
-		colMax = colMin = -1;
-	}
-	else
-		colMax = list_length(tf->colvalexprs) - 1;
-
-	/* Recursively transform nested columns */
-	childplan = transformJsonTableNestedColumns(cxt, passingArgs, columns);
-
-	/* Create a "parent" scan responsible for all columns handled above. */
-	return makeJsonTablePathScan(pathspec, errorOnError, colMin, colMax,
-								 childplan);
 }
 
 /*
- * Check if the type is "composite" for the purpose of checking whether to use
- * JSON_VALUE() or JSON_QUERY() for a given JsonTableColumn.
- */
-static bool
-isCompositeType(Oid typid)
-{
-	char		typtype = get_typtype(typid);
-
-	return typid == JSONOID ||
-		typid == JSONBOID ||
-		typid == RECORDOID ||
-		type_is_array(typid) ||
-		typtype == TYPTYPE_COMPOSITE ||
-	/* domain over one of the above? */
-		(typtype == TYPTYPE_DOMAIN &&
-		 isCompositeType(getBaseType(typid)));
-}
-
-/*
- * Transform JSON_TABLE column definition into a JsonFuncExpr
- * This turns:
+ * Transform JSON_TABLE column
  *   - regular column into JSON_VALUE()
  *   - FORMAT JSON column into JSON_QUERY()
  *   - EXISTS column into JSON_EXISTS()
  */
 static JsonFuncExpr *
 transformJsonTableColumn(JsonTableColumn *jtc, Node *contextItemExpr,
-						 List *passingArgs)
+						 List *passingArgs, bool errorOnError)
 {
-	Node	   *pathspec;
 	JsonFuncExpr *jfexpr = makeNode(JsonFuncExpr);
+	Node	   *pathspec;
+	JsonFormat *default_format;
 
 	if (jtc->coltype == JTC_REGULAR)
 		jfexpr->op = JSON_VALUE_OP;
@@ -406,15 +458,21 @@ transformJsonTableColumn(JsonTableColumn *jtc, Node *contextItemExpr,
 		jfexpr->op = JSON_EXISTS_OP;
 	else
 		jfexpr->op = JSON_QUERY_OP;
+	jfexpr->output = makeNode(JsonOutput);
+	jfexpr->on_empty = jtc->on_empty;
+	jfexpr->on_error = jtc->on_error;
+	if (jfexpr->on_error == NULL && errorOnError)
+		jfexpr->on_error = makeJsonBehavior(JSON_BEHAVIOR_ERROR, NULL, -1);
+	jfexpr->quotes = jtc->quotes;
+	jfexpr->wrapper = jtc->wrapper;
+	jfexpr->location = jtc->location;
 
-	/* Pass the column name so any runtime JsonExpr errors can print it. */
-	Assert(jtc->name != NULL);
-	jfexpr->column_name = pstrdup(jtc->name);
+	jfexpr->output->typeName = jtc->typeName;
+	jfexpr->output->returning = makeNode(JsonReturning);
+	jfexpr->output->returning->format = jtc->format;
 
-	jfexpr->context_item = makeJsonValueExpr((Expr *) contextItemExpr, NULL,
-											 makeJsonFormat(JS_FORMAT_DEFAULT,
-															JS_ENC_DEFAULT,
-															-1));
+	default_format = makeJsonFormat(JS_FORMAT_DEFAULT, JS_ENC_DEFAULT, -1);
+
 	if (jtc->pathspec)
 		pathspec = (Node *) jtc->pathspec->string;
 	else
@@ -429,64 +487,171 @@ transformJsonTableColumn(JsonTableColumn *jtc, Node *contextItemExpr,
 
 		pathspec = makeStringConst(path.data, -1);
 	}
+
+	jfexpr->context_item = makeJsonValueExpr((Expr *) contextItemExpr, NULL,
+											 default_format);
 	jfexpr->pathspec = pathspec;
 	jfexpr->passing = passingArgs;
-	jfexpr->output = makeNode(JsonOutput);
-	jfexpr->output->typeName = jtc->typeName;
-	jfexpr->output->returning = makeNode(JsonReturning);
-	jfexpr->output->returning->format = jtc->format;
-	jfexpr->on_empty = jtc->on_empty;
-	jfexpr->on_error = jtc->on_error;
-	jfexpr->quotes = jtc->quotes;
-	jfexpr->wrapper = jtc->wrapper;
-	jfexpr->location = jtc->location;
 
 	return jfexpr;
 }
 
-/*
- * Recursively transform nested columns and create child plan(s) that will be
- * used to evaluate their row patterns.
- */
-static JsonTablePlan *
-transformJsonTableNestedColumns(JsonTableParseContext *cxt,
-								List *passingArgs,
-								List *columns)
+static JsonTableColumn *
+findNestedJsonTableColumn(List *columns, const char *pathname)
 {
-	JsonTablePlan *plan = NULL;
 	ListCell   *lc;
 
-	/*
-	 * If there are multiple NESTED COLUMNS clauses in 'columns', their
-	 * respective plans will be combined using a "sibling join" plan, which
-	 * effectively does a UNION of the sets of rows coming from each nested
-	 * plan.
-	 */
 	foreach(lc, columns)
 	{
 		JsonTableColumn *jtc = castNode(JsonTableColumn, lfirst(lc));
-		JsonTablePlan *nested;
 
-		if (jtc->coltype != JTC_NESTED)
-			continue;
-
-		if (jtc->pathspec->name == NULL)
-			jtc->pathspec->name = generateJsonTablePathName(cxt);
-
-		nested = transformJsonTableColumns(cxt, jtc->columns, passingArgs,
-										   jtc->pathspec);
-
-		if (plan)
-			plan = makeJsonTableSiblingJoin(plan, nested);
-		else
-			plan = nested;
+		if (jtc->coltype == JTC_NESTED &&
+			jtc->pathspec->name &&
+			!strcmp(jtc->pathspec->name, pathname))
+			return jtc;
 	}
 
-	return plan;
+	return NULL;
+}
+/*
+ * Recursively transform nested columns and create child plan(s) that will be
+ * used to evaluate their row patterns.
+ *
+ * Default plan is transformed into a cross/union join of its nested columns.
+ * Simple and outer/inner plans are transformed into a JsonTablePlan by
+ * finding and transforming corresponding nested column.
+ * Sibling plans are recursively transformed into a JsonTableSiblingJoin.
+ */
+static JsonTablePlan *
+transformJsonTableNestedColumns(JsonTableParseContext *cxt,
+								JsonTablePlanSpec *planspec,
+								List *columns,
+								List *passingArgs)
+{
+	JsonTableColumn *jtc = NULL;
+
+	if (!planspec || planspec->plan_type == JSTP_DEFAULT)
+	{
+		/* unspecified or default plan */
+		JsonTablePlan *plan = NULL;
+		ListCell   *lc;
+		bool		cross = planspec && (planspec->join_type & JSTP_JOIN_CROSS);
+
+		/*
+		* If there are multiple NESTED COLUMNS clauses in 'columns', their
+		* respective plans will be combined using a "sibling join" plan, which
+		* effectively does a UNION of the sets of rows coming from each nested
+		* plan.
+		*/
+		foreach(lc, columns)
+		{
+			JsonTableColumn *col = castNode(JsonTableColumn, lfirst(lc));
+			JsonTablePlan *nested;
+
+			if (col->coltype != JTC_NESTED)
+				continue;
+
+			nested = transformJsonTableNestedColumn(cxt, col, planspec,
+													passingArgs);
+
+			/* Join nested plan with previous sibling nested plans. */
+			if (plan)
+				plan = makeJsonTableSiblingJoin(cross, plan, nested);
+			else
+				plan = nested;
+		}
+
+		return plan;
+	}
+	else if (planspec->plan_type == JSTP_SIMPLE)
+	{
+		jtc = findNestedJsonTableColumn(columns, planspec->pathname);
+	}
+	else if (planspec->plan_type == JSTP_JOINED)
+	{
+		if (planspec->join_type == JSTP_JOIN_INNER ||
+			planspec->join_type == JSTP_JOIN_OUTER)
+		{
+			Assert(planspec->plan1->plan_type == JSTP_SIMPLE);
+			jtc = findNestedJsonTableColumn(columns, planspec->plan1->pathname);
+		}
+		else
+		{
+			JsonTablePlan *lplan = transformJsonTableNestedColumns(cxt,
+																   planspec->plan1,
+																   columns,
+																   passingArgs);
+			JsonTablePlan *rplan = transformJsonTableNestedColumns(cxt,
+																   planspec->plan2,
+																   columns,
+																   passingArgs);
+
+			return makeJsonTableSiblingJoin(planspec->join_type == JSTP_JOIN_CROSS,
+											lplan, rplan);
+		}
+	}
+	else
+		elog(ERROR, "invalid JSON_TABLE plan type %d", planspec->plan_type);
+
+	if (!jtc)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("invalid JSON_TABLE plan clause"),
+				 errdetail("PATH name was %s not found in nested columns list.",
+						   planspec->pathname),
+				 parser_errposition(cxt->pstate, planspec->location)));
+
+	return transformJsonTableNestedColumn(cxt, jtc, planspec, passingArgs);
+}
+
+static JsonTablePlan *
+transformJsonTableNestedColumn(JsonTableParseContext *cxt, JsonTableColumn *jtc,
+							   JsonTablePlanSpec *planspec,
+							   List *passing_Args)
+{
+	if (jtc->pathspec->name == NULL)
+	{
+		if (cxt->jt->planspec != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("invalid JSON_TABLE expression"),
+					 errdetail("JSON_TABLE path must contain"
+							   " explicit AS pathname specification if"
+							   " explicit PLAN clause is used"),
+					 parser_errposition(cxt->pstate, jtc->location)));
+
+		jtc->pathspec->name = generateJsonTablePathName(cxt);
+	}
+
+	return transformJsonTableColumns(cxt, planspec, jtc->columns,
+									 passing_Args,
+									 jtc->pathspec);
 }
 
 /*
- * Create a JsonTablePlan for given path and ON ERROR behavior.
+ * Create a JsonTablePlan that will perform a join of the rows coming from
+ * 'lplan' and 'rplan'.
+ *
+ * The default way of "joining" the rows is to perform a UNION between the
+ * sets of rows from 'lplan' and 'rplan'.
+ */
+static JsonTablePlan *
+makeJsonTableSiblingJoin(bool cross, JsonTablePlan *lplan, JsonTablePlan *rplan)
+{
+	JsonTableSiblingJoin *join = makeNode(JsonTableSiblingJoin);
+
+	join->plan.type = T_JsonTableSiblingJoin;
+	join->lplan = lplan;
+	join->rplan = rplan;
+	join->cross = cross;
+
+	return (JsonTablePlan *) join;
+}
+
+/*
+ * Create transformed JSON_TABLE parent plan node by appending all non-nested
+ * columns to the TableFunc node and remembering their indices in the
+ * colvalexprs list.
  *
  * colMin and colMin give the range of columns computed by this scan in the
  * global flat list of column expressions that will be passed to the
@@ -494,11 +659,11 @@ transformJsonTableNestedColumns(JsonTableParseContext *cxt,
  * thus computed by 'childplan'.
  */
 static JsonTablePlan *
-makeJsonTablePathScan(JsonTablePathSpec *pathspec, bool errorOnError,
-					  int colMin, int colMax,
-					  JsonTablePlan *childplan)
+makeParentJsonTablePathScan(JsonTableParseContext *cxt, JsonTablePathSpec * pathspec,
+							List *columns, List *passing_Args)
 {
 	JsonTablePathScan *scan = makeNode(JsonTablePathScan);
+	JsonBehavior *on_error = cxt->jt->on_error;
 	char	   *pathstring;
 	Const	   *value;
 
@@ -511,31 +676,128 @@ makeJsonTablePathScan(JsonTablePathSpec *pathspec, bool errorOnError,
 
 	scan->plan.type = T_JsonTablePathScan;
 	scan->path = makeJsonTablePath(value, pathspec->name);
-	scan->errorOnError = errorOnError;
 
-	scan->child = childplan;
+	/* save start of column range */
+	scan->colMin = list_length(cxt->tf->colvalexprs);
 
-	scan->colMin = colMin;
-	scan->colMax = colMax;
+	appendJsonTableColumns(cxt, columns, passing_Args);
+
+	/* End of column range. */
+	if (list_length(cxt->tf->colvalexprs) == scan->colMin)
+	{
+		/* No columns in this Scan beside the nested ones. */
+		scan->colMax = scan->colMin = -1;
+	}
+	else
+		scan->colMax = list_length(cxt->tf->colvalexprs) - 1;
+
+	scan->errorOnError = on_error && on_error->btype == JSON_BEHAVIOR_ERROR;
 
 	return (JsonTablePlan *) scan;
 }
 
 /*
- * Create a JsonTablePlan that will perform a join of the rows coming from
- * 'lplan' and 'rplan'.
- *
- * The default way of "joining" the rows is to perform a UNION between the
- * sets of rows from 'lplan' and 'rplan'.
+ * Check if the type is "composite" for the purpose of checking whether to use
+ * JSON_VALUE() or JSON_QUERY() for a given JsonTableColumn.typName.
  */
-static JsonTablePlan *
-makeJsonTableSiblingJoin(JsonTablePlan *lplan, JsonTablePlan *rplan)
+static bool
+isCompositeType(Oid typid)
 {
-	JsonTableSiblingJoin *join = makeNode(JsonTableSiblingJoin);
+	char		typtype = get_typtype(typid);
 
-	join->plan.type = T_JsonTableSiblingJoin;
-	join->lplan = lplan;
-	join->rplan = rplan;
+	return typid == JSONOID ||
+		   typid == JSONBOID ||
+		   typid == RECORDOID ||
+		   type_is_array(typid) ||
+		   typtype == TYPTYPE_COMPOSITE ||
+		   /* domain over one of the above? */
+		   (typtype == TYPTYPE_DOMAIN &&
+			isCompositeType(getBaseType(typid)));
+}
 
-	return (JsonTablePlan *) join;
+/* Collect sibling path names from plan to the specified list. */
+static void
+collectSiblingPathsInJsonTablePlan(JsonTablePlanSpec *plan, List **paths)
+{
+	if (plan->plan_type == JSTP_SIMPLE)
+		*paths = lappend(*paths, plan->pathname);
+	else if (plan->plan_type == JSTP_JOINED)
+	{
+		if (plan->join_type == JSTP_JOIN_INNER ||
+			plan->join_type == JSTP_JOIN_OUTER)
+		{
+			Assert(plan->plan1->plan_type == JSTP_SIMPLE);
+			*paths = lappend(*paths, plan->plan1->pathname);
+		}
+		else if (plan->join_type == JSTP_JOIN_CROSS ||
+				 plan->join_type == JSTP_JOIN_UNION)
+		{
+			collectSiblingPathsInJsonTablePlan(plan->plan1, paths);
+			collectSiblingPathsInJsonTablePlan(plan->plan2, paths);
+		}
+		else
+			elog(ERROR, "invalid JSON_TABLE join type %d",
+				 plan->join_type);
+	}
+}
+
+/*
+ * Validate child JSON_TABLE plan by checking that:
+ *  - all nested columns have path names specified
+ *  - all nested columns have corresponding node in the sibling plan
+ *  - plan does not contain duplicate or extra nodes
+ */
+static void
+validateJsonTableChildPlan(ParseState *pstate, JsonTablePlanSpec *plan,
+						   List *columns)
+{
+	ListCell   *lc1;
+	List	   *siblings = NIL;
+	int			nchildren = 0;
+
+	if (plan)
+		collectSiblingPathsInJsonTablePlan(plan, &siblings);
+
+	foreach(lc1, columns)
+	{
+		JsonTableColumn *jtc = castNode(JsonTableColumn, lfirst(lc1));
+
+		if (jtc->coltype == JTC_NESTED)
+		{
+			ListCell   *lc2;
+			bool		found = false;
+
+			if (jtc->pathspec->name == NULL)
+				ereport(ERROR,
+						errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("nested JSON_TABLE columns must contain"
+							   " an explicit AS pathname specification"
+							   " if an explicit PLAN clause is used"),
+						parser_errposition(pstate, jtc->location));
+
+			/* find nested path name in the list of sibling path names */
+			foreach(lc2, siblings)
+			{
+				if ((found = !strcmp(jtc->pathspec->name, lfirst(lc2))))
+					break;
+			}
+
+			if (!found)
+				ereport(ERROR,
+						errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("invalid JSON_TABLE specification"),
+						errdetail("PLAN clause for nested path %s was not found.",
+								  jtc->pathspec->name),
+						parser_errposition(pstate, jtc->location));
+
+			nchildren++;
+		}
+	}
+
+	if (list_length(siblings) > nchildren)
+		ereport(ERROR,
+				errcode(ERRCODE_SYNTAX_ERROR),
+				errmsg("invalid JSON_TABLE plan clause"),
+				errdetail("PLAN clause contains some extra or duplicate sibling nodes."),
+				parser_errposition(pstate, plan ? plan->location : -1));
 }

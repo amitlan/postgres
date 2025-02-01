@@ -1854,26 +1854,9 @@ typedef struct JsonTablePathSpec
 
 	Node	   *string;
 	char	   *name;
-	ParseLoc	name_location;
-	ParseLoc	location;		/* location of 'string' */
+	int			name_location;
+	int			location;		/* location of 'string' */
 } JsonTablePathSpec;
-
-/*
- * JsonTable -
- *		untransformed representation of JSON_TABLE
- */
-typedef struct JsonTable
-{
-	NodeTag		type;
-	JsonValueExpr *context_item;	/* context item expression */
-	JsonTablePathSpec *pathspec;	/* JSON path specification */
-	List	   *passing;		/* list of PASSING clause arguments, if any */
-	List	   *columns;		/* list of JsonTableColumn */
-	JsonBehavior *on_error;		/* ON ERROR behavior */
-	Alias	   *alias;			/* table alias in FROM clause */
-	bool		lateral;		/* does it have LATERAL prefix? */
-	ParseLoc	location;		/* token location, or -1 if unknown */
-} JsonTable;
 
 /*
  * JsonTableColumnType -
@@ -1905,8 +1888,68 @@ typedef struct JsonTableColumn
 	List	   *columns;		/* nested columns */
 	JsonBehavior *on_empty;		/* ON EMPTY behavior */
 	JsonBehavior *on_error;		/* ON ERROR behavior */
-	ParseLoc	location;		/* token location, or -1 if unknown */
+	int			location;		/* token location, or -1 if unknown */
 } JsonTableColumn;
+
+/*
+ * JsonTablePlanType -
+ *		flags for JSON_TABLE plan node types representation
+ */
+typedef enum JsonTablePlanType
+{
+	JSTP_DEFAULT,
+	JSTP_SIMPLE,
+	JSTP_JOINED,
+} JsonTablePlanType;
+
+/*
+ * JsonTablePlanJoinType -
+ *		JSON_TABLE join types for JSTP_JOINED plans
+ */
+typedef enum JsonTablePlanJoinType
+{
+	JSTP_JOIN_INNER = 0x01,
+	JSTP_JOIN_OUTER = 0x02,
+	JSTP_JOIN_CROSS = 0x04,
+	JSTP_JOIN_UNION = 0x08,
+} JsonTablePlanJoinType;
+
+/*
+ * JsonTablePlanSpec -
+ *		untransformed representation of JSON_TABLE's PLAN clause
+ */
+typedef struct JsonTablePlanSpec
+{
+	NodeTag		type;
+
+	JsonTablePlanType plan_type;	/* plan type */
+	JsonTablePlanJoinType join_type;	/* join type (for joined plan only) */
+	char	   *pathname;		/* path name (for simple plan only) */
+
+	/* For joined plans */
+	struct JsonTablePlanSpec *plan1;	/* first joined plan */
+	struct JsonTablePlanSpec *plan2;	/* second joined plan */
+
+	int			location;		/* token location, or -1 if unknown */
+} JsonTablePlanSpec;
+
+/*
+ * JsonTable -
+ *		untransformed representation of JSON_TABLE
+ */
+typedef struct JsonTable
+{
+	NodeTag		type;
+	JsonValueExpr *context_item;	/* context item expression */
+	JsonTablePathSpec *pathspec;	/* JSON path specification */
+	List	   *passing;		/* list of PASSING clause arguments, if any */
+	List	   *columns;		/* list of JsonTableColumn */
+	JsonTablePlanSpec *planspec;	/* join plan, if specified */
+	JsonBehavior *on_error;		/* ON ERROR behavior */
+	Alias	   *alias;			/* table alias in FROM clause */
+	bool		lateral;		/* does it have LATERAL prefix? */
+	int			location;		/* token location, or -1 if unknown */
+} JsonTable;
 
 /*
  * JsonKeyValue -

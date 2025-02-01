@@ -251,6 +251,29 @@ SELECT * FROM JSON_TABLE(jsonb '{"d1": "foo"}', '$'
 (1 row)
 
 -- JSON_TABLE: Test backward parsing
+CREATE VIEW jsonb_table_view1 AS
+SELECT * FROM
+	JSON_TABLE(
+		jsonb 'null', 'lax $[*]' PASSING 1 + 2 AS a, json '"foo"' AS "b c"
+		COLUMNS (
+			id FOR ORDINALITY,
+			NESTED PATH '$[1]' AS p1 COLUMNS (
+				a1 int,
+				NESTED PATH '$[*]' AS "p1 1" COLUMNS (
+					a11 text
+				),
+				b1 text
+			),
+			NESTED PATH '$[2]' AS p2 COLUMNS (
+				NESTED PATH '$[*]' AS "p2:1" COLUMNS (
+					a21 text
+				),
+				NESTED PATH '$[*]' AS p22 COLUMNS (
+					a22 text
+				)
+			)
+		)
+	);
 CREATE VIEW jsonb_table_view2 AS
 SELECT * FROM
 	JSON_TABLE(
@@ -300,6 +323,44 @@ SELECT * FROM
 			ia int[] PATH '$',
 			ta text[] PATH '$',
 			jba jsonb[] PATH '$'));
+\sv jsonb_table_view1
+CREATE OR REPLACE VIEW public.jsonb_table_view1 AS
+ SELECT id,
+    a1,
+    b1,
+    a11,
+    a21,
+    a22
+   FROM JSON_TABLE(
+            'null'::jsonb, '$[*]' AS json_table_path_0
+            PASSING
+                1 + 2 AS a,
+                '"foo"'::json AS "b c"
+            COLUMNS (
+                id FOR ORDINALITY,
+                NESTED PATH '$[1]' AS p1
+                COLUMNS (
+                    a1 integer PATH '$."a1"',
+                    b1 text PATH '$."b1"',
+                    NESTED PATH '$[*]' AS "p1 1"
+                    COLUMNS (
+                        a11 text PATH '$."a11"'
+                    )
+                ),
+                NESTED PATH '$[2]' AS p2
+                COLUMNS (
+                    NESTED PATH '$[*]' AS "p2:1"
+                    COLUMNS (
+                        a21 text PATH '$."a21"'
+                    ),
+                    NESTED PATH '$[*]' AS p22
+                    COLUMNS (
+                        a22 text PATH '$."a22"'
+                    )
+                )
+            )
+            PLAN (json_table_path_0 OUTER ((p1 OUTER "p1 1") UNION (p2 OUTER ("p2:1" UNION p22)))) EMPTY ARRAY ON ERROR
+        )
 \sv jsonb_table_view2
 CREATE OR REPLACE VIEW public.jsonb_table_view2 AS
  SELECT "int",
@@ -321,6 +382,7 @@ CREATE OR REPLACE VIEW public.jsonb_table_view2 AS
                 "numeric" numeric PATH '$',
                 domain jsonb_test_domain PATH '$'
             )
+            PLAN (json_table_path_0) EMPTY ARRAY ON ERROR
         )
 \sv jsonb_table_view3
 CREATE OR REPLACE VIEW public.jsonb_table_view3 AS
@@ -341,6 +403,7 @@ CREATE OR REPLACE VIEW public.jsonb_table_view3 AS
                 jsc character(4) FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES,
                 jsv character varying(4) FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES
             )
+            PLAN (json_table_path_0) EMPTY ARRAY ON ERROR
         )
 \sv jsonb_table_view4
 CREATE OR REPLACE VIEW public.jsonb_table_view4 AS
@@ -359,6 +422,7 @@ CREATE OR REPLACE VIEW public.jsonb_table_view4 AS
                 aaa integer PATH '$."aaa"',
                 aaa1 integer PATH '$."aaa"'
             )
+            PLAN (json_table_path_0) EMPTY ARRAY ON ERROR
         )
 \sv jsonb_table_view5
 CREATE OR REPLACE VIEW public.jsonb_table_view5 AS
@@ -375,6 +439,7 @@ CREATE OR REPLACE VIEW public.jsonb_table_view5 AS
                 exists2 integer EXISTS PATH '$."aaa"' TRUE ON ERROR,
                 exists3 text EXISTS PATH 'strict $."aaa"' UNKNOWN ON ERROR
             )
+            PLAN (json_table_path_0) EMPTY ARRAY ON ERROR
         )
 \sv jsonb_table_view6
 CREATE OR REPLACE VIEW public.jsonb_table_view6 AS
@@ -397,45 +462,54 @@ CREATE OR REPLACE VIEW public.jsonb_table_view6 AS
                 ta text[] PATH '$' WITHOUT WRAPPER KEEP QUOTES,
                 jba jsonb[] PATH '$' WITHOUT WRAPPER KEEP QUOTES
             )
+            PLAN (json_table_path_0) EMPTY ARRAY ON ERROR
         )
+EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM jsonb_table_view1;
+                                                                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                                                                     
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Table Function Scan on "json_table"
+   Output: "json_table".id, "json_table".a1, "json_table".b1, "json_table".a11, "json_table".a21, "json_table".a22
+   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (id FOR ORDINALITY, NESTED PATH '$[1]' AS p1 COLUMNS (a1 integer PATH '$."a1"', b1 text PATH '$."b1"', NESTED PATH '$[*]' AS "p1 1" COLUMNS (a11 text PATH '$."a11"')), NESTED PATH '$[2]' AS p2 COLUMNS ( NESTED PATH '$[*]' AS "p2:1" COLUMNS (a21 text PATH '$."a21"'), NESTED PATH '$[*]' AS p22 COLUMNS (a22 text PATH '$."a22"'))) PLAN (json_table_path_0 OUTER ((p1 OUTER "p1 1") UNION (p2 OUTER ("p2:1" UNION p22)))) EMPTY ARRAY ON ERROR)
+(3 rows)
+
 EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM jsonb_table_view2;
-                                                                                                                                            QUERY PLAN                                                                                                                                             
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                   QUERY PLAN                                                                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Table Function Scan on "json_table"
    Output: "json_table"."int", "json_table".text, "json_table"."char(4)", "json_table".bool, "json_table"."numeric", "json_table".domain
-   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS ("int" integer PATH '$', text text PATH '$', "char(4)" character(4) PATH '$', bool boolean PATH '$', "numeric" numeric PATH '$', domain jsonb_test_domain PATH '$'))
+   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS ("int" integer PATH '$', text text PATH '$', "char(4)" character(4) PATH '$', bool boolean PATH '$', "numeric" numeric PATH '$', domain jsonb_test_domain PATH '$') PLAN (json_table_path_0) EMPTY ARRAY ON ERROR)
 (3 rows)
 
 EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM jsonb_table_view3;
-                                                                                                                                                                                                              QUERY PLAN                                                                                                                                                                                                              
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                     
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Table Function Scan on "json_table"
    Output: "json_table".js, "json_table".jb, "json_table".jst, "json_table".jsc, "json_table".jsv
-   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (js json PATH '$' WITHOUT WRAPPER KEEP QUOTES, jb jsonb PATH '$' WITHOUT WRAPPER KEEP QUOTES, jst text FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES, jsc character(4) FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES, jsv character varying(4) FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES))
+   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (js json PATH '$' WITHOUT WRAPPER KEEP QUOTES, jb jsonb PATH '$' WITHOUT WRAPPER KEEP QUOTES, jst text FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES, jsc character(4) FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES, jsv character varying(4) FORMAT JSON PATH '$' WITHOUT WRAPPER KEEP QUOTES) PLAN (json_table_path_0) EMPTY ARRAY ON ERROR)
 (3 rows)
 
 EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM jsonb_table_view4;
-                                                                                                                                        QUERY PLAN                                                                                                                                        
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                               QUERY PLAN                                                                                                                                                               
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Table Function Scan on "json_table"
    Output: "json_table".jsb, "json_table".jsbq, "json_table".aaa, "json_table".aaa1
-   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (jsb jsonb PATH '$' WITHOUT WRAPPER KEEP QUOTES, jsbq jsonb PATH '$' WITHOUT WRAPPER OMIT QUOTES, aaa integer PATH '$."aaa"', aaa1 integer PATH '$."aaa"'))
+   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (jsb jsonb PATH '$' WITHOUT WRAPPER KEEP QUOTES, jsbq jsonb PATH '$' WITHOUT WRAPPER OMIT QUOTES, aaa integer PATH '$."aaa"', aaa1 integer PATH '$."aaa"') PLAN (json_table_path_0) EMPTY ARRAY ON ERROR)
 (3 rows)
 
 EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM jsonb_table_view5;
-                                                                                                                                       QUERY PLAN                                                                                                                                       
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                              QUERY PLAN                                                                                                                                                              
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Table Function Scan on "json_table"
    Output: "json_table".exists1, "json_table".exists2, "json_table".exists3
-   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (exists1 boolean EXISTS PATH '$."aaa"', exists2 integer EXISTS PATH '$."aaa"' TRUE ON ERROR, exists3 text EXISTS PATH 'strict $."aaa"' UNKNOWN ON ERROR))
+   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (exists1 boolean EXISTS PATH '$."aaa"', exists2 integer EXISTS PATH '$."aaa"' TRUE ON ERROR, exists3 text EXISTS PATH 'strict $."aaa"' UNKNOWN ON ERROR) PLAN (json_table_path_0) EMPTY ARRAY ON ERROR)
 (3 rows)
 
 EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM jsonb_table_view6;
-                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                     
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                            
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Table Function Scan on "json_table"
    Output: "json_table".js2, "json_table".jsb2w, "json_table".jsb2q, "json_table".ia, "json_table".ta, "json_table".jba
-   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (js2 json PATH '$' WITHOUT WRAPPER KEEP QUOTES, jsb2w jsonb PATH '$' WITH UNCONDITIONAL WRAPPER KEEP QUOTES, jsb2q jsonb PATH '$' WITHOUT WRAPPER OMIT QUOTES, ia integer[] PATH '$' WITHOUT WRAPPER KEEP QUOTES, ta text[] PATH '$' WITHOUT WRAPPER KEEP QUOTES, jba jsonb[] PATH '$' WITHOUT WRAPPER KEEP QUOTES))
+   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (js2 json PATH '$' WITHOUT WRAPPER KEEP QUOTES, jsb2w jsonb PATH '$' WITH UNCONDITIONAL WRAPPER KEEP QUOTES, jsb2q jsonb PATH '$' WITHOUT WRAPPER OMIT QUOTES, ia integer[] PATH '$' WITHOUT WRAPPER KEEP QUOTES, ta text[] PATH '$' WITHOUT WRAPPER KEEP QUOTES, jba jsonb[] PATH '$' WITHOUT WRAPPER KEEP QUOTES) PLAN (json_table_path_0) EMPTY ARRAY ON ERROR)
 (3 rows)
 
 -- JSON_TABLE() with alias
@@ -448,11 +522,11 @@ SELECT * FROM
 			"int" int PATH '$',
 			"text" text PATH '$'
 	)) json_table_func;
-                                                                                          QUERY PLAN                                                                                           
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                 QUERY PLAN                                                                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Table Function Scan on "json_table" json_table_func
    Output: id, "int", text
-   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (id FOR ORDINALITY, "int" integer PATH '$', text text PATH '$'))
+   Table Function Call: JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '"foo"'::jsonb AS "b c" COLUMNS (id FOR ORDINALITY, "int" integer PATH '$', text text PATH '$') PLAN (json_table_path_0) EMPTY ARRAY ON ERROR)
 (3 rows)
 
 EXPLAIN (COSTS OFF, FORMAT JSON, VERBOSE)
@@ -464,24 +538,25 @@ SELECT * FROM
 			"int" int PATH '$',
 			"text" text PATH '$'
 	)) json_table_func;
-                                                                                                 QUERY PLAN                                                                                                  
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- [                                                                                                                                                                                                          +
-   {                                                                                                                                                                                                        +
-     "Plan": {                                                                                                                                                                                              +
-       "Node Type": "Table Function Scan",                                                                                                                                                                  +
-       "Parallel Aware": false,                                                                                                                                                                             +
-       "Async Capable": false,                                                                                                                                                                              +
-       "Table Function Name": "json_table",                                                                                                                                                                 +
-       "Alias": "json_table_func",                                                                                                                                                                          +
-       "Disabled": false,                                                                                                                                                                                   +
-       "Output": ["id", "\"int\"", "text"],                                                                                                                                                                 +
-       "Table Function Call": "JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '\"foo\"'::jsonb AS \"b c\" COLUMNS (id FOR ORDINALITY, \"int\" integer PATH '$', text text PATH '$'))"+
-     }                                                                                                                                                                                                      +
-   }                                                                                                                                                                                                        +
+                                                                                                                        QUERY PLAN                                                                                                                         
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ [                                                                                                                                                                                                                                                        +
+   {                                                                                                                                                                                                                                                      +
+     "Plan": {                                                                                                                                                                                                                                            +
+       "Node Type": "Table Function Scan",                                                                                                                                                                                                                +
+       "Parallel Aware": false,                                                                                                                                                                                                                           +
+       "Async Capable": false,                                                                                                                                                                                                                            +
+       "Table Function Name": "json_table",                                                                                                                                                                                                               +
+       "Alias": "json_table_func",                                                                                                                                                                                                                        +
+       "Disabled": false,                                                                                                                                                                                                                                 +
+       "Output": ["id", "\"int\"", "text"],                                                                                                                                                                                                               +
+       "Table Function Call": "JSON_TABLE('null'::jsonb, '$[*]' AS json_table_path_0 PASSING 3 AS a, '\"foo\"'::jsonb AS \"b c\" COLUMNS (id FOR ORDINALITY, \"int\" integer PATH '$', text text PATH '$') PLAN (json_table_path_0) EMPTY ARRAY ON ERROR)"+
+     }                                                                                                                                                                                                                                                    +
+   }                                                                                                                                                                                                                                                      +
  ]
 (1 row)
 
+DROP VIEW jsonb_table_view1;
 DROP VIEW jsonb_table_view2;
 DROP VIEW jsonb_table_view3;
 DROP VIEW jsonb_table_view4;
@@ -526,11 +601,35 @@ FROM
 		ON true;
 ERROR:  invalid input syntax for type integer: "err"
 SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH '$.a' ERROR ON EMPTY)) jt;
-ERROR:  no SQL/JSON item found for specified path of column "a"
+ERROR:  no SQL/JSON item found for specified path
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH 'strict $.a' ERROR ON EMPTY) ERROR ON ERROR) jt;
+ERROR:  jsonpath member accessor can only be applied to an object
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH 'lax $.a' ERROR ON EMPTY) ERROR ON ERROR) jt;
+ERROR:  no SQL/JSON item found for specified path
+SELECT * FROM JSON_TABLE(jsonb '"a"', '$' COLUMNS (a int PATH '$'   DEFAULT 1 ON EMPTY DEFAULT 2 ON ERROR)) jt;
+ a 
+---
+ 2
+(1 row)
+
+SELECT * FROM JSON_TABLE(jsonb '"a"', '$' COLUMNS (a int PATH 'strict $.a' DEFAULT 1 ON EMPTY DEFAULT 2 ON ERROR)) jt;
+ a 
+---
+ 2
+(1 row)
+
+SELECT * FROM JSON_TABLE(jsonb '"a"', '$' COLUMNS (a int PATH 'lax $.a' DEFAULT 1 ON EMPTY DEFAULT 2 ON ERROR)) jt;
+ a 
+---
+ 1
+(1 row)
+
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH '$.a' ERROR ON EMPTY)) jt;
+ERROR:  no SQL/JSON item found for specified path
 SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH 'strict $.a' ERROR ON ERROR) ERROR ON ERROR) jt;
 ERROR:  jsonpath member accessor can only be applied to an object
 SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH 'lax $.a' ERROR ON EMPTY) ERROR ON ERROR) jt;
-ERROR:  no SQL/JSON item found for specified path of column "a"
+ERROR:  no SQL/JSON item found for specified path
 SELECT * FROM JSON_TABLE(jsonb '"a"', '$' COLUMNS (a int PATH '$'   DEFAULT 1 ON EMPTY DEFAULT 2 ON ERROR)) jt;
  a 
 ---
@@ -710,10 +809,45 @@ LINE 1: SELECT * FROM JSON_TABLE(jsonb '{"a": 123}', '$' || '.' || '...
                                                      ^
 -- JsonPathQuery() error message mentioning column name
 SELECT * FROM JSON_TABLE('{"a": [{"b": "1"}, {"b": "2"}]}', '$' COLUMNS (b json path '$.a[*].b' ERROR ON ERROR));
-ERROR:  JSON path expression for column "b" must return single item when no wrapper is requested
+ERROR:  JSON path expression in JSON_QUERY must return single item when no wrapper is requested
 HINT:  Use the WITH WRAPPER clause to wrap SQL/JSON items into an array.
--- JSON_TABLE: nested paths
--- Duplicate path names
+-- JSON_TABLE: nested paths and plans
+-- Should fail (JSON_TABLE columns must contain explicit AS path
+-- specifications if explicit PLAN clause is used)
+SELECT * FROM JSON_TABLE(
+	jsonb '[]', '$' -- AS <path name> required here
+	COLUMNS (
+		foo int PATH '$'
+	)
+	PLAN DEFAULT (UNION)
+) jt;
+ERROR:  invalid JSON_TABLE expression
+LINE 2:  jsonb '[]', '$' -- AS <path name> required here
+                     ^
+DETAIL:  JSON_TABLE path must contain explicit AS pathname specification if explicit PLAN clause is used
+SELECT * FROM JSON_TABLE(
+	jsonb '[]', '$' AS path1
+	COLUMNS (
+		NESTED PATH '$' COLUMNS ( -- AS <path name> required here
+			foo int PATH '$'
+		)
+	)
+	PLAN DEFAULT (UNION)
+) jt;
+ERROR:  invalid JSON_TABLE expression
+LINE 4:   NESTED PATH '$' COLUMNS ( -- AS <path name> required here
+          ^
+DETAIL:  JSON_TABLE path must contain explicit AS pathname specification if explicit PLAN clause is used
+-- Should fail (column names must be distinct)
+SELECT * FROM JSON_TABLE(
+	jsonb '[]', '$' AS a
+	COLUMNS (
+		a int
+	)
+) jt;
+ERROR:  duplicate JSON_TABLE column or path name: a
+LINE 4:   a int
+          ^
 SELECT * FROM JSON_TABLE(
 	jsonb '[]', '$' AS a
 	COLUMNS (
@@ -774,6 +908,194 @@ SELECT * FROM JSON_TABLE(
 ERROR:  duplicate JSON_TABLE column or path name: a
 LINE 10:    NESTED PATH '$' AS a
                                ^
+-- JSON_TABLE: plan validation
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p1)
+) jt;
+ERROR:  invalid JSON_TABLE plan
+LINE 12:  PLAN (p1)
+                ^
+DETAIL:  PATH name mismatch: expected p0 but p1 is given.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0)
+) jt;
+ERROR:  invalid JSON_TABLE specification
+LINE 4:   NESTED PATH '$' AS p1 COLUMNS (
+          ^
+DETAIL:  PLAN clause for nested path p1 was not found.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0 OUTER p3)
+) jt;
+ERROR:  invalid JSON_TABLE specification
+LINE 4:   NESTED PATH '$' AS p1 COLUMNS (
+          ^
+DETAIL:  PLAN clause for nested path p1 was not found.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0 UNION p1 UNION p11)
+) jt;
+ERROR:  invalid JSON_TABLE plan clause
+LINE 12:  PLAN (p0 UNION p1 UNION p11)
+                ^
+DETAIL:  Expected INNER or OUTER.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0 OUTER (p1 CROSS p13))
+) jt;
+ERROR:  invalid JSON_TABLE specification
+LINE 8:   NESTED PATH '$' AS p2 COLUMNS (
+          ^
+DETAIL:  PLAN clause for nested path p2 was not found.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0 OUTER (p1 CROSS p2))
+) jt;
+ERROR:  invalid JSON_TABLE specification
+LINE 5:    NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+           ^
+DETAIL:  PLAN clause for nested path p11 was not found.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0 OUTER ((p1 UNION p11) CROSS p2))
+) jt;
+ERROR:  invalid JSON_TABLE plan clause
+LINE 12:  PLAN (p0 OUTER ((p1 UNION p11) CROSS p2))
+                         ^
+DETAIL:  PLAN clause contains some extra or duplicate sibling nodes.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0 OUTER ((p1 INNER p11) CROSS p2))
+) jt;
+ERROR:  invalid JSON_TABLE specification
+LINE 6:    NESTED PATH '$' AS p12 COLUMNS ( bar int )
+           ^
+DETAIL:  PLAN clause for nested path p12 was not found.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', '$[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0 OUTER ((p1 INNER (p12 CROSS p11)) CROSS p2))
+) jt;
+ERROR:  invalid JSON_TABLE specification
+LINE 9:    NESTED PATH '$' AS p21 COLUMNS ( baz int )
+           ^
+DETAIL:  PLAN clause for nested path p21 was not found.
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', 'strict $[*]' AS p0
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN (p0 OUTER ((p1 INNER (p12 CROSS p11)) CROSS (p2 INNER p21)))
+) jt;
+ bar | foo | baz 
+-----+-----+-----
+(0 rows)
+
+SELECT * FROM JSON_TABLE(
+	jsonb 'null', 'strict $[*]' -- without root path name
+	COLUMNS (
+		NESTED PATH '$' AS p1 COLUMNS (
+			NESTED PATH '$' AS p11 COLUMNS ( foo int ),
+			NESTED PATH '$' AS p12 COLUMNS ( bar int )
+		),
+		NESTED PATH '$' AS p2 COLUMNS (
+			NESTED PATH '$' AS p21 COLUMNS ( baz int )
+		)
+	)
+	PLAN ((p1 INNER (p12 CROSS p11)) CROSS (p2 INNER p21))
+) jt;
+ERROR:  invalid JSON_TABLE expression
+LINE 2:  jsonb 'null', 'strict $[*]' -- without root path name
+                       ^
+DETAIL:  JSON_TABLE path must contain explicit AS pathname specification if explicit PLAN clause is used
 -- JSON_TABLE: plan execution
 CREATE TEMP TABLE jsonb_table_test (js jsonb);
 INSERT INTO jsonb_table_test
@@ -785,6 +1107,7 @@ VALUES (
 		{"x": "4", "b": [1, 2], "c": 123}
 	 ]'
 );
+-- unspecified plan (outer, union)
 select
 	jt.*
 from
@@ -794,25 +1117,681 @@ from
 		columns (
 			n for ordinality,
 			a int path 'lax $.a' default -1 on empty,
-			nested path 'strict $.b[*]' as pb columns (b_id for ordinality, b int path '$' ),
-			nested path 'strict $.c[*]' as pc columns (c_id for ordinality, c int path '$' )
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
 		)
 	) jt;
- n | a  | b_id | b | c_id | c  
----+----+------+---+------+----
- 1 |  1 |      |   |      |   
- 2 |  2 |    1 | 1 |      |   
- 2 |  2 |    2 | 2 |      |   
- 2 |  2 |    3 | 3 |      |   
- 2 |  2 |      |   |    1 | 10
- 2 |  2 |      |   |    2 |   
- 2 |  2 |      |   |    3 | 20
- 3 |  3 |    1 | 1 |      |   
- 3 |  3 |    2 | 2 |      |   
- 4 | -1 |    1 | 1 |      |   
- 4 | -1 |    2 | 2 |      |   
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 1 |   
+ 2 |  2 | 2 |   
+ 2 |  2 | 3 |   
+ 2 |  2 |   | 10
+ 2 |  2 |   |   
+ 2 |  2 |   | 20
+ 3 |  3 | 1 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 1 |   
+ 4 | -1 | 2 |   
 (11 rows)
 
+-- default plans
+create or replace view outer_union as (
+select	jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$'),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$')
+		)
+		plan default (outer, union)
+	) jt
+);
+NOTICE:  view "outer_union" will be a temporary view
+create or replace view outer_cross as (
+select
+	jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
+		)
+		plan default (outer, cross)
+	) jt
+);
+NOTICE:  view "outer_cross" will be a temporary view
+create or replace view inner_union as (
+select jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
+		)
+		plan default (inner, union)
+	) jt
+);
+NOTICE:  view "inner_union" will be a temporary view
+create or replace view inner_cross as (
+select
+	jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
+		)
+		plan default (inner, cross)
+	) jt
+);
+NOTICE:  view "inner_cross" will be a temporary view
+select * from  inner_cross;
+ n | a | b | c  
+---+---+---+----
+ 2 | 2 | 1 | 10
+ 2 | 2 | 1 |   
+ 2 | 2 | 1 | 20
+ 2 | 2 | 2 | 10
+ 2 | 2 | 2 |   
+ 2 | 2 | 2 | 20
+ 2 | 2 | 3 | 10
+ 2 | 2 | 3 |   
+ 2 | 2 | 3 | 20
+(9 rows)
+
+select * from  outer_cross;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 1 | 10
+ 2 |  2 | 1 |   
+ 2 |  2 | 1 | 20
+ 2 |  2 | 2 | 10
+ 2 |  2 | 2 |   
+ 2 |  2 | 2 | 20
+ 2 |  2 | 3 | 10
+ 2 |  2 | 3 |   
+ 2 |  2 | 3 | 20
+ 3 |  3 |   |   
+ 4 | -1 |   |   
+(12 rows)
+
+select * from  inner_union;
+ n | a  | b | c  
+---+----+---+----
+ 2 |  2 | 1 |   
+ 2 |  2 | 2 |   
+ 2 |  2 | 3 |   
+ 2 |  2 |   | 10
+ 2 |  2 |   |   
+ 2 |  2 |   | 20
+ 3 |  3 | 1 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 1 |   
+ 4 | -1 | 2 |   
+(10 rows)
+
+select * from  outer_union;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 1 |   
+ 2 |  2 | 2 |   
+ 2 |  2 | 3 |   
+ 2 |  2 |   | 10
+ 2 |  2 |   |   
+ 2 |  2 |   | 20
+ 3 |  3 | 1 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 1 |   
+ 4 | -1 | 2 |   
+(11 rows)
+
+-----------------------------------------------------
+--inner_cross;
+select	jt.* from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$'),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$?(@ == $"x" * 5 || @ == $"y" )' default 0 on empty)
+		)
+		plan default (inner, cross)
+	) jt;
+ n | a | b | c  
+---+---+---+----
+ 2 | 2 | 1 | 10
+ 2 | 2 | 1 |  0
+ 2 | 2 | 1 | 20
+ 2 | 2 | 2 | 10
+ 2 | 2 | 2 |  0
+ 2 | 2 | 2 | 20
+ 2 | 2 | 3 | 10
+ 2 | 2 | 3 |  0
+ 2 | 2 | 3 | 20
+(9 rows)
+
+--outer_cross;
+select	jt.* from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$?(@ == $"x")' default 0 on empty),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$?(@ == $"x" * 5 || @ == $"y" )' default 0 on empty)
+		)
+		plan default (outer, cross)
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 0 | 10
+ 2 |  2 | 0 |  0
+ 2 |  2 | 0 | 20
+ 2 |  2 | 2 | 10
+ 2 |  2 | 2 |  0
+ 2 |  2 | 2 | 20
+ 2 |  2 | 0 | 10
+ 2 |  2 | 0 |  0
+ 2 |  2 | 0 | 20
+ 3 |  3 |   |   
+ 4 | -1 |   |   
+(12 rows)
+
+--inner_union;
+select	jt.* from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$?(@ == $"x")' default 0 on empty),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$?(@ == $"x" * 5 || @ == $"y" )' default 0 on empty)
+		)
+		plan default (inner, union)
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 2 |  2 | 0 |   
+ 2 |  2 | 2 |   
+ 2 |  2 | 0 |   
+ 2 |  2 |   | 10
+ 2 |  2 |   |  0
+ 2 |  2 |   | 20
+ 3 |  3 | 0 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 0 |   
+ 4 | -1 | 2 |   
+(10 rows)
+
+--outer_union;
+select	jt.* from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$?(@ == $"x")' default 0 on empty),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$?(@ == $"x" * 5 || @ == $"y" )' default 0 on empty)
+		)
+		plan default (outer, union)
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 0 |   
+ 2 |  2 | 2 |   
+ 2 |  2 | 0 |   
+ 2 |  2 |   | 10
+ 2 |  2 |   |  0
+ 2 |  2 |   | 20
+ 3 |  3 | 0 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 0 |   
+ 4 | -1 | 2 |   
+(11 rows)
+
+----------------------------------------
+select	jt.* from jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a ' default -1 on empty,
+			nested path 'strict $.b[*] ?(@ != 3)' as pb columns ( b int path '$' default 0 on empty),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$?(@ == $"x" * 5 || @ == $"y" )' default 0 on empty)
+		)
+		plan default (outer, cross)
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 1 | 10
+ 2 |  2 | 1 |  0
+ 2 |  2 | 1 | 20
+ 2 |  2 | 2 | 10
+ 2 |  2 | 2 |  0
+ 2 |  2 | 2 | 20
+ 3 |  3 |   |   
+ 4 | -1 |   |   
+(9 rows)
+
+select jt.* from jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a ' default -1 on empty,
+			nested path 'strict $.b[*] ?(@ != 3)' as pb columns ( b int path '$' default 0 on empty),
+			-- nested path 'strict $.b[*] ' as pb columns ( b int path '$' default 0 on empty),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$?(@ == $"x" * 5 || @ == $"y" )' default 0 on empty)
+		)
+		plan default (inner, cross)
+	) jt;
+ n | a | b | c  
+---+---+---+----
+ 2 | 2 | 1 | 10
+ 2 | 2 | 1 |  0
+ 2 | 2 | 1 | 20
+ 2 | 2 | 2 | 10
+ 2 | 2 | 2 |  0
+ 2 | 2 | 2 | 20
+(6 rows)
+
+select jt.* from jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a ' default -1 on empty,
+			nested path 'strict $.b[*] ?(@ != 3)' as pb columns ( b int path '$' default 0 on empty),
+			-- nested path 'strict $.b[*] ' as pb columns ( b int path '$' default 0 on empty),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$?(@ == $"x" * 5 || @ == $"y" )' default 0 on empty)
+		)
+		plan default (inner, union)
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 2 |  2 | 1 |   
+ 2 |  2 | 2 |   
+ 2 |  2 |   | 10
+ 2 |  2 |   |  0
+ 2 |  2 |   | 20
+ 3 |  3 | 1 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 1 |   
+ 4 | -1 | 2 |   
+(9 rows)
+
+SELECT * from JSON_TABLE(jsonb  '[1, 2, 3,null, 3]', '$[*]? (@ == 3)' PASSING 3 as x COLUMNS(xx int path '$'));
+ xx 
+----
+  3
+  3
+(2 rows)
+
+select jt.* from jsonb_table_test jtt, json_table(
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a ' default -1 on empty,
+			nested path 'strict $.b[*] ?(@ == 3)' as pb columns ( b int path '$'),
+			nested path 'strict $.c[*] ? (@ == 20)' as pc columns ( c int path '$')
+		)
+		plan default (outer, union)
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 3 |   
+ 2 |  2 |   | 20
+ 3 |  3 |   |   
+ 4 | -1 |   |   
+(5 rows)
+
+select jt.* from jsonb_table_test jtt, json_table(
+		jtt.js,'strict $[*]' as p passing 2 as x, 20 as y, 3 as z
+		columns (
+			n for ordinality,
+			a int path 'lax $.a ' default -1 on empty,
+			-- nested path 'strict $.b[*] ?(@ == 3)' as pb columns ( b int path '$'),
+			nested path 'strict $.b[*]' as pb columns ( b int path '$'),
+			nested path 'strict $.c[*] ? (@ == 20)' as pc columns ( c int path '$')
+		)
+		plan default (outer, union)
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 1 |   
+ 2 |  2 | 2 |   
+ 2 |  2 | 3 |   
+ 2 |  2 |   | 20
+ 3 |  3 | 1 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 1 |   
+ 4 | -1 | 2 |   
+(9 rows)
+
+-- specific plan (p outer (pb union pc))
+select
+	jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
+		)
+		plan (p outer (pb union pc))
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 1 |   
+ 2 |  2 | 2 |   
+ 2 |  2 | 3 |   
+ 2 |  2 |   | 10
+ 2 |  2 |   |   
+ 2 |  2 |   | 20
+ 3 |  3 | 1 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 1 |   
+ 4 | -1 | 2 |   
+(11 rows)
+
+-- specific plan (p outer (pc union pb))
+select
+	jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
+		)
+		plan (p outer (pc union pb))
+	) jt;
+ n | a  | c  | b 
+---+----+----+---
+ 1 |  1 |    |  
+ 2 |  2 | 10 |  
+ 2 |  2 |    |  
+ 2 |  2 | 20 |  
+ 2 |  2 |    | 1
+ 2 |  2 |    | 2
+ 2 |  2 |    | 3
+ 3 |  3 |    | 1
+ 3 |  3 |    | 2
+ 4 | -1 |    | 1
+ 4 | -1 |    | 2
+(11 rows)
+
+-- specific plan (p inner (pb union pc))
+select
+	jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
+		)
+		plan (p inner (pb union pc))
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 2 |  2 | 1 |   
+ 2 |  2 | 2 |   
+ 2 |  2 | 3 |   
+ 2 |  2 |   | 10
+ 2 |  2 |   |   
+ 2 |  2 |   | 20
+ 3 |  3 | 1 |   
+ 3 |  3 | 2 |   
+ 4 | -1 | 1 |   
+ 4 | -1 | 2 |   
+(10 rows)
+
+-- specific plan (p inner (pb cross pc))
+select
+	jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
+		)
+		plan (p inner (pb cross pc))
+	) jt;
+ n | a | b | c  
+---+---+---+----
+ 2 | 2 | 1 | 10
+ 2 | 2 | 1 |   
+ 2 | 2 | 1 | 20
+ 2 | 2 | 2 | 10
+ 2 | 2 | 2 |   
+ 2 | 2 | 2 | 20
+ 2 | 2 | 3 | 10
+ 2 | 2 | 3 |   
+ 2 | 2 | 3 | 20
+(9 rows)
+
+-- specific plan (p outer (pb cross pc))
+select
+	jt.*
+from
+	jsonb_table_test jtt,
+	json_table (
+		jtt.js,'strict $[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on empty,
+			nested path 'strict $.b[*]' as pb columns ( b int path '$' ),
+			nested path 'strict $.c[*]' as pc columns ( c int path '$' )
+		)
+		plan (p outer (pb cross pc))
+	) jt;
+ n | a  | b | c  
+---+----+---+----
+ 1 |  1 |   |   
+ 2 |  2 | 1 | 10
+ 2 |  2 | 1 |   
+ 2 |  2 | 1 | 20
+ 2 |  2 | 2 | 10
+ 2 |  2 | 2 |   
+ 2 |  2 | 2 | 20
+ 2 |  2 | 3 | 10
+ 2 |  2 | 3 |   
+ 2 |  2 | 3 | 20
+ 3 |  3 |   |   
+ 4 | -1 |   |   
+(12 rows)
+
+select
+	jt.*, b1 + 100 as b
+from
+	json_table (jsonb
+		'[
+			{"a":  1,  "b": [[1, 10], [2], [3, 30, 300]], "c": [1, null, 2]},
+			{"a":  2,  "b": [10, 20], "c": [1, null, 2]},
+			{"x": "3", "b": [11, 22, 33, 44]}
+		 ]',
+		'$[*]' as p
+		columns (
+			n for ordinality,
+			a int path 'lax $.a' default -1 on error,
+			nested path 'strict $.b[*]' as pb columns (
+				b text format json path '$',
+				nested path 'strict $[*]' as pb1 columns (
+					b1 int path '$'
+				)
+			),
+			nested path 'strict $.c[*]' as pc columns (
+				c text format json path '$',
+				nested path 'strict $[*]' as pc1 columns (
+					c1 int path '$'
+				)
+			)
+		)
+		--plan default(outer, cross)
+		plan(p outer ((pb inner pb1) cross (pc outer pc1)))
+	) jt;
+ n | a |      b       | b1  |  c   | c1 |  b  
+---+---+--------------+-----+------+----+-----
+ 1 | 1 | [1, 10]      |   1 | 1    |    | 101
+ 1 | 1 | [1, 10]      |   1 | null |    | 101
+ 1 | 1 | [1, 10]      |   1 | 2    |    | 101
+ 1 | 1 | [1, 10]      |  10 | 1    |    | 110
+ 1 | 1 | [1, 10]      |  10 | null |    | 110
+ 1 | 1 | [1, 10]      |  10 | 2    |    | 110
+ 1 | 1 | [2]          |   2 | 1    |    | 102
+ 1 | 1 | [2]          |   2 | null |    | 102
+ 1 | 1 | [2]          |   2 | 2    |    | 102
+ 1 | 1 | [3, 30, 300] |   3 | 1    |    | 103
+ 1 | 1 | [3, 30, 300] |   3 | null |    | 103
+ 1 | 1 | [3, 30, 300] |   3 | 2    |    | 103
+ 1 | 1 | [3, 30, 300] |  30 | 1    |    | 130
+ 1 | 1 | [3, 30, 300] |  30 | null |    | 130
+ 1 | 1 | [3, 30, 300] |  30 | 2    |    | 130
+ 1 | 1 | [3, 30, 300] | 300 | 1    |    | 400
+ 1 | 1 | [3, 30, 300] | 300 | null |    | 400
+ 1 | 1 | [3, 30, 300] | 300 | 2    |    | 400
+ 2 | 2 |              |     |      |    |    
+ 3 |   |              |     |      |    |    
+(20 rows)
+
+-- Should succeed (JSON arguments are passed to root and nested paths)
+SELECT *
+FROM
+	generate_series(1, 4) x,
+	generate_series(1, 3) y,
+	JSON_TABLE(jsonb
+		'[[1,2,3],[2,3,4,5],[3,4,5,6]]',
+		'strict $[*] ? (@[*] < $x)'
+		PASSING x AS x, y AS y
+		COLUMNS (
+			y text FORMAT JSON PATH '$',
+			NESTED PATH 'strict $[*] ? (@ >= $y)'
+			COLUMNS (
+				z int PATH '$'
+			)
+		)
+	) jt;
+ x | y |      y       | z 
+---+---+--------------+---
+ 2 | 1 | [1, 2, 3]    | 1
+ 2 | 1 | [1, 2, 3]    | 2
+ 2 | 1 | [1, 2, 3]    | 3
+ 3 | 1 | [1, 2, 3]    | 1
+ 3 | 1 | [1, 2, 3]    | 2
+ 3 | 1 | [1, 2, 3]    | 3
+ 3 | 1 | [2, 3, 4, 5] | 2
+ 3 | 1 | [2, 3, 4, 5] | 3
+ 3 | 1 | [2, 3, 4, 5] | 4
+ 3 | 1 | [2, 3, 4, 5] | 5
+ 4 | 1 | [1, 2, 3]    | 1
+ 4 | 1 | [1, 2, 3]    | 2
+ 4 | 1 | [1, 2, 3]    | 3
+ 4 | 1 | [2, 3, 4, 5] | 2
+ 4 | 1 | [2, 3, 4, 5] | 3
+ 4 | 1 | [2, 3, 4, 5] | 4
+ 4 | 1 | [2, 3, 4, 5] | 5
+ 4 | 1 | [3, 4, 5, 6] | 3
+ 4 | 1 | [3, 4, 5, 6] | 4
+ 4 | 1 | [3, 4, 5, 6] | 5
+ 4 | 1 | [3, 4, 5, 6] | 6
+ 2 | 2 | [1, 2, 3]    | 2
+ 2 | 2 | [1, 2, 3]    | 3
+ 3 | 2 | [1, 2, 3]    | 2
+ 3 | 2 | [1, 2, 3]    | 3
+ 3 | 2 | [2, 3, 4, 5] | 2
+ 3 | 2 | [2, 3, 4, 5] | 3
+ 3 | 2 | [2, 3, 4, 5] | 4
+ 3 | 2 | [2, 3, 4, 5] | 5
+ 4 | 2 | [1, 2, 3]    | 2
+ 4 | 2 | [1, 2, 3]    | 3
+ 4 | 2 | [2, 3, 4, 5] | 2
+ 4 | 2 | [2, 3, 4, 5] | 3
+ 4 | 2 | [2, 3, 4, 5] | 4
+ 4 | 2 | [2, 3, 4, 5] | 5
+ 4 | 2 | [3, 4, 5, 6] | 3
+ 4 | 2 | [3, 4, 5, 6] | 4
+ 4 | 2 | [3, 4, 5, 6] | 5
+ 4 | 2 | [3, 4, 5, 6] | 6
+ 2 | 3 | [1, 2, 3]    | 3
+ 3 | 3 | [1, 2, 3]    | 3
+ 3 | 3 | [2, 3, 4, 5] | 3
+ 3 | 3 | [2, 3, 4, 5] | 4
+ 3 | 3 | [2, 3, 4, 5] | 5
+ 4 | 3 | [1, 2, 3]    | 3
+ 4 | 3 | [2, 3, 4, 5] | 3
+ 4 | 3 | [2, 3, 4, 5] | 4
+ 4 | 3 | [2, 3, 4, 5] | 5
+ 4 | 3 | [3, 4, 5, 6] | 3
+ 4 | 3 | [3, 4, 5, 6] | 4
+ 4 | 3 | [3, 4, 5, 6] | 5
+ 4 | 3 | [3, 4, 5, 6] | 6
+(52 rows)
+
+-- Should fail (JSON arguments are not passed to column paths)
+SELECT *
+FROM JSON_TABLE(
+	jsonb '[1,2,3]',
+	'$[*] ? (@ < $x)'
+		PASSING 10 AS x
+		COLUMNS (y text FORMAT JSON PATH '$ ? (@ < $x)')
+	) jt;
+ y 
+---
+ 1
+ 2
+ 3
+(3 rows)
+
+-- Should fail (not supported)
+SELECT * FROM JSON_TABLE(jsonb '{"a": 123}', '$' || '.' || 'a' COLUMNS (foo int));
+ERROR:  only string constants are supported in JSON_TABLE path specification
+LINE 1: SELECT * FROM JSON_TABLE(jsonb '{"a": 123}', '$' || '.' || '...
+                                                     ^
 -- PASSING arguments are passed to nested paths and their columns' paths
 SELECT *
 FROM
@@ -912,6 +1891,7 @@ CREATE OR REPLACE VIEW public.jsonb_table_view_nested AS
                     )
                 )
             )
+            PLAN (json_table_path_0 OUTER ((p1 OUTER "p1 1") UNION (p2 OUTER ("p2:1" UNION p22)))) EMPTY ARRAY ON ERROR
         )
 DROP VIEW jsonb_table_view_nested;
 CREATE TABLE s (js jsonb);
@@ -1103,6 +2083,7 @@ CREATE OR REPLACE VIEW public.jsonb_table_view7 AS
                     )
                 )
             )
+            PLAN (c1 OUTER ((((json_table_path_0 OUTER z22) UNION json_table_path_1) UNION (json_table_path_2 OUTER z1)) UNION (json_table_path_3 OUTER z21))) EMPTY ARRAY ON ERROR
         ) sub
 DROP VIEW jsonb_table_view7;
 DROP TABLE s;
@@ -1119,20 +2100,20 @@ LINE 1: ... * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int) NULL ON ER...
                                                              ^
 DETAIL:  Only EMPTY [ ARRAY ] or ERROR is allowed in the top-level ON ERROR clause.
 SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int true on empty));
-ERROR:  invalid ON EMPTY behavior for column "a"
+ERROR:  invalid ON EMPTY behavior
 LINE 1: ...T * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int true on em...
                                                              ^
-DETAIL:  Only ERROR, NULL, or DEFAULT expression is allowed in ON EMPTY for scalar columns.
+DETAIL:  Only ERROR, NULL, or DEFAULT expression is allowed in ON EMPTY for JSON_VALUE().
 SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int omit quotes true on error));
-ERROR:  invalid ON ERROR behavior for column "a"
+ERROR:  invalid ON ERROR behavior
 LINE 1: ...N_TABLE(jsonb '1', '$' COLUMNS (a int omit quotes true on er...
                                                              ^
-DETAIL:  Only ERROR, NULL, EMPTY ARRAY, EMPTY OBJECT, or DEFAULT expression is allowed in ON ERROR for formatted columns.
+DETAIL:  Only ERROR, NULL, EMPTY ARRAY, EMPTY OBJECT, or DEFAULT expression is allowed in ON ERROR for JSON_QUERY().
 SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int exists empty object on error));
-ERROR:  invalid ON ERROR behavior for column "a"
+ERROR:  invalid ON ERROR behavior
 LINE 1: ...M JSON_TABLE(jsonb '1', '$' COLUMNS (a int exists empty obje...
                                                              ^
-DETAIL:  Only ERROR, TRUE, FALSE, or UNKNOWN is allowed in ON ERROR for EXISTS columns.
+DETAIL:  Only ERROR, TRUE, FALSE, or UNKNOWN is allowed in ON ERROR for JSON_EXISTS().
 -- Test JSON_TABLE() column deparsing -- don't emit default ON ERROR / EMPTY
 -- behavior
 CREATE VIEW json_table_view8 AS SELECT * from JSON_TABLE('"a"', '$' COLUMNS (a text PATH '$'));
@@ -1144,6 +2125,7 @@ CREATE OR REPLACE VIEW public.json_table_view8 AS
             COLUMNS (
                 a text PATH '$'
             )
+            PLAN (json_table_path_0) EMPTY ARRAY ON ERROR
         )
 CREATE VIEW json_table_view9 AS SELECT * from JSON_TABLE('"a"', '$' COLUMNS (a text PATH '$') ERROR ON ERROR);
 \sv json_table_view9;
@@ -1152,8 +2134,9 @@ CREATE OR REPLACE VIEW public.json_table_view9 AS
    FROM JSON_TABLE(
             '"a"'::text, '$' AS json_table_path_0
             COLUMNS (
-                a text PATH '$'
-            ) ERROR ON ERROR
+                a text PATH '$' NULL ON EMPTY
+            )
+            PLAN (json_table_path_0) ERROR ON ERROR
         )
 DROP VIEW json_table_view8, json_table_view9;
 -- Test JSON_TABLE() deparsing -- don't emit default ON ERROR behavior
@@ -1166,6 +2149,7 @@ CREATE OR REPLACE VIEW public.json_table_view8 AS
             COLUMNS (
                 a text PATH '$'
             )
+            PLAN (json_table_path_0) EMPTY ARRAY ON ERROR
         )
 CREATE VIEW json_table_view9 AS SELECT * from JSON_TABLE('"a"', '$' COLUMNS (a text PATH '$') EMPTY ARRAY ON ERROR);
 \sv json_table_view9;
@@ -1176,5 +2160,6 @@ CREATE OR REPLACE VIEW public.json_table_view9 AS
             COLUMNS (
                 a text PATH '$'
             )
+            PLAN (json_table_path_0) EMPTY ARRAY ON ERROR
         )
 DROP VIEW json_table_view8, json_table_view9;
