@@ -4471,6 +4471,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	ModifyTableState *mtstate;
 	Plan	   *subplan = outerPlan(node);
 	CmdType		operation = node->operation;
+	int			total_nrels PG_USED_FOR_ASSERTS_ONLY = list_length(node->resultRelations);
 	int			nrels;
 	List	   *resultRelations = NIL;
 	List	   *withCheckOptionLists = NIL;
@@ -4536,7 +4537,41 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		}
 		i++;
 	}
+
 	nrels = list_length(resultRelations);
+
+	/*
+	 * We must avoid pruning every result relation.  This is important for
+	 * MERGE, since even if every result relation is pruned from the subplan,
+	 * there might still be NOT MATCHED rows, for which there may be INSERT
+	 * actions to perform.  To allow these actions to be found, at least one
+	 * result relation must be kept.  In addition, when inserting into a
+	 * partitioned table, ExecInitPartitionInfo() needs a ResultRelInfo struct
+	 * as a reference for building the ResultRelInfo of the target partition.
+	 * In either case, it doesn't matter which result relation is kept, so we
+	 * just keep the first one, if all others have been pruned.
+	 */
+	if (nrels == 0)
+	{
+		nrels = 1;
+		resultRelations = lappend_int(resultRelations,
+									  linitial_int(node->resultRelations));
+		if (node->withCheckOptionLists)
+			withCheckOptionLists = lappend(withCheckOptionLists,
+										   linitial(node->withCheckOptionLists));
+		if (node->returningLists)
+			returningLists = lappend(returningLists,
+									 linitial(node->returningLists));
+		if (node->updateColnosLists)
+			updateColnosLists = lappend(updateColnosLists,
+										linitial(node->updateColnosLists));
+		if (node->mergeActionLists)
+			mergeActionLists = lappend(mergeActionLists,
+									   linitial(node->mergeActionLists));
+		if (node->mergeJoinConditions)
+			mergeJoinConditions = lappend(mergeJoinConditions,
+										  linitial(node->mergeJoinConditions));
+	}
 
 	/*
 	 * create state structure
@@ -4735,7 +4770,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 */
 	mtstate->mt_resultOidAttno =
 		ExecFindJunkAttributeInTlist(subplan->targetlist, "tableoid");
-	Assert(AttributeNumberIsValid(mtstate->mt_resultOidAttno) || nrels == 1);
+	Assert(AttributeNumberIsValid(mtstate->mt_resultOidAttno) || total_nrels == 1);
 	mtstate->mt_lastResultOid = InvalidOid; /* force lookup at first tuple */
 	mtstate->mt_lastResultIndex = 0;	/* must be zero if no such attr */
 
@@ -4832,7 +4867,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	if (node->onConflictAction != ONCONFLICT_NONE)
 	{
 		/* insert may only have one relation, inheritance is not expanded */
-		Assert(nrels == 1);
+		Assert(total_nrels == 1);
 		resultRelInfo->ri_onConflictArbiterIndexes = node->arbiterIndexes;
 	}
 
@@ -4979,7 +5014,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	if (operation == CMD_INSERT)
 	{
 		/* insert may only have one relation, inheritance is not expanded */
-		Assert(nrels == 1);
+		Assert(total_nrels == 1);
 		resultRelInfo = mtstate->resultRelInfo;
 		if (!resultRelInfo->ri_usesFdwDirectModify &&
 			resultRelInfo->ri_FdwRoutine != NULL &&

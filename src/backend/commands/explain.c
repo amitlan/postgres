@@ -4695,10 +4695,17 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 			break;
 	}
 
-	/* Should we explicitly label target relations? */
+	/*
+	 * Should we explicitly label target relations?
+	 *
+	 * Do not show it in the nrels == 1 case if it is a pruned relation added
+	 * by ExecInitModifyTable() in certain cases.
+	 */
 	labeltargets = (mtstate->mt_nrels > 1 ||
 					(mtstate->mt_nrels == 1 &&
-					 mtstate->resultRelInfo[0].ri_RangeTableIndex != node->nominalRelation));
+					 mtstate->resultRelInfo[0].ri_RangeTableIndex != node->nominalRelation &&
+					 bms_is_member(mtstate->resultRelInfo[0].ri_RangeTableIndex,
+								   mtstate->ps.state->es_unpruned_relids)));
 
 	if (labeltargets)
 		ExplainOpenGroup("Target Tables", "Target Tables", false, es);
