@@ -20,6 +20,7 @@
 
 #include "access/stratnum.h"
 #include "catalog/pg_type.h"
+#include "common/hashfn.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/appendinfo.h"
@@ -72,7 +73,50 @@ static Bitmapset *get_eclass_indexes_for_relids(PlannerInfo *root,
 												Relids relids);
 static Bitmapset *get_common_eclass_indexes(PlannerInfo *root, Relids relids1,
 											Relids relids2);
+static void ec_build_derives_hash(PlannerInfo *root, EquivalenceClass *ec);
+static void ec_add_derived_clauses(EquivalenceClass *ec, List *clauses);
+static void ec_add_derived_clause(EquivalenceClass *ec, RestrictInfo *clause);
+static void ec_add_clause_to_derives_hash(EquivalenceClass *ec, RestrictInfo *rinfo);
+static RestrictInfo *ec_search_clause_for_ems(PlannerInfo *root, EquivalenceClass *ec,
+											  EquivalenceMember *leftem,
+											  EquivalenceMember *rightem,
+											  EquivalenceClass *parent_ec);
+static RestrictInfo *ec_search_derived_clause_for_ems(PlannerInfo *root,
+													  EquivalenceClass *ec,
+													  EquivalenceMember *leftem,
+													  EquivalenceMember *rightem,
+													  EquivalenceClass *parent_ec);
 
+/*
+ * Hash key identifying a derived clause by EquivalenceMembers and parent EC.
+ */
+typedef struct
+{
+	EquivalenceMember *em1;
+	EquivalenceMember *em2;
+	EquivalenceClass *parent_ec;
+} ECDerivesKey;
+
+/* Hash table entry in ec_derives_hash. */
+typedef struct
+{
+	uint32		status;
+	ECDerivesKey key;
+	RestrictInfo *rinfo;
+} ECDerivesEntry;
+
+#define SH_PREFIX               derives
+#define SH_ELEMENT_TYPE			ECDerivesEntry
+#define SH_KEY_TYPE             ECDerivesKey
+#define SH_KEY                  key
+#define SH_HASH_KEY(tb, key)	\
+	hash_bytes((const unsigned char *) &(key), sizeof(ECDerivesKey))
+#define SH_EQUAL(tb, a, b)	\
+	((a).em1 == (b).em1 && (a).em2 == (b).em2 && (a).parent_ec == (b).parent_ec)
+#define SH_SCOPE                static inline
+#define SH_DECLARE
+#define SH_DEFINE
+#include "lib/simplehash.h"
 
 /*
  * process_equivalence
@@ -342,7 +386,12 @@ process_equivalence(PlannerInfo *root,
 		 */
 		ec1->ec_members = list_concat(ec1->ec_members, ec2->ec_members);
 		ec1->ec_sources = list_concat(ec1->ec_sources, ec2->ec_sources);
-		ec1->ec_derives = list_concat(ec1->ec_derives, ec2->ec_derives);
+
+		/*
+		 * Appends ec2's derived clauses to ec1->ec_derives_list and adds them
+		 * to ec1->ec_derives_hash if present.
+		 */
+		ec_add_derived_clauses(ec1, ec2->ec_derives_list);
 		ec1->ec_relids = bms_join(ec1->ec_relids, ec2->ec_relids);
 		ec1->ec_has_const |= ec2->ec_has_const;
 		/* can't need to set has_volatile */
@@ -355,7 +404,7 @@ process_equivalence(PlannerInfo *root,
 		/* just to avoid debugging confusion w/ dangling pointers: */
 		ec2->ec_members = NIL;
 		ec2->ec_sources = NIL;
-		ec2->ec_derives = NIL;
+		ec_clear_derived_clauses(ec2);
 		ec2->ec_relids = NULL;
 		ec1->ec_sources = lappend(ec1->ec_sources, restrictinfo);
 		ec1->ec_min_security = Min(ec1->ec_min_security,
@@ -412,7 +461,8 @@ process_equivalence(PlannerInfo *root,
 		ec->ec_collation = collation;
 		ec->ec_members = NIL;
 		ec->ec_sources = list_make1(restrictinfo);
-		ec->ec_derives = NIL;
+		ec->ec_derives_list = NIL;
+		ec->ec_derives_hash = NULL;
 		ec->ec_relids = NULL;
 		ec->ec_has_const = false;
 		ec->ec_has_volatile = false;
@@ -671,7 +721,8 @@ get_eclass_for_sort_expr(PlannerInfo *root,
 	newec->ec_collation = collation;
 	newec->ec_members = NIL;
 	newec->ec_sources = NIL;
-	newec->ec_derives = NIL;
+	newec->ec_derives_list = NIL;
+	newec->ec_derives_hash = NULL;
 	newec->ec_relids = NULL;
 	newec->ec_has_const = false;
 	newec->ec_has_volatile = contain_volatile_functions((Node *) expr);
@@ -1026,8 +1077,8 @@ relation_can_be_sorted_early(PlannerInfo *root, RelOptInfo *rel,
  * scanning of the quals and before Path construction begins.
  *
  * We make no attempt to avoid generating duplicate RestrictInfos here: we
- * don't search ec_sources or ec_derives for matches.  It doesn't really
- * seem worth the trouble to do so.
+ * don't search existing source or derived clauses in the EC for matches.  It
+ * doesn't really seem worth the trouble to do so.
  */
 void
 generate_base_implied_equalities(PlannerInfo *root)
@@ -1188,11 +1239,11 @@ generate_base_implied_equalities_const(PlannerInfo *root,
 
 		/*
 		 * If the clause didn't degenerate to a constant, fill in the correct
-		 * markings for a mergejoinable clause, and save it in ec_derives. (We
-		 * will not re-use such clauses directly, but selectivity estimation
-		 * may consult the list later.  Note that this use of ec_derives does
-		 * not overlap with its use for join clauses, since we never generate
-		 * join clauses from an ec_has_const eclass.)
+		 * markings for a mergejoinable clause, and save it as a derived
+		 * clause. (We will not re-use such clauses directly, but selectivity
+		 * estimation may consult those later.  Note that this use of derived
+		 * clauses does not overlap with its use for join clauses, since we
+		 * never generate join clauses from an ec_has_const eclass.)
 		 */
 		if (rinfo && rinfo->mergeopfamilies)
 		{
@@ -1200,7 +1251,7 @@ generate_base_implied_equalities_const(PlannerInfo *root,
 			rinfo->left_ec = rinfo->right_ec = ec;
 			rinfo->left_em = cur_em;
 			rinfo->right_em = const_em;
-			ec->ec_derives = lappend(ec->ec_derives, rinfo);
+			ec_add_derived_clause(ec, rinfo);
 		}
 	}
 }
@@ -1265,10 +1316,10 @@ generate_base_implied_equalities_no_const(PlannerInfo *root,
 
 			/*
 			 * If the clause didn't degenerate to a constant, fill in the
-			 * correct markings for a mergejoinable clause.  We don't put it
-			 * in ec_derives however; we don't currently need to re-find such
-			 * clauses, and we don't want to clutter that list with non-join
-			 * clauses.
+			 * correct markings for a mergejoinable clause.  We don't record
+			 * it as a derived clause, since we don't currently need to
+			 * re-find such clauses, and don't want to clutter the
+			 * derived-clause set with non-join clauses.
 			 */
 			if (rinfo && rinfo->mergeopfamilies)
 			{
@@ -1369,7 +1420,7 @@ generate_base_implied_equalities_broken(PlannerInfo *root,
  * we consider different join paths, we avoid generating multiple copies:
  * whenever we select a particular pair of EquivalenceMembers to join,
  * we check to see if the pair matches any original clause (in ec_sources)
- * or previously-built clause (in ec_derives).  This saves memory and allows
+ * or previously-built derived clause.  This saves memory and allows
  * re-use of information cached in RestrictInfos.  We also avoid generating
  * commutative duplicates, i.e. if the algorithm selects "a.x = b.y" but
  * we already have "b.y = a.x", we return the existing clause.
@@ -1754,9 +1805,9 @@ generate_join_implied_equalities_broken(PlannerInfo *root,
 	/*
 	 * If we have to translate, just brute-force apply adjust_appendrel_attrs
 	 * to all the RestrictInfos at once.  This will result in returning
-	 * RestrictInfos that are not listed in ec_derives, but there shouldn't be
-	 * any duplication, and it's a sufficiently narrow corner case that we
-	 * shouldn't sweat too much over it anyway.
+	 * RestrictInfos that are not included in EC's derived clauses, but there
+	 * shouldn't be any duplication, and it's a sufficiently narrow corner
+	 * case that we shouldn't sweat too much over it anyway.
 	 *
 	 * Since inner_rel might be an indirect descendant of the baserel
 	 * mentioned in the ec_sources clauses, we have to be prepared to apply
@@ -1823,43 +1874,11 @@ create_join_clause(PlannerInfo *root,
 {
 	RestrictInfo *rinfo;
 	RestrictInfo *parent_rinfo = NULL;
-	ListCell   *lc;
 	MemoryContext oldcontext;
 
-	/*
-	 * Search to see if we already built a RestrictInfo for this pair of
-	 * EquivalenceMembers.  We can use either original source clauses or
-	 * previously-derived clauses, and a commutator clause is acceptable.
-	 *
-	 * We used to verify that opno matches, but that seems redundant: even if
-	 * it's not identical, it'd better have the same effects, or the operator
-	 * families we're using are broken.
-	 */
-	foreach(lc, ec->ec_sources)
-	{
-		rinfo = (RestrictInfo *) lfirst(lc);
-		if (rinfo->left_em == leftem &&
-			rinfo->right_em == rightem &&
-			rinfo->parent_ec == parent_ec)
-			return rinfo;
-		if (rinfo->left_em == rightem &&
-			rinfo->right_em == leftem &&
-			rinfo->parent_ec == parent_ec)
-			return rinfo;
-	}
-
-	foreach(lc, ec->ec_derives)
-	{
-		rinfo = (RestrictInfo *) lfirst(lc);
-		if (rinfo->left_em == leftem &&
-			rinfo->right_em == rightem &&
-			rinfo->parent_ec == parent_ec)
-			return rinfo;
-		if (rinfo->left_em == rightem &&
-			rinfo->right_em == leftem &&
-			rinfo->parent_ec == parent_ec)
-			return rinfo;
-	}
+	rinfo = ec_search_clause_for_ems(root, ec, leftem, rightem, parent_ec);
+	if (rinfo)
+		return rinfo;
 
 	/*
 	 * Not there, so build it, in planner context so we can re-use it. (Not
@@ -1923,7 +1942,7 @@ create_join_clause(PlannerInfo *root,
 	rinfo->left_em = leftem;
 	rinfo->right_em = rightem;
 	/* and save it for possible re-use */
-	ec->ec_derives = lappend(ec->ec_derives, rinfo);
+	ec_add_derived_clause(ec, rinfo);
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -2648,28 +2667,14 @@ match_eclasses_to_foreign_key_col(PlannerInfo *root,
  * Returns NULL if no such clause can be found.
  */
 RestrictInfo *
-find_derived_clause_for_ec_member(EquivalenceClass *ec,
+find_derived_clause_for_ec_member(PlannerInfo *root,
+								  EquivalenceClass *ec,
 								  EquivalenceMember *em)
 {
-	ListCell   *lc;
-
 	Assert(ec->ec_has_const);
 	Assert(!em->em_is_const);
-	foreach(lc, ec->ec_derives)
-	{
-		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
-		/*
-		 * generate_base_implied_equalities_const will have put non-const
-		 * members on the left side of derived clauses.
-		 */
-		if (rinfo->left_em == em)
-		{
-			Assert(rinfo->right_em->em_is_const);
-			return rinfo;
-		}
-	}
-	return NULL;
+	return ec_search_derived_clause_for_ems(root, ec, em, NULL, NULL);
 }
 
 
@@ -3441,4 +3446,256 @@ get_common_eclass_indexes(PlannerInfo *root, Relids relids1, Relids relids2)
 
 	/* Calculate and return the common EC indexes, recycling the left input. */
 	return bms_int_members(rel1ecs, rel2ecs);
+}
+
+/*
+ * ec_build_derives_hash
+ *	  Construct the auxiliary hash table for derived clauses.
+ */
+static void
+ec_build_derives_hash(PlannerInfo *root, EquivalenceClass *ec)
+{
+	Assert(!ec->ec_derives_hash);
+
+	/* Create the hash table */
+	ec->ec_derives_hash = derives_create(root->planner_cxt, 256L, NULL);
+
+	foreach_node(RestrictInfo, rinfo, ec->ec_derives_list)
+		ec_add_clause_to_derives_hash(ec, rinfo);
+}
+
+/*
+ * ec_add_derived_clause
+ *		Add a clause to the set of derived clauses for the given
+ *		EquivalenceClass. Always appends to ec_derives_list; also adds
+ *		to ec_derives_hash if it exists.
+ */
+static void
+ec_add_derived_clause(EquivalenceClass *ec, RestrictInfo *clause)
+{
+	ec->ec_derives_list = lappend(ec->ec_derives_list, clause);
+	if (ec->ec_derives_hash)
+		ec_add_clause_to_derives_hash(ec, clause);
+}
+
+/*
+ * ec_add_derived_clauses
+ *		Add a list of clauses to the set of clauses derived from the given
+ *		EquivalenceClass; adding to the list and hash table if needed.
+ *
+ * This function is similar to above function but optimized for adding multiple
+ * clauses at a time to the ec_derives_list.
+ */
+static void
+ec_add_derived_clauses(EquivalenceClass *ec, List *clauses)
+{
+	ec->ec_derives_list = list_concat(ec->ec_derives_list, clauses);
+	if (ec->ec_derives_hash)
+		foreach_node(RestrictInfo, rinfo, clauses)
+			ec_add_clause_to_derives_hash(ec, rinfo);
+}
+
+/*
+ * ec_add_clause_to_derives_hash
+ *      Add a derived clause to the ec_derives_hash of the given
+ *      EquivalenceClass.
+ */
+static void
+ec_add_clause_to_derives_hash(EquivalenceClass *ec, RestrictInfo *rinfo)
+{
+	ECDerivesKey key;
+	ECDerivesEntry *entry;
+	bool		found;
+
+	/*
+	 * Constants are always placed on the RHS; see
+	 * generate_base_implied_equalities_const().
+	 */
+	Assert(!rinfo->left_em->em_is_const);
+
+	if (rinfo->right_em->em_is_const)
+	{
+		/*
+		 * Clauses containing a constant are never considered redundant, so
+		 * parent_ec is not set.
+		 */
+		Assert(!rinfo->parent_ec);
+
+		/*
+		 * find_derived_clause_for_ec_member() performs lookup of a clause
+		 * involving a constant using only the non-constant EM and NULL for
+		 * the RHS. Since there's only one constant EM per EC, we don't need
+		 * to store or match it during lookup.  We set key.em2 = NULL to
+		 * reflect this.
+		 */
+		key.em1 = rinfo->left_em;
+		key.em2 = NULL;
+		key.parent_ec = rinfo->parent_ec;
+		entry = derives_insert(ec->ec_derives_hash, key, &found);
+		Assert(!found);
+		entry->rinfo = rinfo;
+	}
+	else
+	{
+		key.em1 = rinfo->left_em;
+		key.em2 = rinfo->right_em;
+		key.parent_ec = rinfo->parent_ec;
+		entry = derives_insert(ec->ec_derives_hash, key, &found);
+		Assert(!found);
+		entry->rinfo = rinfo;
+
+		/*
+		 * Insert the clause under the given EM pair key, and also under the
+		 * reverse order. This ensures we can find the clause regardless of
+		 * the order in which EMs are passed to the lookup function.
+		 */
+		key.em1 = rinfo->right_em;
+		key.em2 = rinfo->left_em;
+		key.parent_ec = rinfo->parent_ec;
+		entry = derives_insert(ec->ec_derives_hash, key, &found);
+		Assert(!found);
+		entry->rinfo = rinfo;
+	}
+}
+
+/*
+ * ec_clear_derived_clauses
+ *      Reset ec_derives_list and ec_derives_hash.
+ *
+ * We destroy the hash table explicitly, since it may consume significant
+ * space. The list is simply cleared by setting it to NIL; we do not
+ * explicitly free it.
+ *
+ * XXX: When thousands of partitions are involved, the list can become
+ * sizable. It might be worth freeing it explicitly in such cases.
+ */
+void
+ec_clear_derived_clauses(EquivalenceClass *ec)
+{
+	ec->ec_derives_list = NIL;
+	if (ec->ec_derives_hash)
+	{
+		derives_destroy(ec->ec_derives_hash);
+		ec->ec_derives_hash = NULL;
+	}
+}
+
+/*
+ * ec_search_clause_for_ems
+ *		Search for an existing RestrictInfo that equates the given pair
+ *		of EquivalenceMembers, either from ec_sources or ec_derives.
+ *
+ * We accept clauses in either operand order, so commutators are matched. We
+ * used to require matching operator OIDs, but dropped that since any
+ * semantically different operator here would indicate a broken operator
+ * family.
+ *
+ * Returns NULL if no matching clause is found.
+ */
+
+static RestrictInfo *
+ec_search_clause_for_ems(PlannerInfo *root, EquivalenceClass *ec,
+						 EquivalenceMember *leftem, EquivalenceMember *rightem,
+						 EquivalenceClass *parent_ec)
+{
+	/* Check original source clauses */
+	foreach_node(RestrictInfo, rinfo, ec->ec_sources)
+	{
+		if (rinfo->left_em == leftem &&
+			rinfo->right_em == rightem &&
+			rinfo->parent_ec == parent_ec)
+			return rinfo;
+		if (rinfo->left_em == rightem &&
+			rinfo->right_em == leftem &&
+			rinfo->parent_ec == parent_ec)
+			return rinfo;
+	}
+
+	/* Not found in ec_sources; search derived clauses */
+	return ec_search_derived_clause_for_ems(root, ec, leftem, rightem,
+											parent_ec);
+}
+
+/*
+ * ec_search_derived_clause_for_ems
+ *		Search for an existing derived clause between two EquivalenceMembers.
+ *
+ * If the number of derived clauses exceeds a threshold, switch to hash table
+ * lookup; otherwise, scan ec_derives_list linearly.
+ *
+ * Clauses involving constants are looked up using only the non-const EM
+ * (leftem) and a NULL rightem. In that case, we expect to find a clause with
+ * a constant on the RHS.
+ *
+ * We do not attempt a second lookup with EMs swapped when using the hash
+ * table; such clauses are inserted under both orderings at the time of
+ * insertion.
+ */
+static RestrictInfo *
+ec_search_derived_clause_for_ems(PlannerInfo *root, EquivalenceClass *ec,
+								 EquivalenceMember *leftem,
+								 EquivalenceMember *rightem,
+								 EquivalenceClass *parent_ec)
+{
+	/*
+	 * Switch to using hash lookup when list grows "too long". The threshold
+	 * is arbitrary and is known only here.
+	 */
+	if (!ec->ec_derives_hash && list_length(ec->ec_derives_list) >= 32)
+		ec_build_derives_hash(root, ec);
+
+	/* Perform hash table lookup if available */
+	if (ec->ec_derives_hash)
+	{
+		ECDerivesKey key;
+		RestrictInfo *rinfo;
+		ECDerivesEntry *entry;
+
+		/*
+		 * See ec_add_clause_to_derives_hash() for rationale: derived clauses
+		 * are inserted into the hash table under both (em1, em2) and (em2,
+		 * em1), so a single lookup with the original order is sufficient.
+		 */
+		key.em1 = leftem;
+		key.em2 = rightem;
+		key.parent_ec = parent_ec;
+		entry = derives_lookup(ec->ec_derives_hash, key);
+		if (entry)
+		{
+			rinfo = entry->rinfo;
+			Assert(rinfo);
+
+			/*
+			 * If this is a lookup in a const-containing EC, the RHS must be a
+			 * constant. The caller signals this by passing NULL for rightem.
+			 */
+			Assert(rightem || rinfo->right_em->em_is_const);
+			return rinfo;
+		}
+	}
+	else
+	{
+		/* Fallback to linear search over ec_derives_list */
+		foreach_node(RestrictInfo, rinfo, ec->ec_derives_list)
+		{
+			/* Handle special case: lookup by non-const EM alone */
+			if (!rightem &&
+				rinfo->left_em == leftem)
+			{
+				/* See the comment above in hash path for rationale. */
+				Assert(rinfo->right_em->em_is_const);
+				return rinfo;
+			}
+			if (rinfo->left_em == leftem &&
+				rinfo->right_em == rightem &&
+				rinfo->parent_ec == parent_ec)
+				return rinfo;
+			if (rinfo->left_em == rightem &&
+				rinfo->right_em == leftem &&
+				rinfo->parent_ec == parent_ec)
+				return rinfo;
+		}
+	}
+
+	return NULL;
 }
