@@ -667,6 +667,8 @@ DumpableObjectWithAcl
 DynamicFileList
 DynamicZoneAbbrev
 EC_KEY
+ECDerivesKey
+ECDerivesEntry
 EDGE
 ENGINE
 EOM_flatten_into_method
