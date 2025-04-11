@@ -1410,6 +1410,7 @@ JsonPathKeyword
 JsonPathParseItem
 JsonPathParseResult
 JsonPathPredicateCallback
+JsonPathSpec
 JsonPathString
 JsonPathVariable
 JsonQuotes
@@ -1425,9 +1426,15 @@ JsonTableParseContext
 JsonTablePath
 JsonTablePathScan
 JsonTablePathSpec
+JsonTableJoinState
 JsonTablePlan
 JsonTablePlanRowSource
+JsonTablePlanSpec
 JsonTablePlanState
+JsonTablePlanStateType
+JsonTablePlanJoinType
+JsonTablePlanType
+JsonTableScanState
 JsonTableSiblingJoin
 JsonTokenType
 JsonTransformStringValuesAction

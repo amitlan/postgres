@@ -1916,6 +1916,7 @@ typedef struct JsonTablePathScan
 
 	/* Plan(s) for nested columns, if any. */
 	JsonTablePlan *child;
+	bool		outerJoin;		/* outer or inner join for nested columns? */
 
 	/*
 	 * 0-based index in TableFunc.colvalexprs of the 1st and the last column
@@ -1937,6 +1938,7 @@ typedef struct JsonTableSiblingJoin
 
 	JsonTablePlan *lplan;
 	JsonTablePlan *rplan;
+	bool		cross;
 } JsonTableSiblingJoin;
 
 /* ----------------
