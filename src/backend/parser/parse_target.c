@@ -301,6 +301,8 @@ resolveTargetListUnknowns(ParseState *pstate, List *targetlist)
 											 COERCION_IMPLICIT,
 											 COERCE_IMPLICIT_CAST,
 											 -1);
+			tle->exprtype = TEXTOID;
+			tle->exprtypmod = -1;
 		}
 	}
 }

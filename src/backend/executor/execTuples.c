@@ -2164,8 +2164,8 @@ ExecTypeFromTLInternal(List *targetList, bool skipjunk)
 		TupleDescInitEntry(typeInfo,
 						   cur_resno,
 						   tle->resname,
-						   exprType((Node *) tle->expr),
-						   exprTypmod((Node *) tle->expr),
+						   tle->exprtype,
+						   tle->exprtypmod,
 						   0);
 		TupleDescInitEntryCollation(typeInfo,
 									cur_resno,

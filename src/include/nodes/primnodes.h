@@ -2219,6 +2219,9 @@ typedef struct TargetEntry
 	Expr	   *expr;
 	/* attribute number (see notes above) */
 	AttrNumber	resno;
+	/* type and typmod of the expression (expr) */
+	Oid			exprtype pg_node_attr(query_jumble_ignore);
+	int32		exprtypmod pg_node_attr(query_jumble_ignore);
 	/* name of the column (could be NULL) */
 	char	   *resname pg_node_attr(query_jumble_ignore);
 	/* nonzero if referenced by a sort/group clause */

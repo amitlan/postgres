@@ -294,6 +294,11 @@ makeTargetEntry(Expr *expr,
 	TargetEntry *tle = makeNode(TargetEntry);
 
 	tle->expr = expr;
+
+	/* resolveTargetListUnknowns() will overwrite this if needed. */
+	tle->exprtype = exprType((Node *) tle->expr);
+	tle->exprtypmod = exprTypmod((Node *) tle->expr);
+
 	tle->resno = resno;
 	tle->resname = resname;
 
