@@ -18,6 +18,7 @@
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/tupdesc.h"
+#include "nodes/bitmapset.h"
 #include "storage/buf.h"
 
 /*----------
@@ -125,6 +126,8 @@ typedef struct TupleTableSlot
 	Datum	   *tts_values;		/* current per-attribute values */
 #define FIELDNO_TUPLETABLESLOT_ISNULL 6
 	bool	   *tts_isnull;		/* current per-attribute isnull flags */
+	Bitmapset  *needed_attrs;
+	bool	   *tts_valid;
 	MemoryContext tts_mcxt;		/* slot itself is in this context */
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
@@ -158,6 +161,12 @@ struct TupleTableSlotOps
 	 * columns.
 	 */
 	void		(*getsomeattrs) (TupleTableSlot *slot, int natts);
+
+	/*
+	 * Fills entries in tts_values/isnulls corresponding to the attributes
+	 * specified in needed_attrs and sets tts_valid_attrs to needed_attrs.
+	 */
+	void		(*getneededattrs) (TupleTableSlot *slot, int attno, Bitmapset *needed_attrs);
 
 	/*
 	 * Returns value of the given system attribute as a datum and sets isnull
@@ -346,7 +355,8 @@ extern MinimalTuple ExecFetchSlotMinimalTuple(TupleTableSlot *slot,
 extern Datum ExecFetchSlotHeapTupleDatum(TupleTableSlot *slot);
 extern void slot_getmissingattrs(TupleTableSlot *slot, int startAttNum,
 								 int lastAttNum);
-extern void slot_getsomeattrs_int(TupleTableSlot *slot, int attnum);
+extern void slot_getsomeattrs_int(TupleTableSlot *slot, int attnum,
+								  Bitmapset *needed_attrs);
 
 
 #ifndef FRONTEND
@@ -359,7 +369,19 @@ static inline void
 slot_getsomeattrs(TupleTableSlot *slot, int attnum)
 {
 	if (slot->tts_nvalid < attnum)
-		slot_getsomeattrs_int(slot, attnum);
+		slot_getsomeattrs_int(slot, attnum, NULL);
+}
+
+/*
+ * This function forces the entries of the slot's Datum/isnull arrays to be
+ * valid at least up through the attnum'th entry.
+ */
+static inline void
+slot_getsomeattrs_filtered(TupleTableSlot *slot, int attnum,
+						   Bitmapset *needed_attrs)
+{
+	if (slot->tts_nvalid < attnum)
+		slot_getsomeattrs_int(slot, attnum, needed_attrs);
 }
 
 /*

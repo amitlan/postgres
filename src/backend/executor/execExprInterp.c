@@ -653,7 +653,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			CheckOpSlotCompatibility(op, scanslot);
 
-			slot_getsomeattrs(scanslot, op->d.fetch.last_var);
+			slot_getsomeattrs_filtered(scanslot, op->d.fetch.last_var,
+									   scanslot->needed_attrs);
 
 			EEO_NEXT();
 		}
@@ -712,7 +713,14 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 			/* See EEOP_INNER_VAR comments */
 
-			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
+			/*
+			 * When needed_attrs is provided, only the specified attributes
+			 * are guaranteed to be populated in tts_values[]. Otherwise, all
+			 * attributes up to tts_nvalid are assumed valid.
+			 */
+			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid &&
+				   (scanslot->tts_valid[attnum] ||
+					scanslot->needed_attrs == NULL));
 			*op->resvalue = scanslot->tts_values[attnum];
 			*op->resnull = scanslot->tts_isnull[attnum];
 
@@ -826,7 +834,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 * We do not need CheckVarSlotCompatibility here; that was taken
 			 * care of at compilation time.  But see EEOP_INNER_VAR comments.
 			 */
-			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
+			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid &&
+				   (scanslot->tts_valid[attnum] ||
+					scanslot->needed_attrs == NULL));
 			Assert(resultnum >= 0 && resultnum < resultslot->tts_tupleDescriptor->natts);
 			resultslot->tts_values[resultnum] = scanslot->tts_values[attnum];
 			resultslot->tts_isnull[resultnum] = scanslot->tts_isnull[attnum];

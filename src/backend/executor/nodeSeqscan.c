@@ -207,6 +207,7 @@ SeqScanState *
 ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 {
 	SeqScanState *scanstate;
+	TupleTableSlot *scanslot;
 
 	/*
 	 * Once upon a time it was possible to have an outerPlan of a SeqScan, but
@@ -241,18 +242,26 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	ExecInitScanTupleSlot(estate, &scanstate->ss,
 						  RelationGetDescr(scanstate->ss.ss_currentRelation),
 						  table_slot_callbacks(scanstate->ss.ss_currentRelation));
+	scanslot = scanstate->ss.ss_ScanTupleSlot;
+	Assert(scanslot);
 
 	/*
 	 * Initialize result type and projection.
 	 */
 	ExecInitResultTypeTL(&scanstate->ss.ps);
 	ExecAssignScanProjectionInfo(&scanstate->ss);
+	if (scanstate->ss.ps.ps_ProjInfo)
+		scanslot->needed_attrs = bms_add_members(scanslot->needed_attrs,
+												 scanstate->ss.ps.ps_ProjInfo->pi_state.needed_attrs);
 
 	/*
 	 * initialize child expressions
 	 */
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
+	if (scanstate->ss.ps.qual && !bms_is_empty(scanslot->needed_attrs))
+		scanslot->needed_attrs = bms_add_members(scanslot->needed_attrs,
+												 scanstate->ss.ps.qual->needed_attrs);
 
 	/*
 	 * When EvalPlanQual() is not in use, assign ExecProcNode for this node
