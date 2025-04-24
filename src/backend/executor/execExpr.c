@@ -64,6 +64,7 @@ typedef struct ExprSetupInfo
 	AttrNumber	last_scan;
 	AttrNumber	last_old;
 	AttrNumber	last_new;
+	Bitmapset  *all_scan_attrs;
 	/* MULTIEXPR SubPlan nodes appearing in the expression: */
 	List	   *multiexpr_subplans;
 } ExprSetupInfo;
@@ -476,6 +477,8 @@ ExecBuildProjectionInfo(List *targetList,
 			scratch.d.assign_var.attnum = attnum - 1;
 			scratch.d.assign_var.resultnum = tle->resno - 1;
 			ExprEvalPushStep(state, &scratch);
+			state->needed_attrs = bms_add_member(state->needed_attrs,
+												 attnum);
 		}
 		else
 		{
@@ -557,7 +560,7 @@ ExecBuildUpdateProjection(List *targetList,
 	int			nAssignableCols;
 	bool		sawJunk;
 	Bitmapset  *assignedCols;
-	ExprSetupInfo deform = {0, 0, 0, 0, 0, NIL};
+	ExprSetupInfo deform = {0, 0, 0, 0, 0, NULL, NIL};
 	ExprEvalStep scratch = {0};
 	int			outerattnum;
 	ListCell   *lc,
@@ -1010,6 +1013,9 @@ ExecInitExprRec(Expr *node, ExprState *state,
 							}
 							break;
 					}
+					state->needed_attrs =
+						bms_add_member(state->needed_attrs,
+									   variable->varattno);
 				}
 
 				ExprEvalPushStep(state, &scratch);
@@ -2880,13 +2886,16 @@ ExecInitSubPlanExpr(SubPlan *subplan,
 static void
 ExecCreateExprSetupSteps(ExprState *state, Node *node)
 {
-	ExprSetupInfo info = {0, 0, 0, 0, 0, NIL};
+	ExprSetupInfo info = {0, 0, 0, 0, 0, NULL, NIL};
 
 	/* Prescan to find out what we need. */
 	expr_setup_walker(node, &info);
 
 	/* And generate those steps. */
 	ExecPushExprSetupSteps(state, &info);
+
+	/* Also tell the caller about attribute numbers that expr_setup_walker() found. */
+	state->needed_attrs = bms_union(state->needed_attrs, info.all_scan_attrs);
 }
 
 /*
@@ -3006,6 +3015,9 @@ expr_setup_walker(Node *node, ExprSetupInfo *info)
 				{
 					case VAR_RETURNING_DEFAULT:
 						info->last_scan = Max(info->last_scan, attnum);
+						if (attnum > 0)
+							info->all_scan_attrs =
+								bms_add_member(info->all_scan_attrs, attnum);
 						break;
 					case VAR_RETURNING_OLD:
 						info->last_old = Max(info->last_old, attnum);
@@ -3681,7 +3693,7 @@ ExecBuildAggTrans(AggState *aggstate, AggStatePerPhase phase,
 	PlanState  *parent = &aggstate->ss.ps;
 	ExprEvalStep scratch = {0};
 	bool		isCombine = DO_AGGSPLIT_COMBINE(aggstate->aggsplit);
-	ExprSetupInfo deform = {0, 0, 0, 0, 0, NIL};
+	ExprSetupInfo deform = {0, 0, 0, 0, 0, NULL, NIL};
 
 	state->expr = (Expr *) aggstate;
 	state->parent = parent;

@@ -147,6 +147,12 @@ typedef struct ExprState
 	 * ExecInitExprRec().
 	 */
 	ErrorSaveContext *escontext;
+
+	/*
+	 * User attribute numbers that are needed to evaluate the Var nodes in
+	 * 'expr'.
+	 */
+	Bitmapset  *needed_attrs;
 } ExprState;
 
 

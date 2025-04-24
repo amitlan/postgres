@@ -73,7 +73,7 @@
 static TupleDesc ExecTypeFromTLInternal(List *targetList,
 										bool skipjunk);
 static pg_attribute_always_inline void slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
-															  int natts);
+															  int natts, Bitmapset *needed_attrs);
 static inline void tts_buffer_heap_store_tuple(TupleTableSlot *slot,
 											   HeapTuple tuple,
 											   Buffer buffer,
@@ -349,7 +349,17 @@ tts_heap_getsomeattrs(TupleTableSlot *slot, int natts)
 
 	Assert(!TTS_EMPTY(slot));
 
-	slot_deform_heap_tuple(slot, hslot->tuple, &hslot->off, natts);
+	slot_deform_heap_tuple(slot, hslot->tuple, &hslot->off, natts, NULL);
+}
+
+static void
+tts_heap_getneededattrs(TupleTableSlot *slot, int natts, Bitmapset *needed_attrs)
+{
+	HeapTupleTableSlot *hslot = (HeapTupleTableSlot *) slot;
+
+	Assert(!TTS_EMPTY(slot));
+
+	slot_deform_heap_tuple(slot, hslot->tuple, &hslot->off, natts, needed_attrs);
 }
 
 static Datum
@@ -547,7 +557,7 @@ tts_minimal_getsomeattrs(TupleTableSlot *slot, int natts)
 
 	Assert(!TTS_EMPTY(slot));
 
-	slot_deform_heap_tuple(slot, mslot->tuple, &mslot->off, natts);
+	slot_deform_heap_tuple(slot, mslot->tuple, &mslot->off, natts, NULL);
 }
 
 /*
@@ -754,7 +764,17 @@ tts_buffer_heap_getsomeattrs(TupleTableSlot *slot, int natts)
 
 	Assert(!TTS_EMPTY(slot));
 
-	slot_deform_heap_tuple(slot, bslot->base.tuple, &bslot->base.off, natts);
+	slot_deform_heap_tuple(slot, bslot->base.tuple, &bslot->base.off, natts, NULL);
+}
+
+static void
+tts_buffer_heap_getneededattrs(TupleTableSlot *slot, int natts, Bitmapset *needed_attrs)
+{
+	BufferHeapTupleTableSlot *hslot = (BufferHeapTupleTableSlot *) slot;
+
+	Assert(!TTS_EMPTY(slot));
+
+	slot_deform_heap_tuple(slot, hslot->base.tuple, &hslot->base.off, natts, needed_attrs);
 }
 
 static Datum
@@ -1017,12 +1037,14 @@ tts_buffer_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple,
  */
 static pg_attribute_always_inline int
 slot_deform_heap_tuple_internal(TupleTableSlot *slot, HeapTuple tuple,
-								int attnum, int natts, bool slow,
+								int attnum, int natts, Bitmapset *needed_attrs,
+								bool slow,
 								bool hasnulls, uint32 *offp, bool *slowp)
 {
 	TupleDesc	tupleDesc = slot->tts_tupleDescriptor;
 	Datum	   *values = slot->tts_values;
 	bool	   *isnull = slot->tts_isnull;
+	bool	   *valid = slot->tts_valid;
 	HeapTupleHeader tup = tuple->t_data;
 	char	   *tp;				/* ptr to tuple data */
 	bits8	   *bp = tup->t_bits;	/* ptr to null bitmap in tuple */
@@ -1033,11 +1055,13 @@ slot_deform_heap_tuple_internal(TupleTableSlot *slot, HeapTuple tuple,
 	for (; attnum < natts; attnum++)
 	{
 		CompactAttribute *thisatt = TupleDescCompactAttr(tupleDesc, attnum);
+		bool	is_physical_null = hasnulls && att_isnull(attnum, bp);
 
-		if (hasnulls && att_isnull(attnum, bp))
+		if (is_physical_null)
 		{
 			values[attnum] = (Datum) 0;
 			isnull[attnum] = true;
+			valid[attnum] = (needed_attrs == NULL || bms_is_member(attnum + 1, needed_attrs));
 			if (!slow)
 			{
 				*slowp = true;
@@ -1082,7 +1106,22 @@ slot_deform_heap_tuple_internal(TupleTableSlot *slot, HeapTuple tuple,
 				thisatt->attcacheoff = *offp;
 		}
 
-		values[attnum] = fetchatt(thisatt, tp + *offp);
+		if (needed_attrs == NULL || bms_is_member(attnum + 1, needed_attrs))
+		{
+			/* Attribute is needed: Deform and mark as valid */
+			isnull[attnum] = is_physical_null;
+			if (!is_physical_null)
+				values[attnum] = fetchatt(thisatt, tp + *offp);
+			else
+				values[attnum] = (Datum) 0;
+			valid[attnum] = true;
+		}
+		else
+		{
+			values[attnum] = (Datum) 0;
+			isnull[attnum] = true;
+			valid[attnum] = false;
+		}
 
 		*offp = att_addlength_pointer(*offp, thisatt->attlen, tp + *offp);
 
@@ -1120,7 +1159,7 @@ slot_deform_heap_tuple_internal(TupleTableSlot *slot, HeapTuple tuple,
  */
 static pg_attribute_always_inline void
 slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
-					   int natts)
+					   int natts, Bitmapset *needed_attrs)
 {
 	bool		hasnulls = HeapTupleHasNulls(tuple);
 	int			attnum;
@@ -1167,6 +1206,7 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 													 tuple,
 													 attnum,
 													 natts,
+													 needed_attrs,
 													 false, /* slow */
 													 false, /* hasnulls */
 													 &off,
@@ -1176,6 +1216,7 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 													 tuple,
 													 attnum,
 													 natts,
+													 needed_attrs,
 													 false, /* slow */
 													 true,	/* hasnulls */
 													 &off,
@@ -1190,6 +1231,7 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 												 tuple,
 												 attnum,
 												 natts,
+												 needed_attrs,
 												 true,	/* slow */
 												 hasnulls,
 												 &off,
@@ -1213,6 +1255,7 @@ const TupleTableSlotOps TTSOpsVirtual = {
 	.release = tts_virtual_release,
 	.clear = tts_virtual_clear,
 	.getsomeattrs = tts_virtual_getsomeattrs,
+	.getneededattrs = NULL,
 	.getsysattr = tts_virtual_getsysattr,
 	.materialize = tts_virtual_materialize,
 	.is_current_xact_tuple = tts_virtual_is_current_xact_tuple,
@@ -1234,6 +1277,7 @@ const TupleTableSlotOps TTSOpsHeapTuple = {
 	.release = tts_heap_release,
 	.clear = tts_heap_clear,
 	.getsomeattrs = tts_heap_getsomeattrs,
+	.getneededattrs = tts_heap_getneededattrs,
 	.getsysattr = tts_heap_getsysattr,
 	.is_current_xact_tuple = tts_heap_is_current_xact_tuple,
 	.materialize = tts_heap_materialize,
@@ -1252,6 +1296,7 @@ const TupleTableSlotOps TTSOpsMinimalTuple = {
 	.release = tts_minimal_release,
 	.clear = tts_minimal_clear,
 	.getsomeattrs = tts_minimal_getsomeattrs,
+	.getneededattrs = NULL,
 	.getsysattr = tts_minimal_getsysattr,
 	.is_current_xact_tuple = tts_minimal_is_current_xact_tuple,
 	.materialize = tts_minimal_materialize,
@@ -1270,6 +1315,7 @@ const TupleTableSlotOps TTSOpsBufferHeapTuple = {
 	.release = tts_buffer_heap_release,
 	.clear = tts_buffer_heap_clear,
 	.getsomeattrs = tts_buffer_heap_getsomeattrs,
+	.getneededattrs = tts_buffer_heap_getneededattrs,
 	.getsysattr = tts_buffer_heap_getsysattr,
 	.is_current_xact_tuple = tts_buffer_is_current_xact_tuple,
 	.materialize = tts_buffer_heap_materialize,
@@ -1303,6 +1349,9 @@ MakeTupleTableSlot(TupleDesc tupleDesc,
 {
 	Size		basesz,
 				allocsz;
+	Size		datumsz;
+	Size		isnullsz;
+	Size		validsz;
 	TupleTableSlot *slot;
 
 	basesz = tts_ops->base_slot_size;
@@ -1312,9 +1361,12 @@ MakeTupleTableSlot(TupleDesc tupleDesc,
 	 * allocating the entire slot in one go.
 	 */
 	if (tupleDesc)
-		allocsz = MAXALIGN(basesz) +
-			MAXALIGN(tupleDesc->natts * sizeof(Datum)) +
-			MAXALIGN(tupleDesc->natts * sizeof(bool));
+	{
+		datumsz = MAXALIGN(tupleDesc->natts * sizeof(Datum));
+		isnullsz = MAXALIGN(tupleDesc->natts * sizeof(bool));
+		validsz = MAXALIGN(tupleDesc->natts * sizeof(bool));
+		allocsz = MAXALIGN(basesz) + datumsz + isnullsz + validsz;
+	}
 	else
 		allocsz = basesz;
 
@@ -1331,13 +1383,13 @@ MakeTupleTableSlot(TupleDesc tupleDesc,
 
 	if (tupleDesc != NULL)
 	{
-		slot->tts_values = (Datum *)
-			(((char *) slot)
-			 + MAXALIGN(basesz));
-		slot->tts_isnull = (bool *)
-			(((char *) slot)
-			 + MAXALIGN(basesz)
-			 + MAXALIGN(tupleDesc->natts * sizeof(Datum)));
+		char *ptr = (char *) slot + MAXALIGN(basesz);
+
+		slot->tts_values = (Datum *) ptr;
+		ptr += datumsz;
+		slot->tts_isnull = (bool *) ptr;
+		ptr += isnullsz;
+		slot->tts_valid = (bool *) ptr;
 
 		PinTupleDesc(tupleDesc);
 	}
@@ -1508,6 +1560,8 @@ ExecSetSlotDescriptor(TupleTableSlot *slot, /* slot to change */
 	slot->tts_values = (Datum *)
 		MemoryContextAlloc(slot->tts_mcxt, tupdesc->natts * sizeof(Datum));
 	slot->tts_isnull = (bool *)
+		MemoryContextAlloc(slot->tts_mcxt, tupdesc->natts * sizeof(bool));
+	slot->tts_valid = (bool *)
 		MemoryContextAlloc(slot->tts_mcxt, tupdesc->natts * sizeof(bool));
 }
 
@@ -2068,6 +2122,8 @@ slot_getmissingattrs(TupleTableSlot *slot, int startAttNum, int lastAttNum)
 			   (lastAttNum - startAttNum) * sizeof(Datum));
 		memset(slot->tts_isnull + startAttNum, 1,
 			   (lastAttNum - startAttNum) * sizeof(bool));
+		memset(slot->tts_valid + startAttNum, 1,
+			   (lastAttNum - startAttNum) * sizeof(bool));
 	}
 	else
 	{
@@ -2080,6 +2136,7 @@ slot_getmissingattrs(TupleTableSlot *slot, int startAttNum, int lastAttNum)
 		{
 			slot->tts_values[missattnum] = attrmiss[missattnum].am_value;
 			slot->tts_isnull[missattnum] = !attrmiss[missattnum].am_present;
+			slot->tts_valid[missattnum] = true;
 		}
 	}
 }
@@ -2088,7 +2145,7 @@ slot_getmissingattrs(TupleTableSlot *slot, int startAttNum, int lastAttNum)
  * slot_getsomeattrs_int - workhorse for slot_getsomeattrs()
  */
 void
-slot_getsomeattrs_int(TupleTableSlot *slot, int attnum)
+slot_getsomeattrs_int(TupleTableSlot *slot, int attnum, Bitmapset *needed_attrs)
 {
 	/* Check for caller errors */
 	Assert(slot->tts_nvalid < attnum);	/* checked in slot_getsomeattrs */
@@ -2098,7 +2155,10 @@ slot_getsomeattrs_int(TupleTableSlot *slot, int attnum)
 		elog(ERROR, "invalid attribute number %d", attnum);
 
 	/* Fetch as many attributes as possible from the underlying tuple. */
-	slot->tts_ops->getsomeattrs(slot, attnum);
+	if (needed_attrs)
+		slot->tts_ops->getneededattrs(slot, attnum, needed_attrs);
+	else
+		slot->tts_ops->getsomeattrs(slot, attnum);
 
 	/*
 	 * If the underlying tuple doesn't have enough attributes, tuple
