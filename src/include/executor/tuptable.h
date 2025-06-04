@@ -164,7 +164,8 @@ struct TupleTableSlotOps
 
 	/*
 	 * Fills entries in tts_values/isnulls corresponding to the attributes
-	 * specified in needed_attrs and sets tts_valid_attrs to needed_attrs.
+	 * specified in needed_attrs and sets the corresponding tts_valid[]
+	 * entries.
 	 */
 	void		(*getneededattrs) (TupleTableSlot *slot, int attno, Bitmapset *needed_attrs);
 
