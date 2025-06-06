@@ -18,7 +18,6 @@
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/tupdesc.h"
-#include "nodes/bitmapset.h"
 #include "storage/buf.h"
 
 /*----------
@@ -108,6 +107,10 @@
 #define			TTS_FLAG_FIXED		(1 << 4)
 #define TTS_FIXED(slot) (((slot)->tts_flags & TTS_FLAG_FIXED) != 0)
 
+/* deform all attributes */
+#define			TTS_FLAG_DEFORM_SOME	(1 << 5)
+#define TTS_DEFORM_SOME(slot) (((slot)->tts_flags & TTS_FLAG_DEFORM_SOME) != 0)
+
 struct TupleTableSlotOps;
 typedef struct TupleTableSlotOps TupleTableSlotOps;
 
@@ -126,12 +129,46 @@ typedef struct TupleTableSlot
 	Datum	   *tts_values;		/* current per-attribute values */
 #define FIELDNO_TUPLETABLESLOT_ISNULL 6
 	bool	   *tts_isnull;		/* current per-attribute isnull flags */
-	Bitmapset  *needed_attrs;
-	bool	   *tts_valid;
+	uint8	   *tts_attflags;	/* per-attribute flags */
+	AttrNumber	tts_min_needed;
 	MemoryContext tts_mcxt;		/* slot itself is in this context */
 	ItemPointerData tts_tid;	/* stored tuple's tid */
 	Oid			tts_tableOid;	/* table oid of tuple */
 } TupleTableSlot;
+
+/* Per-attribute deforming flags set in tts_attflags */
+#define DEFORM_ATTR_IGNORE	0x00
+#define DEFORM_ATTR_NEEDED	0x01
+#define DEFORM_ATTR_DONE	0x02
+
+#define TTS_MARK_NEEDED(slot, attnum) \
+	do { \
+		Assert((slot)->tts_attflags != NULL); \
+		(slot)->tts_attflags[(attnum) - 1] |= DEFORM_ATTR_NEEDED; \
+	} while (0)
+
+#define TTS_ATTR_NEEDED(slot, attnum) \
+	(!TTS_DEFORM_SOME((slot)) || \
+	 (slot)->tts_attflags == NULL || \
+	 ((slot)->tts_attflags[(attnum) - 1] & DEFORM_ATTR_NEEDED) != 0)
+
+#define TTS_MARK_DONE(slot, attnum) \
+	do { \
+		Assert((slot)->tts_attflags != NULL); \
+			   (slot)->tts_attflags[(attnum) - 1] |= DEFORM_ATTR_DONE; \
+	} while (0)
+
+#define TTS_VALID(slot, attnum) \
+	(!TTS_DEFORM_SOME((slot)) || \
+	 (slot)->tts_attflags == NULL || \
+	 (((slot)->tts_attflags[(attnum) - 1]) & (DEFORM_ATTR_NEEDED | DEFORM_ATTR_DONE)) == \
+	  (DEFORM_ATTR_NEEDED | DEFORM_ATTR_DONE))
+
+#define TTS_CLEAR_ATTFLAGS(slot, natts) \
+	do { \
+		if ((slot)->tts_attflags) \
+			memset((slot)->tts_attflags, 0, (natts) * sizeof(uint8)); \
+	} while (0)
 
 /* routines for a TupleTableSlot implementation */
 struct TupleTableSlotOps
@@ -161,13 +198,6 @@ struct TupleTableSlotOps
 	 * columns.
 	 */
 	void		(*getsomeattrs) (TupleTableSlot *slot, int natts);
-
-	/*
-	 * Fills entries in tts_values/isnulls corresponding to the attributes
-	 * specified in needed_attrs and sets the corresponding tts_valid[]
-	 * entries.
-	 */
-	void		(*getneededattrs) (TupleTableSlot *slot, int attno, Bitmapset *needed_attrs);
 
 	/*
 	 * Returns value of the given system attribute as a datum and sets isnull
@@ -356,8 +386,7 @@ extern MinimalTuple ExecFetchSlotMinimalTuple(TupleTableSlot *slot,
 extern Datum ExecFetchSlotHeapTupleDatum(TupleTableSlot *slot);
 extern void slot_getmissingattrs(TupleTableSlot *slot, int startAttNum,
 								 int lastAttNum);
-extern void slot_getsomeattrs_int(TupleTableSlot *slot, int attnum,
-								  Bitmapset *needed_attrs);
+extern void slot_getsomeattrs_int(TupleTableSlot *slot, int attnum);
 
 
 #ifndef FRONTEND
@@ -370,19 +399,7 @@ static inline void
 slot_getsomeattrs(TupleTableSlot *slot, int attnum)
 {
 	if (slot->tts_nvalid < attnum)
-		slot_getsomeattrs_int(slot, attnum, NULL);
-}
-
-/*
- * This function forces the entries of the slot's Datum/isnull arrays to be
- * valid at least up through the attnum'th entry.
- */
-static inline void
-slot_getsomeattrs_filtered(TupleTableSlot *slot, int attnum,
-						   Bitmapset *needed_attrs)
-{
-	if (slot->tts_nvalid < attnum)
-		slot_getsomeattrs_int(slot, attnum, needed_attrs);
+		slot_getsomeattrs_int(slot, attnum);
 }
 
 /*
@@ -480,6 +497,8 @@ slot_is_current_xact_tuple(TupleTableSlot *slot)
 static inline TupleTableSlot *
 ExecClearTuple(TupleTableSlot *slot)
 {
+	TTS_CLEAR_ATTFLAGS(slot, slot->tts_nvalid);
+
 	slot->tts_ops->clear(slot);
 
 	return slot;

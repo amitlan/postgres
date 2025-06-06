@@ -206,6 +206,7 @@ CreateTemplateTupleDesc(int natts)
 	desc->tdtypeid = RECORDOID;
 	desc->tdtypmod = -1;
 	desc->tdrefcount = -1;		/* assume not reference-counted */
+	desc->td_attcacheoff_limit = -1;
 
 	return desc;
 }

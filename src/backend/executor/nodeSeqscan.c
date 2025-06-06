@@ -243,6 +243,7 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 						  RelationGetDescr(scanstate->ss.ss_currentRelation),
 						  table_slot_callbacks(scanstate->ss.ss_currentRelation));
 	scanslot = scanstate->ss.ss_ScanTupleSlot;
+	scanslot->tts_min_needed = MaxAttrNumber;
 	Assert(scanslot);
 
 	/*
@@ -251,17 +252,33 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	ExecInitResultTypeTL(&scanstate->ss.ps);
 	ExecAssignScanProjectionInfo(&scanstate->ss);
 	if (scanstate->ss.ps.ps_ProjInfo)
-		scanslot->needed_attrs = bms_add_members(scanslot->needed_attrs,
-												 scanstate->ss.ps.ps_ProjInfo->pi_state.needed_attrs);
+	{
+		ExprState  *state = &scanstate->ss.ps.ps_ProjInfo->pi_state;
+		int			x = -1;
+
+		scanslot->tts_flags |= TTS_FLAG_DEFORM_SOME;
+		while ((x = bms_next_member(state->needed_attrs, x)) >= 0)
+			TTS_MARK_NEEDED(scanslot, x);
+		scanslot->tts_min_needed = Min(scanslot->tts_min_needed,
+									   bms_next_member(state->needed_attrs, -1));
+	}
 
 	/*
 	 * initialize child expressions
 	 */
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
-	if (scanstate->ss.ps.qual && !bms_is_empty(scanslot->needed_attrs))
-		scanslot->needed_attrs = bms_add_members(scanslot->needed_attrs,
-												 scanstate->ss.ps.qual->needed_attrs);
+	if (scanstate->ss.ps.qual && scanstate->ss.ps.ps_ProjInfo != NULL)
+	{
+		ExprState  *state = scanstate->ss.ps.qual;
+		int			x = -1;
+
+		scanslot->tts_flags |= TTS_FLAG_DEFORM_SOME;
+		while ((x = bms_next_member(state->needed_attrs, x)) >= 0)
+			TTS_MARK_NEEDED(scanslot, x);
+		scanslot->tts_min_needed = Min(scanslot->tts_min_needed,
+									   bms_next_member(state->needed_attrs, -1));
+	}
 
 	/*
 	 * When EvalPlanQual() is not in use, assign ExecProcNode for this node
