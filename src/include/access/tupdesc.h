@@ -139,6 +139,7 @@ typedef struct TupleDescData
 	int32		tdtypmod;		/* typmod for tuple type */
 	int			tdrefcount;		/* reference count, or -1 if not counting */
 	TupleConstr *constr;		/* constraints, or NULL if none */
+	int			td_attcacheoff_limit;
 	/* compact_attrs[N] is the compact metadata of Attribute Number N+1 */
 	CompactAttribute compact_attrs[FLEXIBLE_ARRAY_MEMBER];
 }			TupleDescData;
