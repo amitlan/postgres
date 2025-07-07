@@ -24,6 +24,7 @@
 #include "catalog/pg_constraint_d.h"
 #include "catalog/pg_default_acl_d.h"
 #include "catalog/pg_proc_d.h"
+#include "catalog/pg_propgraph_element_d.h"
 #include "catalog/pg_publication_d.h"
 #include "catalog/pg_statistic_ext_d.h"
 #include "catalog/pg_subscription_d.h"
@@ -1878,6 +1879,78 @@ describeOneTableDetails(const char *schemaname,
 		goto error_return;		/* not an error, just return early */
 	}
 
+	/*
+	 * If it's a property graph, deal with it here separately.
+	 */
+	if (tableinfo.relkind == RELKIND_PROPGRAPH)
+	{
+		printQueryOpt myopt = pset.popt;
+		char	   *footers[3] = {NULL, NULL, NULL};
+
+		printfPQExpBuffer(&buf,
+						  "SELECT e.pgealias AS \"%s\","
+						  "\n     pg_catalog.quote_ident(n.nspname) || '.' ||"
+						  "\n     pg_catalog.quote_ident(c.relname) AS \"%s\","
+						  "\n     case e.pgekind when " CppAsString2(PGEKIND_VERTEX) " then 'vertex'"
+						  "\n                    when " CppAsString2(PGEKIND_EDGE) " then 'edge' end AS \"%s\","
+						  "\n     s.pgealias as \"%s\","
+						  "\n     d.pgealias as \"%s\""
+						  "\n FROM pg_propgraph_element e"
+						  "\n      INNER JOIN pg_class c ON c.oid = e.pgerelid"
+						  "\n      INNER JOIN pg_namespace n ON c.relnamespace = n.oid"
+						  "\n      LEFT JOIN pg_propgraph_element s ON e.pgesrcvertexid = s.oid"
+						  "\n      LEFT JOIN pg_propgraph_element d ON e.pgedestvertexid = d.oid"
+						  "\n WHERE e.pgepgid = '%s'"
+						  "\n ORDER BY e.pgealias",
+						  gettext_noop("Element Alias"),
+						  gettext_noop("Element Table"),
+						  gettext_noop("Element Kind"),
+						  gettext_noop("Source Vertex Alias"),
+						  gettext_noop("Destination Vertex Alias"),
+						  oid);
+
+		res = PSQLexec(buf.data);
+		if (!res)
+			goto error_return;
+
+		printfPQExpBuffer(&title, _("Property Graph \"%s.%s\""),
+						  schemaname, relationname);
+
+		/* Add property graph definition in verbose mode */
+		if (verbose)
+		{
+			PGresult   *result;
+
+			printfPQExpBuffer(&buf,
+							  "SELECT pg_catalog.pg_get_propgraphdef('%s'::pg_catalog.oid);",
+							  oid);
+			result = PSQLexec(buf.data);
+
+			if (result)
+			{
+				if (PQntuples(result) > 0)
+				{
+					footers[0] = pg_strdup(_("Property graph definition:"));
+					footers[1] = pg_strdup(PQgetvalue(result, 0, 0));
+				}
+				PQclear(result);
+			}
+		}
+
+		myopt.footers = footers;
+		myopt.topt.default_footer = false;
+		myopt.title = title.data;
+		myopt.translate_header = true;
+
+		printQuery(res, &myopt, pset.queryFout, false, pset.logfile);
+
+		free(footers[0]);
+		free(footers[1]);
+
+		retval = true;
+		goto error_return;		/* not an error, just return early */
+	}
+
 	/* Identify whether we should print collation, nullable, default vals */
 	if (tableinfo.relkind == RELKIND_RELATION ||
 		tableinfo.relkind == RELKIND_VIEW ||
@@ -2054,10 +2127,6 @@ describeOneTableDetails(const char *schemaname,
 			else
 				printfPQExpBuffer(&title, _("Partitioned table \"%s.%s\""),
 								  schemaname, relationname);
-			break;
-		case RELKIND_PROPGRAPH:
-			printfPQExpBuffer(&title, _("Property graph \"%s.%s\""),
-							  schemaname, relationname);
 			break;
 		default:
 			/* untranslated unknown relkind */
@@ -3155,32 +3224,6 @@ describeOneTableDetails(const char *schemaname,
 		}
 	}
 
-	/* Add property graph definition in verbose mode */
-	if (tableinfo.relkind == RELKIND_PROPGRAPH && verbose)
-	{
-		PGresult   *result;
-		char	   *pgdef = NULL;
-
-		printfPQExpBuffer(&buf,
-						  "SELECT pg_catalog.pg_get_propgraphdef('%s'::pg_catalog.oid);",
-						  oid);
-		result = PSQLexec(buf.data);
-		if (!result)
-			goto error_return;
-
-		if (PQntuples(result) > 0)
-			pgdef = pg_strdup(PQgetvalue(result, 0, 0));
-
-		PQclear(result);
-
-		if (pgdef)
-		{
-			printTableAddFooter(&cont, _("Property graph definition:"));
-			printfPQExpBuffer(&buf, " %s", pgdef);
-			printTableAddFooter(&cont, buf.data);
-		}
-	}
-
 	/* Get view_def if table is a view or materialized view */
 	if ((tableinfo.relkind == RELKIND_VIEW ||
 		 tableinfo.relkind == RELKIND_MATVIEW) && verbose)
@@ -4058,7 +4101,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 	/* Count the number of explicitly-requested relation types */
 	ntypes = showTables + showIndexes + showViews + showMatViews +
 		showSeq + showForeign + showPropGraphs;
-	/* If none, we default to \dtvmsE (but see also command.c) */
+	/* If none, we default to \dtvmsEG (but see also command.c) */
 	if (ntypes == 0)
 		showTables = showViews = showMatViews = showSeq = showForeign = showPropGraphs = true;
 
@@ -4236,6 +4279,9 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 			else if (showForeign)
 				pg_log_error("Did not find any foreign tables named \"%s\".",
 							 pattern);
+			else if (showPropGraphs)
+				pg_log_error("Did not find any property graphs named \"%s\".",
+							 pattern);
 			else				/* should not get here */
 				pg_log_error_internal("Did not find any ??? named \"%s\".",
 									  pattern);
@@ -4256,6 +4302,8 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 				pg_log_error("Did not find any sequences.");
 			else if (showForeign)
 				pg_log_error("Did not find any foreign tables.");
+			else if (showPropGraphs)
+				pg_log_error("Did not find any property graphs.");
 			else				/* should not get here */
 				pg_log_error_internal("Did not find any ??? relations.");
 		}
@@ -4270,6 +4318,7 @@ listTables(const char *tabtypes, const char *pattern, bool verbose, bool showSys
 			(showMatViews) ? _("List of materialized views") :
 			(showSeq) ? _("List of sequences") :
 			(showForeign) ? _("List of foreign tables") :
+			(showPropGraphs) ? _("List of property graphs") :
 			"List of ???";		/* should not get here */
 		myopt.translate_header = true;
 		myopt.translate_columns = translate_columns;

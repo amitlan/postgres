@@ -644,26 +644,88 @@ CREATE PROPERTY GRAPH create_property_graph_tests.g4
 SELECT pg_get_propgraphdef('pg_type'::regclass);  -- error
 ERROR:  "pg_type" is not a property graph
 \a\t
+-- Test \d variants for property graphs
 \dG g1
-                                List of ???
+                          List of property graphs
            Schema            | Name |      Type      |        Owner        
 -----------------------------+------+----------------+---------------------
  create_property_graph_tests | g1   | property graph | regress_graph_user1
 (1 row)
 
--- TODO
+\dG+ g1
+                                             List of property graphs
+           Schema            | Name |      Type      |        Owner        | Persistence |  Size   | Description 
+-----------------------------+------+----------------+---------------------+-------------+---------+-------------
+ create_property_graph_tests | g1   | property graph | regress_graph_user1 | permanent   | 0 bytes | a graph
+(1 row)
+
+\dGx g1
+List of property graphs
+-[ RECORD 1 ]-----------------------
+Schema | create_property_graph_tests
+Name   | g1
+Type   | property graph
+Owner  | regress_graph_user1
+
+\d g2
+                                Property Graph "create_property_graph_tests.g2"
+ Element Alias |         Element Table          | Element Kind | Source Vertex Alias | Destination Vertex Alias 
+---------------+--------------------------------+--------------+---------------------+--------------------------
+ e1            | create_property_graph_tests.e1 | edge         | t1                  | t2
+ e2            | create_property_graph_tests.e2 | edge         | t1                  | t3
+ t1            | create_property_graph_tests.t1 | vertex       |                     | 
+ t2            | create_property_graph_tests.t2 | vertex       |                     | 
+ t3            | create_property_graph_tests.t3 | vertex       |                     | 
+
 \d g1
-Property graph "create_property_graph_tests.g1"
- Column | Type 
---------+------
+                        Property Graph "create_property_graph_tests.g1"
+ Element Alias | Element Table | Element Kind | Source Vertex Alias | Destination Vertex Alias 
+---------------+---------------+--------------+---------------------+--------------------------
+
+\d+ g2
+                                Property Graph "create_property_graph_tests.g2"
+ Element Alias |         Element Table          | Element Kind | Source Vertex Alias | Destination Vertex Alias 
+---------------+--------------------------------+--------------+---------------------+--------------------------
+ e1            | create_property_graph_tests.e1 | edge         | t1                  | t2
+ e2            | create_property_graph_tests.e2 | edge         | t1                  | t3
+ t1            | create_property_graph_tests.t1 | vertex       |                     | 
+ t2            | create_property_graph_tests.t2 | vertex       |                     | 
+ t3            | create_property_graph_tests.t3 | vertex       |                     | 
+Property graph definition:
+CREATE PROPERTY GRAPH create_property_graph_tests.g2
+    VERTEX TABLES (
+        t1 KEY (a) PROPERTIES (a, b),
+        t2 KEY (i) PROPERTIES (i, j, k),
+        t3 KEY (x) LABEL t3l1 PROPERTIES (x, y, z) LABEL t3l2 PROPERTIES (x, y, z)
+    )
+    EDGE TABLES (
+        e1 KEY (a, i) SOURCE KEY (a) REFERENCES t1 (a) DESTINATION KEY (i) REFERENCES t2 (i) PROPERTIES (a, i, t),
+        e2 KEY (a, x) SOURCE KEY (a) REFERENCES t1 (a) DESTINATION KEY (x, t) REFERENCES t3 (x, y) PROPERTIES (a, t, x)
+    )
 
 \d+ g1
-Property graph "create_property_graph_tests.g1"
- Column | Type | Storage 
---------+------+---------
+                        Property Graph "create_property_graph_tests.g1"
+ Element Alias | Element Table | Element Kind | Source Vertex Alias | Destination Vertex Alias 
+---------------+---------------+--------------+---------------------+--------------------------
 Property graph definition:
- CREATE PROPERTY GRAPH create_property_graph_tests.g1
+CREATE PROPERTY GRAPH create_property_graph_tests.g1
 
+\dG g_nonexistent
+   List of property graphs
+ Schema | Name | Type | Owner 
+--------+------+------+-------
+(0 rows)
+
+\dG t11
+   List of property graphs
+ Schema | Name | Type | Owner 
+--------+------+------+-------
+(0 rows)
+
+\set QUIET 'off'
+\dG g_nonexistent
+Did not find any property graphs named "g_nonexistent".
+\set QUIET 'on'
 DROP TABLE g2;  -- error: wrong object type
 ERROR:  "g2" is not a table
 HINT:  Use DROP PROPERTY GRAPH to remove a property graph.

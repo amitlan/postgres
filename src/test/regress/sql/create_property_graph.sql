@@ -247,11 +247,19 @@ SELECT pg_get_propgraphdef('g4'::regclass);
 SELECT pg_get_propgraphdef('pg_type'::regclass);  -- error
 \a\t
 
+-- Test \d variants for property graphs
 \dG g1
-
--- TODO
+\dG+ g1
+\dGx g1
+\d g2
 \d g1
+\d+ g2
 \d+ g1
+\dG g_nonexistent
+\dG t11
+\set QUIET 'off'
+\dG g_nonexistent
+\set QUIET 'on'
 
 DROP TABLE g2;  -- error: wrong object type
 
