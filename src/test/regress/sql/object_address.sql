@@ -66,7 +66,8 @@ DECLARE
     objtype text;
 BEGIN
     FOR objtype IN VALUES ('toast table'), ('index column'), ('sequence column'),
-        ('toast table column'), ('view column'), ('materialized view column')
+        ('toast table column'), ('view column'), ('materialized view column'),
+        ('property graph element'), ('property graph label'), ('property graph property')
     LOOP
         BEGIN
             PERFORM pg_get_object_address(objtype, '{one}', '{}');
@@ -280,6 +281,9 @@ WITH objects (classid, objid, objsubid) AS (VALUES
     ('pg_event_trigger'::regclass, 0, 0), -- no event trigger
     ('pg_parameter_acl'::regclass, 0, 0), -- no parameter ACL
     ('pg_policy'::regclass, 0, 0), -- no policy
+    ('pg_propgraph_element'::regclass, 0, 0), -- no property graph element
+    ('pg_propgraph_label'::regclass, 0, 0), -- no property graph label
+    ('pg_propgraph_property'::regclass, 0, 0), -- no property graph property
     ('pg_publication'::regclass, 0, 0), -- no publication
     ('pg_publication_namespace'::regclass, 0, 0), -- no publication namespace
     ('pg_publication_rel'::regclass, 0, 0), -- no publication relation

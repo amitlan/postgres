@@ -4080,8 +4080,12 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 
 				tup = SearchSysCache1(PROPGRAPHELOID, ObjectIdGetDatum(object->objectId));
 				if (!HeapTupleIsValid(tup))
-					elog(ERROR, "cache lookup failed for property graph element %u",
-						 object->objectId);
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for property graph element %u",
+							 object->objectId);
+					break;
+				}
 
 				pgeform = (Form_pg_propgraph_element) GETSTRUCT(tup);
 
@@ -4139,27 +4143,14 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 
 		case PropgraphLabelRelationId:
 			{
-				Relation	rel;
-				SysScanDesc scan;
-				ScanKeyData key[1];
 				HeapTuple	tuple;
 				Form_pg_propgraph_label pglform;
 
-				rel = table_open(PropgraphLabelRelationId, AccessShareLock);
-				ScanKeyInit(&key[0],
-							Anum_pg_propgraph_label_oid,
-							BTEqualStrategyNumber, F_OIDEQ,
-							ObjectIdGetDatum(object->objectId));
-
-				scan = systable_beginscan(rel, PropgraphLabelObjectIndexId, true, NULL, 1, key);
-				tuple = systable_getnext(scan);
+				tuple = SearchSysCache1(PROPGRAPHLABELOID, object->objectId);
 				if (!HeapTupleIsValid(tuple))
 				{
 					if (!missing_ok)
 						elog(ERROR, "could not find tuple for label %u", object->objectId);
-
-					systable_endscan(scan);
-					table_close(rel, AccessShareLock);
 					break;
 				}
 
@@ -4168,9 +4159,7 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 				/* translator: followed by, e.g., "property graph %s" */
 				appendStringInfo(&buffer, _("label %s of "), NameStr(pglform->pgllabel));
 				getRelationDescription(&buffer, pglform->pglpgid, false);
-
-				systable_endscan(scan);
-				table_close(rel, AccessShareLock);
+				ReleaseSysCache(tuple);
 				break;
 			}
 
@@ -4214,27 +4203,14 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 
 		case PropgraphPropertyRelationId:
 			{
-				Relation	rel;
-				SysScanDesc scan;
-				ScanKeyData key[1];
 				HeapTuple	tuple;
 				Form_pg_propgraph_property pgpform;
 
-				rel = table_open(PropgraphPropertyRelationId, AccessShareLock);
-				ScanKeyInit(&key[0],
-							Anum_pg_propgraph_property_oid,
-							BTEqualStrategyNumber, F_OIDEQ,
-							ObjectIdGetDatum(object->objectId));
-
-				scan = systable_beginscan(rel, PropgraphPropertyObjectIndexId, true, NULL, 1, key);
-				tuple = systable_getnext(scan);
+				tuple = SearchSysCache1(PROPGRAPHPROPOID, object->objectId);
 				if (!HeapTupleIsValid(tuple))
 				{
 					if (!missing_ok)
 						elog(ERROR, "could not find tuple for property %u", object->objectId);
-
-					systable_endscan(scan);
-					table_close(rel, AccessShareLock);
 					break;
 				}
 
@@ -4243,9 +4219,7 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 				/* translator: followed by, e.g., "property graph %s" */
 				appendStringInfo(&buffer, _("property %s of "), NameStr(pgpform->pgpname));
 				getRelationDescription(&buffer, pgpform->pgppgid, false);
-
-				systable_endscan(scan);
-				table_close(rel, AccessShareLock);
+				ReleaseSysCache(tuple);
 				break;
 			}
 
@@ -6188,16 +6162,71 @@ getObjectIdentityParts(const ObjectAddress *object,
 			}
 
 		case PropgraphElementRelationId:
-			appendStringInfo(&buffer, "%u TODO", object->objectId);
-			break;
+			{
+				HeapTuple	tup;
+				Form_pg_propgraph_element pge;
+
+				tup = SearchSysCache1(PROPGRAPHELOID, object->objectId);
+				if (!HeapTupleIsValid(tup))
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for property graph element %u", object->objectId);
+					break;
+				}
+				pge = (Form_pg_propgraph_element) GETSTRUCT(tup);
+				appendStringInfo(&buffer, "%s of ", quote_identifier(NameStr(pge->pgealias)));
+
+				getRelationIdentity(&buffer, pge->pgepgid, objname, false);
+				if (objname)
+					*objname = lappend(*objname, pstrdup(NameStr(pge->pgealias)));
+
+				ReleaseSysCache(tup);
+				break;
+			}
 
 		case PropgraphLabelRelationId:
-			appendStringInfo(&buffer, "%u TODO", object->objectId);
-			break;
+			{
+				HeapTuple	tup;
+				Form_pg_propgraph_label pgl;
+
+				tup = SearchSysCache1(PROPGRAPHLABELOID, object->objectId);
+				if (!HeapTupleIsValid(tup))
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for property graph label %u", object->objectId);
+					break;
+				}
+
+				pgl = (Form_pg_propgraph_label) GETSTRUCT(tup);
+				appendStringInfo(&buffer, "%s of ", quote_identifier(NameStr(pgl->pgllabel)));
+				getRelationIdentity(&buffer, pgl->pglpgid, objname, false);
+				if (objname)
+					*objname = lappend(*objname, pstrdup(NameStr(pgl->pgllabel)));
+				ReleaseSysCache(tup);
+				break;
+			}
 
 		case PropgraphPropertyRelationId:
-			appendStringInfo(&buffer, "%u TODO", object->objectId);
-			break;
+			{
+				HeapTuple	tup;
+				Form_pg_propgraph_property pgp;
+
+				tup = SearchSysCache1(PROPGRAPHPROPOID, object->objectId);
+				if (!HeapTupleIsValid(tup))
+				{
+					if (!missing_ok)
+						elog(ERROR, "cache lookup failed for property graph property %u", object->objectId);
+					break;
+				}
+
+				pgp = (Form_pg_propgraph_property) GETSTRUCT(tup);
+				appendStringInfo(&buffer, "%s of ", quote_identifier(NameStr(pgp->pgpname)));
+				getRelationIdentity(&buffer, pgp->pgppgid, objname, false);
+				if (objname)
+					*objname = lappend(*objname, pstrdup(NameStr(pgp->pgpname)));
+				ReleaseSysCache(tup);
+				break;
+			}
 
 		case PublicationRelationId:
 			{

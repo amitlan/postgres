@@ -238,6 +238,23 @@ SELECT * FROM information_schema.pg_labels ORDER BY property_graph_name, label_n
 SELECT * FROM information_schema.pg_property_data_types ORDER BY property_graph_name, property_name;
 SELECT * FROM information_schema.pg_property_graph_privileges WHERE grantee LIKE 'regress%' ORDER BY property_graph_name;
 
+-- test object address functions
+SELECT pg_describe_object(classid, objid, objsubid) as obj,
+       pg_describe_object(refclassid, refobjid, refobjsubid) as reference_graph
+    FROM pg_depend
+    WHERE refclassid = 'pg_class'::regclass AND
+          refobjid = 'create_property_graph_tests.g2'::regclass
+    ORDER BY 1, 2;
+SELECT (pg_identify_object_as_address(classid, objid, objsubid)).*
+    FROM pg_depend
+    WHERE refclassid = 'pg_class'::regclass AND
+          refobjid = 'create_property_graph_tests.g2'::regclass
+    ORDER BY 1, 2, 3;
+SELECT (pg_identify_object(classid, objid, objsubid)).*
+    FROM pg_depend
+    WHERE refclassid = 'pg_class'::regclass AND
+          refobjid = 'create_property_graph_tests.g2'::regclass
+    ORDER BY 1, 2, 3, 4;
 
 \a\t
 SELECT pg_get_propgraphdef('g2'::regclass);
