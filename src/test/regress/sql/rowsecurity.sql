@@ -86,6 +86,14 @@ INSERT INTO document VALUES
     ( 9, 22, 1, 'regress_rls_dave', 'awesome science fiction'),
     (10, 33, 2, 'regress_rls_dave', 'awesome technology book');
 
+CREATE PROPERTY GRAPH acc_cat
+    VERTEX TABLES (uaccount, category)
+    EDGE TABLES (
+        document
+        SOURCE KEY (dauthor) REFERENCES uaccount (pguser)
+        DESTINATION KEY (cid) REFERENCES category (cid));
+GRANT ALL ON acc_cat TO public;
+
 ALTER TABLE document ENABLE ROW LEVEL SECURITY;
 
 -- user's security level must be higher than or equal to document's
@@ -116,6 +124,9 @@ SET SESSION AUTHORIZATION regress_rls_bob;
 SET row_security TO ON;
 SELECT * FROM document WHERE f_leak(dtitle) ORDER BY did;
 SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle) ORDER BY did;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- try a sampled version
 SELECT * FROM document TABLESAMPLE BERNOULLI(50) REPEATABLE(0)
@@ -125,6 +136,9 @@ SELECT * FROM document TABLESAMPLE BERNOULLI(50) REPEATABLE(0)
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM document WHERE f_leak(dtitle) ORDER BY did;
 SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle) ORDER BY did;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- try a sampled version
 SELECT * FROM document TABLESAMPLE BERNOULLI(50) REPEATABLE(0)
@@ -132,14 +146,23 @@ SELECT * FROM document TABLESAMPLE BERNOULLI(50) REPEATABLE(0)
 
 EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
 EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle);
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- viewpoint from regress_rls_dave
 SET SESSION AUTHORIZATION regress_rls_dave;
 SELECT * FROM document WHERE f_leak(dtitle) ORDER BY did;
 SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle) ORDER BY did;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
 EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle);
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- 44 would technically fail for both p2r and p1r, but we should get an error
 -- back from p1r for this because it sorts first
@@ -158,14 +181,23 @@ ALTER POLICY p1 ON document USING (dauthor = current_user);
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM document WHERE f_leak(dtitle) ORDER BY did;
 SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle) ORDER by did;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- viewpoint from rls_regres_carol again
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM document WHERE f_leak(dtitle) ORDER BY did;
 SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle) ORDER by did;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 EXPLAIN (COSTS OFF) SELECT * FROM document WHERE f_leak(dtitle);
 EXPLAIN (COSTS OFF) SELECT * FROM document NATURAL JOIN category WHERE f_leak(dtitle);
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- interaction of FK/PK constraints
 SET SESSION AUTHORIZATION regress_rls_alice;
@@ -200,30 +232,45 @@ RESET SESSION AUTHORIZATION;
 SET row_security TO ON;
 SELECT * FROM document;
 SELECT * FROM category;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- database superuser does bypass RLS policy when disabled
 RESET SESSION AUTHORIZATION;
 SET row_security TO OFF;
 SELECT * FROM document;
 SELECT * FROM category;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- database non-superuser with bypass privilege can bypass RLS policy when disabled
 SET SESSION AUTHORIZATION regress_rls_exempt_user;
 SET row_security TO OFF;
 SELECT * FROM document;
 SELECT * FROM category;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- RLS policy does not apply to table owner when RLS enabled.
 SET SESSION AUTHORIZATION regress_rls_alice;
 SET row_security TO ON;
 SELECT * FROM document;
 SELECT * FROM category;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 -- RLS policy does not apply to table owner when RLS disabled.
 SET SESSION AUTHORIZATION regress_rls_alice;
 SET row_security TO OFF;
 SELECT * FROM document;
 SELECT * FROM category;
+SELECT * FROM GRAPH_TABLE (acc_cat
+                            MATCH (u : uaccount)-[d : document WHERE f_leak(d.dtitle)]->(c : category)
+                            COLUMNS (u.pguser, d.did, d.dlevel, d.dtitle, c.cid, c.cname)) ORDER BY did;
 
 --
 -- Table inheritance and RLS policy
@@ -528,6 +575,24 @@ CREATE POLICY r2 ON rec2 USING (a = (SELECT x FROM rec1v WHERE y = b));
 
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM rec1;    -- fail, mutual recursion via s.b. views
+
+--
+-- Direct and mutual recursion via GRAPH_TABLE
+--
+SET SESSION AUTHORIZATION regress_rls_alice;
+CREATE PROPERTY GRAPH rtpg VERTEX TABLES (rec1 KEY (x));
+ALTER POLICY r1 ON rec1 USING (x = (SELECT x FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)) WHERE x = y));
+SET SESSION AUTHORIZATION regress_rls_bob;
+SELECT * FROM rec1;    -- fail, direct recursion via GRAPH_TABLE
+SELECT * FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)); -- fail, direct recursion via GRAPH_TABLE
+
+SET SESSION AUTHORIZATION regress_rls_alice;
+ALTER PROPERTY GRAPH rtpg ADD VERTEX TABLES (rec2 KEY (a));
+ALTER POLICY r1 ON rec1 USING (x = (SELECT a FROM GRAPH_TABLE (rtpg MATCH (r: rec2) COLUMNS (r.a, r.b)) WHERE b = y));
+ALTER POLICY r2 ON rec2 USING (a = (SELECT x FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y))WHERE y = b));
+SET SESSION AUTHORIZATION regress_rls_bob;
+SELECT * FROM rec1;    -- fail, mutual recursion via GRAPH_TABLE
+SELECT * FROM GRAPH_TABLE (rtpg MATCH (r: rec1) COLUMNS (r.x, r.y)); -- fail, mutual recursion via GRAPH_TABLE
 
 --
 -- recursive RLS and VIEWs in policy
@@ -1027,8 +1092,9 @@ SELECT * FROM document;
 SET SESSION AUTHORIZATION regress_rls_alice;
 CREATE TABLE z1 (a int, b text);
 CREATE TABLE z2 (a int, b text);
+CREATE PROPERTY GRAPH gtpg VERTEX TABLES (z1 KEY (a), z2 KEY (a));
 
-GRANT SELECT ON z1,z2 TO regress_rls_group1, regress_rls_group2,
+GRANT SELECT ON z1,z2, gtpg TO regress_rls_group1, regress_rls_group2,
     regress_rls_bob, regress_rls_carol;
 
 INSERT INTO z1 VALUES
@@ -1045,6 +1111,8 @@ ALTER TABLE z1 ENABLE ROW LEVEL SECURITY;
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM z1 WHERE f_leak(b);
 EXPLAIN (COSTS OFF) SELECT * FROM z1 WHERE f_leak(b);
+SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
 
 PREPARE plancache_test AS SELECT * FROM z1 WHERE f_leak(b);
 EXPLAIN (COSTS OFF) EXECUTE plancache_test;
@@ -1058,6 +1126,8 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
 SET ROLE regress_rls_group1;
 SELECT * FROM z1 WHERE f_leak(b);
 EXPLAIN (COSTS OFF) SELECT * FROM z1 WHERE f_leak(b);
+SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
 
 EXPLAIN (COSTS OFF) EXECUTE plancache_test;
 EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
@@ -1066,6 +1136,8 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM z1 WHERE f_leak(b);
 EXPLAIN (COSTS OFF) SELECT * FROM z1 WHERE f_leak(b);
+SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
 
 EXPLAIN (COSTS OFF) EXECUTE plancache_test;
 EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
@@ -1074,6 +1146,8 @@ EXPLAIN (COSTS OFF) EXECUTE plancache_test3;
 SET ROLE regress_rls_group2;
 SELECT * FROM z1 WHERE f_leak(b);
 EXPLAIN (COSTS OFF) SELECT * FROM z1 WHERE f_leak(b);
+SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (gtpg MATCH (z : z1) WHERE f_leak(z.b) COLUMNS (z.a, z.b));
 
 EXPLAIN (COSTS OFF) EXECUTE plancache_test;
 EXPLAIN (COSTS OFF) EXECUTE plancache_test2;
@@ -1257,7 +1331,9 @@ DROP VIEW rls_view;
 SET SESSION AUTHORIZATION regress_rls_alice;
 
 CREATE TABLE x1 (a int, b text, c text);
+CREATE PROPERTY GRAPH cstpg VERTEX TABLES (x1 KEY (a));
 GRANT ALL ON x1 TO PUBLIC;
+GRANT ALL ON cstpg TO PUBLIC;
 
 INSERT INTO x1 VALUES
     (1, 'abc', 'regress_rls_bob'),
@@ -1279,10 +1355,12 @@ ALTER TABLE x1 ENABLE ROW LEVEL SECURITY;
 
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM x1 WHERE f_leak(b) ORDER BY a ASC;
+SELECT * FROM GRAPH_TABLE (cstpg MATCH (x : x1) WHERE f_leak(x.b) COLUMNS (x.a, x.b, x.c)) ORDER BY a ASC;
 UPDATE x1 SET b = b || '_updt' WHERE f_leak(b) RETURNING *;
 
 SET SESSION AUTHORIZATION regress_rls_carol;
 SELECT * FROM x1 WHERE f_leak(b) ORDER BY a ASC;
+SELECT * FROM GRAPH_TABLE (cstpg MATCH (x : x1) WHERE f_leak(x.b) COLUMNS (x.a, x.b, x.c)) ORDER BY a ASC;
 UPDATE x1 SET b = b || '_updt' WHERE f_leak(b) RETURNING *;
 DELETE FROM x1 WHERE f_leak(b) RETURNING *;
 
@@ -1495,25 +1573,36 @@ DROP TABLE blog, comment;
 RESET SESSION AUTHORIZATION;
 DROP POLICY p2 ON t1;
 ALTER TABLE t1 OWNER TO regress_rls_alice;
+CREATE PROPERTY GRAPH itpg VERTEX TABLES (t1 KEY(a));
+GRANT ALL ON itpg TO regress_rls_bob;
+GRANT SELECT ON itpg TO regress_rls_alice;
 
 -- Check that default deny does not apply to superuser.
 RESET SESSION AUTHORIZATION;
 SELECT * FROM t1;
 EXPLAIN (COSTS OFF) SELECT * FROM t1;
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
 
 -- Check that default deny does not apply to table owner.
 SET SESSION AUTHORIZATION regress_rls_alice;
 SELECT * FROM t1;
 EXPLAIN (COSTS OFF) SELECT * FROM t1;
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
 
 -- Check that default deny applies to non-owner/non-superuser when RLS on.
 SET SESSION AUTHORIZATION regress_rls_bob;
 SET row_security TO ON;
 SELECT * FROM t1;
 EXPLAIN (COSTS OFF) SELECT * FROM t1;
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
 SET SESSION AUTHORIZATION regress_rls_bob;
 SELECT * FROM t1;
 EXPLAIN (COSTS OFF) SELECT * FROM t1;
+SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
+EXPLAIN (COSTS OFF) SELECT * FROM GRAPH_TABLE (itpg MATCH (t: t1) COLUMNS (t.a, t.b));
 
 --
 -- COPY TO/FROM
@@ -1837,8 +1926,9 @@ CREATE TABLE r1 (a int);
 CREATE TABLE r2 (a int);
 INSERT INTO r1 VALUES (10), (20);
 INSERT INTO r2 VALUES (10), (20);
+CREATE PROPERTY GRAPH trtpg VERTEX TABLES (r2 KEY (a));
 
-GRANT ALL ON r1, r2 TO regress_rls_bob;
+GRANT ALL ON r1, r2, trtpg TO regress_rls_bob;
 
 CREATE POLICY p1 ON r1 USING (true);
 ALTER TABLE r1 ENABLE ROW LEVEL SECURITY;
@@ -1864,8 +1954,14 @@ UPDATE r1 SET a = r2.a + 2 FROM r2 WHERE r1.a = r2.a RETURNING *; -- OK
 DELETE FROM r1 USING r2 WHERE r1.a = r2.a + 2 RETURNING *; -- OK
 SELECT * FROM r1;
 SELECT * FROM r2;
+INSERT INTO r1 SELECT a FROM GRAPH_TABLE (trtpg MATCH (r: r2) COLUMNS (r.a)) r2 RETURNING *; -- OK
+UPDATE r1 SET a = r2.a + 2 FROM GRAPH_TABLE (trtpg MATCH (r: r2) COLUMNS (r.a)) r2 WHERE r1.a = r2.a RETURNING *; -- OK
+DELETE FROM r1 USING GRAPH_TABLE (trtpg MATCH (r: r2) COLUMNS (r.a)) r2 WHERE r1.a = r2.a + 2 RETURNING *; -- OK
+SELECT * FROM r1;
+SELECT * FROM r2;
 
 SET SESSION AUTHORIZATION regress_rls_alice;
+DROP PROPERTY GRAPH trtpg;
 DROP TABLE r1;
 DROP TABLE r2;
 
@@ -1875,6 +1971,7 @@ DROP TABLE r2;
 SET SESSION AUTHORIZATION regress_rls_alice;
 SET row_security = on;
 CREATE TABLE r1 (a int);
+CREATE PROPERTY GRAPH frlstpg VERTEX TABLES (r1 KEY (a));
 INSERT INTO r1 VALUES (10), (20);
 
 CREATE POLICY p1 ON r1 USING (false);
@@ -1883,6 +1980,7 @@ ALTER TABLE r1 FORCE ROW LEVEL SECURITY;
 
 -- No error, but no rows
 TABLE r1;
+SELECT * FROM GRAPH_TABLE (frlstpg MATCH (r: r1) COLUMNS (r.a));
 
 -- RLS error
 INSERT INTO r1 VALUES (1);
@@ -1898,9 +1996,11 @@ TABLE r1;
 SET row_security = off;
 -- these all fail, would be affected by RLS
 TABLE r1;
+SELECT * FROM GRAPH_TABLE (frlstpg MATCH (r: r1) COLUMNS (r.a));
 UPDATE r1 SET a = 1;
 DELETE FROM r1;
 
+DROP PROPERTY GRAPH frlstpg;
 DROP TABLE r1;
 
 --
