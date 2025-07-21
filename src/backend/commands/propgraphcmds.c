@@ -800,6 +800,7 @@ insert_label_record(Oid graphid, Oid peoid, const char *label)
 
 		ellabeloid = GetNewOidWithIndex(rel, PropgraphElementLabelObjectIndexId, Anum_pg_propgraph_element_label_oid);
 		values[Anum_pg_propgraph_element_label_oid - 1] = ObjectIdGetDatum(ellabeloid);
+		values[Anum_pg_propgraph_element_label_pgelpgid - 1] = ObjectIdGetDatum(graphid);
 		values[Anum_pg_propgraph_element_label_pgellabelid - 1] = ObjectIdGetDatum(labeloid);
 		values[Anum_pg_propgraph_element_label_pgelelid - 1] = ObjectIdGetDatum(peoid);
 
@@ -1030,6 +1031,7 @@ insert_property_record(Oid graphid, Oid ellabeloid, Oid pgerelid, const char *pr
 
 		plpoid = GetNewOidWithIndex(rel, PropgraphLabelPropertyObjectIndexId, Anum_pg_propgraph_label_property_oid);
 		values[Anum_pg_propgraph_label_property_oid - 1] = ObjectIdGetDatum(plpoid);
+		values[Anum_pg_propgraph_label_property_plppgid - 1] = ObjectIdGetDatum(graphid);
 		values[Anum_pg_propgraph_label_property_plppropid - 1] = ObjectIdGetDatum(propoid);
 		values[Anum_pg_propgraph_label_property_plpellabelid - 1] = ObjectIdGetDatum(ellabeloid);
 		values[Anum_pg_propgraph_label_property_plpexpr - 1] = CStringGetTextDatum(nodeToString(expr));

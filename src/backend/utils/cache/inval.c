@@ -56,6 +56,13 @@
  *	described by that tuple (as specified in CacheInvalidateHeapTuple()).
  *	Likewise for pg_constraint tuples for foreign keys on relations.
  *
+ *  Similarly, whenever we see an operation on a property graph catalog i.e.
+ *  pg_propgraph_element, pg_propgraph_label, pg_propgraph_property,
+ *  pg_propgraph_element_label, or pg_propgraph_label_property, we register a
+ *  relcache flush operation for the property graph described by that tuple (as
+ *  specified in CacheInvalidateHeapTuple()) so that any cached plans referring
+ *  to the property graph are invalidated.
+ *
  *	We keep the relcache flush requests in lists separate from the catcache
  *	tuple flush requests.  This allows us to issue all the pending catcache
  *	flushes before we issue relcache flushes, which saves us from loading
@@ -119,6 +126,11 @@
 #include "access/xloginsert.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_constraint.h"
+#include "catalog/pg_propgraph_element.h"
+#include "catalog/pg_propgraph_label.h"
+#include "catalog/pg_propgraph_property.h"
+#include "catalog/pg_propgraph_element_label.h"
+#include "catalog/pg_propgraph_label_property.h"
 #include "miscadmin.h"
 #include "storage/procnumber.h"
 #include "storage/sinval.h"
@@ -1546,6 +1558,41 @@ CacheInvalidateHeapTupleCommon(Relation relation,
 		}
 		else
 			return;
+	}
+	else if (tupleRelId == PropgraphElementRelationId)
+	{
+		Form_pg_propgraph_element pgpele = (Form_pg_propgraph_element) GETSTRUCT(tuple);
+
+		relationId = pgpele->pgepgid;
+		databaseId = MyDatabaseId;
+	}
+	else if (tupleRelId == PropgraphLabelRelationId)
+	{
+		Form_pg_propgraph_label pgplbl = (Form_pg_propgraph_label) GETSTRUCT(tuple);
+
+		relationId = pgplbl->pglpgid;
+		databaseId = MyDatabaseId;
+	}
+	else if (tupleRelId == PropgraphPropertyRelationId)
+	{
+		Form_pg_propgraph_property pgpprop = (Form_pg_propgraph_property) GETSTRUCT(tuple);
+
+		relationId = pgpprop->pgppgid;
+		databaseId = MyDatabaseId;
+	}
+	else if (tupleRelId == PropgraphLabelPropertyRelationId)
+	{
+		Form_pg_propgraph_label_property pgplprop = (Form_pg_propgraph_label_property) GETSTRUCT(tuple);
+
+		relationId = pgplprop->plppgid;
+		databaseId = MyDatabaseId;
+	}
+	else if (tupleRelId == PropgraphElementLabelRelationId)
+	{
+		Form_pg_propgraph_element_label pgpelbl = (Form_pg_propgraph_element_label) GETSTRUCT(tuple);
+
+		relationId = pgpelbl->pgelpgid;
+		databaseId = MyDatabaseId;
 	}
 	else
 		return;

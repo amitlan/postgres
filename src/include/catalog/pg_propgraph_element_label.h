@@ -28,6 +28,9 @@ CATALOG(pg_propgraph_element_label,8305,PropgraphElementLabelRelationId)
 {
 	Oid			oid;
 
+	/* OID of the property graph relation */
+	Oid			pgelpgid BKI_LOOKUP(pg_class);
+
 	/* OID of the label */
 	Oid			pgellabelid BKI_LOOKUP(pg_propgraph_label);
 

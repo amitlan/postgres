@@ -630,6 +630,99 @@ SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS s
  g2.v33 | g2.e331
 (1 row)
 
+-- prepared statements, any changes to the property graph should be reflected in
+-- the already prepared statements
+PREPARE cyclestmt AS SELECT * FROM GRAPH_TABLE (g1 MATCH (a:l1)->(b:l1)->(c:l1) WHERE a.elname = c.elname COLUMNS (a.elname AS self, b.elname AS through)) ORDER BY self, through;
+EXECUTE cyclestmt;
+ self | through 
+------+---------
+ v12  | v21
+ v13  | v23
+ v21  | v12
+ v22  | v32
+ v23  | v13
+ v32  | v22
+ v33  | v33
+ v33  | v33
+ v33  | v33
+ v33  | v33
+(10 rows)
+
+ALTER PROPERTY GRAPH g1 DROP EDGE TABLES (e3_2, e3_3);
+EXECUTE cyclestmt;
+ self | through 
+------+---------
+ v12  | v21
+ v13  | v23
+ v21  | v12
+ v23  | v13
+(4 rows)
+
+ALTER PROPERTY GRAPH g1 ADD EDGE TABLES (
+    e3_2 KEY (id_3, id_2_1, id_2_2)
+        SOURCE KEY (id_3) REFERENCES v3 (id)
+        DESTINATION KEY (id_2_1, id_2_2) REFERENCES v2 (id1, id2)
+        LABEL el2 PROPERTIES (ename, eprop1 * 10 AS lprop2)
+        LABEL l1 PROPERTIES (ename AS elname)
+);
+EXECUTE cyclestmt;
+ self | through 
+------+---------
+ v12  | v21
+ v13  | v23
+ v21  | v12
+ v22  | v32
+ v23  | v13
+ v32  | v22
+(6 rows)
+
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v3 DROP LABEL l1;
+EXECUTE cyclestmt;
+ self | through 
+------+---------
+ v12  | v21
+ v13  | v23
+ v21  | v12
+ v23  | v13
+(4 rows)
+
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v3 ADD LABEL l1 PROPERTIES (vname AS elname);
+EXECUTE cyclestmt;
+ self | through 
+------+---------
+ v12  | v21
+ v13  | v23
+ v21  | v12
+ v22  | v32
+ v23  | v13
+ v32  | v22
+(6 rows)
+
+ALTER PROPERTY GRAPH g1 ADD EDGE TABLES (
+    e3_3 KEY (src_id, dest_id)
+        SOURCE KEY (src_id) REFERENCES v3 (id)
+        DESTINATION KEY (src_id) REFERENCES v3 (id)
+        LABEL l2 PROPERTIES (ename AS elname)
+);
+PREPARE loopstmt AS SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[e:l2]->(a) COLUMNS (e.elname AS loop)) ORDER BY loop;
+EXECUTE loopstmt;
+ loop 
+------
+ e331
+ E331
+(2 rows)
+
+ALTER PROPERTY GRAPH g1 ALTER EDGE TABLE e3_3 ALTER LABEL l2 DROP PROPERTIES (elname);
+EXECUTE loopstmt; -- error
+ERROR:  property "elname" of element variable "e" not found
+ALTER PROPERTY GRAPH g1 ALTER EDGE TABLE e3_3 ALTER LABEL l2 ADD PROPERTIES ((ename || '_new')::varchar(10) AS elname);
+EXECUTE loopstmt;
+   loop   
+----------
+ e331_new
+ E331_new
+(2 rows)
+
 -- inheritance and partitioning
 CREATE TABLE pv (id int, val int);
 CREATE TABLE cv1 () INHERITS (pv);

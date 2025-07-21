@@ -383,6 +383,37 @@ SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b WHERE b.elname > 'g2.E331']->(a)-[b]-
 SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) WHERE b.elname > 'g2.E331' COLUMNS (a.elname AS self, b.elname AS loop_name));
 SELECT * FROM GRAPH_TABLE (g2 MATCH (a)-[b]->(a)-[b]->(a) COLUMNS (a.elname AS self, b.elname AS loop_name)) WHERE loop_name > 'g2.E331';
 
+-- prepared statements, any changes to the property graph should be reflected in
+-- the already prepared statements
+PREPARE cyclestmt AS SELECT * FROM GRAPH_TABLE (g1 MATCH (a:l1)->(b:l1)->(c:l1) WHERE a.elname = c.elname COLUMNS (a.elname AS self, b.elname AS through)) ORDER BY self, through;
+EXECUTE cyclestmt;
+ALTER PROPERTY GRAPH g1 DROP EDGE TABLES (e3_2, e3_3);
+EXECUTE cyclestmt;
+ALTER PROPERTY GRAPH g1 ADD EDGE TABLES (
+    e3_2 KEY (id_3, id_2_1, id_2_2)
+        SOURCE KEY (id_3) REFERENCES v3 (id)
+        DESTINATION KEY (id_2_1, id_2_2) REFERENCES v2 (id1, id2)
+        LABEL el2 PROPERTIES (ename, eprop1 * 10 AS lprop2)
+        LABEL l1 PROPERTIES (ename AS elname)
+);
+EXECUTE cyclestmt;
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v3 DROP LABEL l1;
+EXECUTE cyclestmt;
+ALTER PROPERTY GRAPH g1 ALTER VERTEX TABLE v3 ADD LABEL l1 PROPERTIES (vname AS elname);
+EXECUTE cyclestmt;
+ALTER PROPERTY GRAPH g1 ADD EDGE TABLES (
+    e3_3 KEY (src_id, dest_id)
+        SOURCE KEY (src_id) REFERENCES v3 (id)
+        DESTINATION KEY (src_id) REFERENCES v3 (id)
+        LABEL l2 PROPERTIES (ename AS elname)
+);
+PREPARE loopstmt AS SELECT * FROM GRAPH_TABLE (g1 MATCH (a)-[e:l2]->(a) COLUMNS (e.elname AS loop)) ORDER BY loop;
+EXECUTE loopstmt;
+ALTER PROPERTY GRAPH g1 ALTER EDGE TABLE e3_3 ALTER LABEL l2 DROP PROPERTIES (elname);
+EXECUTE loopstmt; -- error
+ALTER PROPERTY GRAPH g1 ALTER EDGE TABLE e3_3 ALTER LABEL l2 ADD PROPERTIES ((ename || '_new')::varchar(10) AS elname);
+EXECUTE loopstmt;
+
 -- inheritance and partitioning
 CREATE TABLE pv (id int, val int);
 CREATE TABLE cv1 () INHERITS (pv);
