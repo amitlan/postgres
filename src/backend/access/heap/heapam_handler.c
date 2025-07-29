@@ -762,7 +762,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		pgstat_progress_update_param(PROGRESS_CLUSTER_PHASE,
 									 PROGRESS_CLUSTER_PHASE_SEQ_SCAN_HEAP);
 
-		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL);
+		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL, false);
 		heapScan = (HeapScanDesc) tableScan;
 		indexScan = NULL;
 
@@ -2622,6 +2622,7 @@ static const TableAmRoutine heapam_methods = {
 	.scan_end = heap_endscan,
 	.scan_rescan = heap_rescan,
 	.scan_getnextslot = heap_getnextslot,
+	.scan_getnextslot_batch = heap_getnextslot_batch,
 
 	.scan_set_tidrange = heap_set_tidrange,
 	.scan_getnextslot_tidrange = heap_getnextslot_tidrange,

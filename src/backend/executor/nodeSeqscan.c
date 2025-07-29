@@ -54,6 +54,11 @@ SeqNext(SeqScanState *node)
 	EState	   *estate;
 	ScanDirection direction;
 	TupleTableSlot *slot;
+	bool		batched;
+	TupleTableSlot **batch_slots;
+	int			batch_num_slots;
+	int		   *batch_next_slot;
+	int		   *batch_slots_filled;
 
 	/*
 	 * get information from the estate and scan state
@@ -63,6 +68,13 @@ SeqNext(SeqScanState *node)
 	direction = estate->es_direction;
 	slot = node->ss.ss_ScanTupleSlot;
 
+	/* batched mode state */
+	batched = node->ss.ss_UseBatching;
+	batch_slots = node->ss.ss_BatchScanTupleSlots;
+	batch_num_slots = node->ss.ss_NumBatchScanTupleSlots;
+	batch_next_slot = &node->ss.ss_NextBatchScanTupleSlot;
+	batch_slots_filled = &node->ss.ss_BatchScanTupleSlotsFilled;
+
 	if (scandesc == NULL)
 	{
 		/*
@@ -71,14 +83,31 @@ SeqNext(SeqScanState *node)
 		 */
 		scandesc = table_beginscan(node->ss.ss_currentRelation,
 								   estate->es_snapshot,
-								   0, NULL);
+								   0, NULL,
+								   batched);
 		node->ss.ss_currentScanDesc = scandesc;
 	}
 
 	/*
 	 * get the next tuple from the table
 	 */
-	if (table_scan_getnextslot(scandesc, direction, slot))
+	if (batched)
+	{
+		Assert(batch_slots != NULL);
+		Assert(batch_num_slots > 0);
+		if (*batch_slots_filled > 0 &&
+			*batch_next_slot < *batch_slots_filled)
+		{
+			return batch_slots[(*batch_next_slot)++];
+		}
+		else if (table_scan_getnextslot_batch(scandesc, direction, batch_slots,
+										 batch_num_slots, batch_slots_filled))
+		{
+			*batch_next_slot = 0;
+			return batch_slots[(*batch_next_slot)++];
+		}
+	}
+	else if (table_scan_getnextslot(scandesc, direction, slot))
 		return slot;
 	return NULL;
 }
@@ -276,6 +305,16 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithQualProject;
 	}
 
+	/* batching state */
+#define		SCAN_BATCHING_SIZE		64
+	scanstate->ss.ss_UseBatching = (scanstate->ss.ps.state->es_epq_active == NULL);
+	ExecInitScanBatchTupleSlots(estate, &scanstate->ss,
+								RelationGetDescr(scanstate->ss.ss_currentRelation),
+								table_slot_callbacks(scanstate->ss.ss_currentRelation),
+								SCAN_BATCHING_SIZE);
+	scanstate->ss.ss_NumBatchScanTupleSlots = SCAN_BATCHING_SIZE;
+	scanstate->ss.ss_NextBatchScanTupleSlot = 0;
+	scanstate->ss.ss_BatchScanTupleSlotsFilled = 0;
 	return scanstate;
 }
 

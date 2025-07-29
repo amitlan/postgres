@@ -590,6 +590,9 @@ extern void ExecInitResultTupleSlotTL(PlanState *planstate,
 extern void ExecInitScanTupleSlot(EState *estate, ScanState *scanstate,
 								  TupleDesc tupledesc,
 								  const TupleTableSlotOps *tts_ops);
+extern void ExecInitScanBatchTupleSlots(EState *estate, ScanState *scanstate,
+										TupleDesc tupledesc, const TupleTableSlotOps *tts_ops,
+										int batch_size);
 extern TupleTableSlot *ExecInitExtraTupleSlot(EState *estate,
 											  TupleDesc tupledesc,
 											  const TupleTableSlotOps *tts_ops);

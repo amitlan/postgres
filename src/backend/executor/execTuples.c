@@ -2009,6 +2009,25 @@ ExecInitScanTupleSlot(EState *estate, ScanState *scanstate,
 }
 
 /* ----------------
+ *		ExecInitScanBatchTupleSlots -- initializes batch_size number of slots
+ * ----------------
+ */
+void
+ExecInitScanBatchTupleSlots(EState *estate, ScanState *scanstate,
+							TupleDesc tupledesc, const TupleTableSlotOps *tts_ops,
+							int batch_size)
+{
+	int		i;
+
+	scanstate->ss_BatchScanTupleSlots = (TupleTableSlot **)
+		palloc(batch_size * sizeof(TupleTableSlot *));
+	for (i = 0; i < batch_size; i++)
+		scanstate->ss_BatchScanTupleSlots[i] =
+			ExecAllocTableSlot(&estate->es_tupleTable,
+							   tupledesc, tts_ops);
+}
+
+/* ----------------
  *		ExecInitExtraTupleSlot
  *
  * Return a newly created slot. If tupledesc is non-NULL the slot will have

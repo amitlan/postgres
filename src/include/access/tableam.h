@@ -62,6 +62,9 @@ typedef enum ScanOptions
 
 	/* unregister snapshot at scan end? */
 	SO_TEMP_SNAPSHOT = 1 << 9,
+
+	/* use batched mode during seqscans */
+	SO_USE_BATCHING = 1 << 10,
 }			ScanOptions;
 
 /*
@@ -344,6 +347,15 @@ typedef struct TableAmRoutine
 	bool		(*scan_getnextslot) (TableScanDesc scan,
 									 ScanDirection direction,
 									 TupleTableSlot *slot);
+
+	/*
+	 * Return next "batch of" tuples from `scan`, store into slots.
+	 */
+	bool		(*scan_getnextslot_batch) (TableScanDesc scan,
+										   ScanDirection direction,
+										   TupleTableSlot **slots,
+										   int num_slots,
+										   int *num_slots_filled);
 
 	/*-----------
 	 * Optional functions to provide scanning for ranges of ItemPointers.
@@ -868,10 +880,12 @@ extern TupleTableSlot *table_slot_create(Relation relation, List **reglist);
  */
 static inline TableScanDesc
 table_beginscan(Relation rel, Snapshot snapshot,
-				int nkeys, struct ScanKeyData *key)
+				int nkeys, struct ScanKeyData *key,
+				bool use_batching)
 {
 	uint32		flags = SO_TYPE_SEQSCAN |
-		SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
+		SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE |
+		(use_batching ? SO_USE_BATCHING : 0);
 
 	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
 }
@@ -1029,6 +1043,33 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		elog(ERROR, "unexpected table_scan_getnextslot call during logical decoding");
 
 	return sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+}
+
+/*
+ * Return next "batch of" tuples from `scan`, store into slots.
+ */
+static inline bool
+table_scan_getnextslot_batch(TableScanDesc sscan, ScanDirection direction,
+							 TupleTableSlot **slots,
+							 int num_slots, int *num_slots_filled)
+{
+	/* tts_tableOid of individual slots should be filled by scan_getnextslot_batch() */
+
+	/* We don't expect actual scans using NoMovementScanDirection */
+	Assert(direction == ForwardScanDirection ||
+		   direction == BackwardScanDirection);
+
+	/*
+	 * We don't expect direct calls to table_scan_getnextslot with valid
+	 * CheckXidAlive for catalog or regular tables.  See detailed comments in
+	 * xact.c where these variables are declared.
+	 */
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+		elog(ERROR, "unexpected table_scan_getnextslot_batch call during logical decoding");
+
+	return sscan->rs_rd->rd_tableam->scan_getnextslot_batch(sscan, direction, slots,
+															num_slots,
+															num_slots_filled);
 }
 
 /* ----------------------------------------------------------------------------

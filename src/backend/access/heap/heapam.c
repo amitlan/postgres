@@ -898,7 +898,7 @@ heapgettup(HeapScanDesc scan,
 		   int nkeys,
 		   ScanKey key)
 {
-	HeapTuple	tuple = &(scan->rs_ctup);
+	HeapTuple	tuple = scan->rs_ctup_p;
 	Page		page;
 	OffsetNumber lineoff;
 	int			linesleft;
@@ -1008,7 +1008,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 					int nkeys,
 					ScanKey key)
 {
-	HeapTuple	tuple = &(scan->rs_ctup);
+	HeapTuple	tuple = scan->rs_ctup_p;
 	Page		page;
 	uint32		lineindex;
 	uint32		linesleft;
@@ -1169,6 +1169,19 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 
 	/* we only need to set this up once */
 	scan->rs_ctup.t_tableOid = RelationGetRelid(relation);
+	scan->rs_ctup_p = &(scan->rs_ctup);
+
+	/* batching setup */
+#define SCAN_BATCH_SIZE		64
+	if (flags & SO_USE_BATCHING)
+	{
+		int		i;
+
+		scan->rs_ctup_batch =
+			(HeapTupleData *) palloc0(sizeof(HeapTupleData) * SCAN_BATCH_SIZE);
+		for (i = 0; i < SCAN_BATCH_SIZE; i++)
+			scan->rs_ctup_batch[i].t_tableOid = RelationGetRelid(relation);
+	}
 
 	/*
 	 * Allocate memory to keep track of page allocation for parallel workers
@@ -1392,7 +1405,7 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	else
 		heapgettup(scan, direction, sscan->rs_nkeys, sscan->rs_key);
 
-	if (scan->rs_ctup.t_data == NULL)
+	if (scan->rs_ctup_p->t_data == NULL)
 	{
 		ExecClearTuple(slot);
 		return false;
@@ -1405,8 +1418,52 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 
 	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
 
-	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot,
+	ExecStoreBufferHeapTuple(scan->rs_ctup_p, slot,
 							 scan->rs_cbuf);
+	return true;
+}
+
+/* Returns a batch of tuples in the provided slots. */
+bool
+heap_getnextslot_batch(TableScanDesc sscan, ScanDirection direction,
+					   TupleTableSlot **slots, int num_slots,
+					   int *num_slots_filled)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+	int		i;
+
+	for (i = 0, *num_slots_filled = 0; i < num_slots;
+		 i++, (*num_slots_filled)++)
+	{
+		TupleTableSlot *slot = slots[i];
+
+		/*
+		 * The following code is essentially heap_getnextslot() repeated here
+		 * because we need to use ExecForceStoreHeapTuple().
+		 */
+
+		scan->rs_ctup_p = &scan->rs_ctup_batch[i];
+		if (sscan->rs_flags & SO_ALLOW_PAGEMODE)
+			heapgettup_pagemode(scan, direction, sscan->rs_nkeys, sscan->rs_key);
+		else
+			heapgettup(scan, direction, sscan->rs_nkeys, sscan->rs_key);
+
+		if (scan->rs_ctup_p->t_data == NULL)
+		{
+			ExecClearTuple(slot);
+			return *num_slots_filled > 0;
+		}
+
+		/*
+		 * if we get here it means we have a new current scan tuple, so point to
+		 * the proper return buffer and return the tuple.
+		 */
+		pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+
+		ExecStoreBufferHeapTuple(scan->rs_ctup_p, slot,
+								 scan->rs_cbuf);
+		Assert(slots[i]->tts_tableOid == RelationGetRelid(sscan->rs_rd));
+	}
 	return true;
 }
 

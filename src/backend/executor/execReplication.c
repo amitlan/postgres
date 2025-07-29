@@ -369,7 +369,7 @@ RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
 
 	/* Start a heap scan. */
 	InitDirtySnapshot(snap);
-	scan = table_beginscan(rel, &snap, 0, NULL);
+	scan = table_beginscan(rel, &snap, 0, NULL, false);
 	scanslot = table_slot_create(rel, NULL);
 
 retry:

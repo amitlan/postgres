@@ -1073,7 +1073,7 @@ DoCopyTo(CopyToState cstate)
 		TupleTableSlot *slot;
 		TableScanDesc scandesc;
 
-		scandesc = table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL);
+		scandesc = table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL, false);
 		slot = table_slot_create(cstate->rel, NULL);
 
 		processed = 0;
