@@ -1171,9 +1171,9 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_ctup.t_tableOid = RelationGetRelid(relation);
 	scan->rs_ctup_p = &(scan->rs_ctup);
 
-	/* batching setup */
+	/* batching setup XXX - disabled in parallel execution */
 #define SCAN_BATCH_SIZE		64
-	if (flags & SO_USE_BATCHING)
+	if (flags & SO_USE_BATCHING && parallel_scan == NULL)
 	{
 		int		i;
 
