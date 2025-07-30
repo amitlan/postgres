@@ -1460,6 +1460,14 @@ heap_getnextslot_batch(TableScanDesc sscan, ScanDirection direction,
 		 */
 		pgstat_count_heap_getnext(scan->rs_base.rs_rd);
 
+		/*
+		 * Set block number in tuple->t_self, like heapgettup_pagemode does.
+		 * XXX - perhaps better to fix heapgettup_pagemode() itself to recognize
+		 * the batch mode.
+		 */
+		ItemPointerSetBlockNumber(&scan->rs_ctup_p->t_self,
+								  BufferGetBlockNumber(scan->rs_cbuf));
+
 		ExecStoreBufferHeapTuple(scan->rs_ctup_p, slot,
 								 scan->rs_cbuf);
 		Assert(slots[i]->tts_tableOid == RelationGetRelid(sscan->rs_rd));
