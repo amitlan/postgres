@@ -307,7 +307,8 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 
 	/* batching state */
 #define		SCAN_BATCHING_SIZE		64
-	scanstate->ss.ss_UseBatching = (!node->scan.plan.parallel_aware &&
+	scanstate->ss.ss_UseBatching = (!(eflags | EXEC_FLAG_BACKWARD) &&
+									!node->scan.plan.parallel_aware &&
 									scanstate->ss.ps.state->es_epq_active == NULL);
 	ExecInitScanBatchTupleSlots(estate, &scanstate->ss,
 								RelationGetDescr(scanstate->ss.ss_currentRelation),
