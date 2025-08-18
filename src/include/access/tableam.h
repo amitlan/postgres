@@ -345,6 +345,13 @@ typedef struct TableAmRoutine
 									 ScanDirection direction,
 									 TupleTableSlot *slot);
 
+	/*
+	 * Return next batch of tuples from `scan`, store in slot.
+	 */
+	int			(*scan_getnextbatch) (TableScanDesc scan,
+									  ScanDirection direction,
+									  TupleTableSlot **slots, int maxslots);
+
 	/*-----------
 	 * Optional functions to provide scanning for ranges of ItemPointers.
 	 * Implementations must either provide both of these functions, or neither
@@ -1029,6 +1036,29 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		elog(ERROR, "unexpected table_scan_getnextslot call during logical decoding");
 
 	return sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+}
+
+/*
+ * Return next batch of tuples from `scan`, stored in slots.  The returned
+ * integer is the number of tuples contained in the batch.
+ */
+static inline int
+table_scan_getnextbatch(TableScanDesc sscan, ScanDirection direction,
+						TupleTableSlot **slots, int maxslots)
+{
+	/* Only forward scans are supported in the batched mode. */
+	Assert(direction == ForwardScanDirection);
+
+	/*
+	 * We don't expect direct calls to table_scan_getnextbatch with valid
+	 * CheckXidAlive for catalog or regular tables.  See detailed comments in
+	 * xact.c where these variables are declared.
+	 */
+	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
+		elog(ERROR, "unexpected table_scan_getnextslot call during logical decoding");
+
+	return sscan->rs_rd->rd_tableam->scan_getnextbatch(sscan, direction, slots,
+													   maxslots);
 }
 
 /* ----------------------------------------------------------------------------

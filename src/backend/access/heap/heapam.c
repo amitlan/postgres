@@ -1006,9 +1006,9 @@ static void
 heapgettup_pagemode(HeapScanDesc scan,
 					ScanDirection dir,
 					int nkeys,
-					ScanKey key)
+					ScanKey key,
+					HeapTuple tuple)
 {
-	HeapTuple	tuple = &(scan->rs_ctup);
 	Page		page;
 	uint32		lineindex;
 	uint32		linesleft;
@@ -1136,6 +1136,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
 	scan->rs_cbuf = InvalidBuffer;
+	scan->rs_batch_ctup = NULL;
+	scan->rs_batch_cbuf = InvalidBuffer;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
@@ -1304,6 +1306,8 @@ heap_endscan(TableScanDesc sscan)
 	 */
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
+	if (BufferIsValid(scan->rs_batch_cbuf))
+		ReleaseBuffer(scan->rs_batch_cbuf);
 
 	/*
 	 * Must free the read stream before freeing the BufferAccessStrategy.
@@ -1362,7 +1366,8 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 
 	if (scan->rs_base.rs_flags & SO_ALLOW_PAGEMODE)
 		heapgettup_pagemode(scan, direction,
-							scan->rs_base.rs_nkeys, scan->rs_base.rs_key);
+							scan->rs_base.rs_nkeys, scan->rs_base.rs_key,
+							&scan->rs_ctup);
 	else
 		heapgettup(scan, direction,
 				   scan->rs_base.rs_nkeys, scan->rs_base.rs_key);
@@ -1388,7 +1393,8 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	/* Note: no locking manipulations needed */
 
 	if (sscan->rs_flags & SO_ALLOW_PAGEMODE)
-		heapgettup_pagemode(scan, direction, sscan->rs_nkeys, sscan->rs_key);
+		heapgettup_pagemode(scan, direction, sscan->rs_nkeys, sscan->rs_key,
+							&scan->rs_ctup);
 	else
 		heapgettup(scan, direction, sscan->rs_nkeys, sscan->rs_key);
 
@@ -1409,6 +1415,94 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 							 scan->rs_cbuf);
 	return true;
 }
+
+int
+heap_getnextbatch(TableScanDesc sscan, ScanDirection dir,
+				  TupleTableSlot **slots, int maxslots)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+	Buffer curbuf;
+	int	left_on_page,
+		take_more,
+		filled = 0;
+
+	Assert(ScanDirectionIsForward(dir));
+	Assert(sscan->rs_flags & SO_ALLOW_PAGEMODE);
+	Assert(maxslots > 0);
+
+	/* at top of heap_getnextbatch() */
+	if (unlikely(scan->rs_batch_ctup == NULL))
+	{
+		scan->rs_batch_ctup =
+			palloc(sizeof(HeapTupleData) * maxslots);
+		for (int i = 0; i < maxslots; i++)
+			scan->rs_batch_ctup[i].t_tableOid = RelationGetRelid(scan->rs_base.rs_rd);
+	}
+
+	/* fetch first tuple this call */
+	heapgettup_pagemode(scan, dir, sscan->rs_nkeys, sscan->rs_key,
+						&scan->rs_batch_ctup[0]);
+	if (scan->rs_batch_ctup[0].t_data == NULL)
+	{
+		if (BufferIsValid(scan->rs_batch_cbuf))
+		{
+			ReleaseBuffer(scan->rs_batch_cbuf);
+			scan->rs_batch_cbuf = InvalidBuffer;
+		}
+		return 0;
+	}
+
+	curbuf = scan->rs_cbuf;
+
+	/* ensure single shared pin for this page */
+	if (!BufferIsValid(scan->rs_batch_cbuf))
+	{
+		IncrBufferRefCount(curbuf);
+		scan->rs_batch_cbuf = curbuf;
+	}
+	else if (scan->rs_batch_cbuf != curbuf)
+	{
+		ReleaseBuffer(scan->rs_batch_cbuf);
+		IncrBufferRefCount(curbuf);
+		scan->rs_batch_cbuf = curbuf;
+	}
+
+	/* store first tuple into HeapTuple slot */
+	Assert(BlockNumberIsValid(scan->rs_cblock));
+	ItemPointerSetBlockNumber(&scan->rs_batch_ctup[0].t_self, scan->rs_cblock);
+	ExecStoreHeapTuple(&scan->rs_batch_ctup[0], slots[filled], false);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	filled++;
+
+	/* prebudget remaining visibles on this page */
+	left_on_page = scan->rs_ntuples - (scan->rs_cindex + 1);
+	take_more = Min(maxslots - filled, left_on_page);
+
+	for (int i = 0; i < take_more; i++)
+	{
+		heapgettup_pagemode(scan, dir, sscan->rs_nkeys, sscan->rs_key,
+							&scan->rs_batch_ctup[filled]);
+
+		Assert(scan->rs_batch_ctup[filled].t_data != NULL);
+		Assert(scan->rs_cbuf == curbuf);
+
+		Assert(BlockNumberIsValid(scan->rs_cblock));
+		ItemPointerSetBlockNumber(&scan->rs_batch_ctup[filled].t_self, scan->rs_cblock);
+		ExecStoreHeapTuple(&scan->rs_batch_ctup[filled], slots[filled], false);
+		pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+		filled++;
+	}
+
+	/* drop the pin only when page is exhausted by this call */
+	if (take_more == left_on_page)
+	{
+		ReleaseBuffer(scan->rs_batch_cbuf);
+		scan->rs_batch_cbuf = InvalidBuffer;
+	}
+
+	return filled;
+}
+
 
 void
 heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
@@ -1495,7 +1589,8 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 	for (;;)
 	{
 		if (sscan->rs_flags & SO_ALLOW_PAGEMODE)
-			heapgettup_pagemode(scan, direction, sscan->rs_nkeys, sscan->rs_key);
+			heapgettup_pagemode(scan, direction, sscan->rs_nkeys, sscan->rs_key,
+								&scan->rs_ctup);
 		else
 			heapgettup(scan, direction, sscan->rs_nkeys, sscan->rs_key);
 

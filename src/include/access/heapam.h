@@ -73,6 +73,9 @@ typedef struct HeapScanDescData
 
 	HeapTupleData rs_ctup;		/* current tuple in scan, if any */
 
+	HeapTupleData *rs_batch_ctup;	/* NULL when not using batched mode */
+	Buffer	rs_batch_cbuf;		/* buffer feeding the batch */
+
 	/* For scans that stream reads */
 	ReadStream *rs_read_stream;
 
@@ -299,6 +302,9 @@ extern void heap_endscan(TableScanDesc sscan);
 extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);
 extern bool heap_getnextslot(TableScanDesc sscan,
 							 ScanDirection direction, struct TupleTableSlot *slot);
+extern int heap_getnextbatch(TableScanDesc sscan,
+							 ScanDirection dir,
+							 struct TupleTableSlot **slots, int maxslots);
 extern void heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 							  ItemPointer maxtid);
 extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
