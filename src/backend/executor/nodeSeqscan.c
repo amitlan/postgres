@@ -204,6 +204,180 @@ ExecSeqScanEPQ(PlanState *pstate)
 }
 
 /* ----------------------------------------------------------------
+ *						Batch Support
+ * ----------------------------------------------------------------
+ */
+static inline bool
+SeqNextBatch(SeqScanState *node)
+{
+	TableScanDesc scandesc;
+	EState	   *estate;
+	ScanDirection direction;
+
+	/*
+	 * get information from the estate and scan state
+	 */
+	scandesc = node->ss.ss_currentScanDesc;
+	estate = node->ss.ps.state;
+	direction = estate->es_direction;
+	Assert(direction == ForwardScanDirection);
+
+	if (scandesc == NULL)
+	{
+		/*
+		 * We reach here if the scan is not parallel, or if we're serially
+		 * executing a scan that was planned to be parallel.
+		 */
+		scandesc = table_beginscan(node->ss.ss_currentRelation,
+								   estate->es_snapshot,
+								   0, NULL);
+		node->ss.ss_currentScanDesc = scandesc;
+	}
+
+	node->ss.ss_batch_filled = table_scan_getnextbatch(scandesc, direction,
+													   node->ss.ss_batch_inslots,
+													   node->ss.ss_batch_maxslots);
+	node->ss.ss_batch_next = 0;
+	return node->ss.ss_batch_filled > 0;
+}
+
+static inline TupleTableSlot *
+SeqNextBatchSlot(SeqScanState *ss)
+{
+	if (ss->ss.ss_batch_next < ss->ss.ss_batch_filled || SeqNextBatch(ss))
+		return ss->ss.ss_batch_inslots[ss->ss.ss_batch_next++];
+	return NULL;
+}
+
+static TupleTableSlot *
+ExecSeqScanBatch(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) SeqNextBatchSlot,
+							(ExecScanRecheckMtd) SeqRecheck,
+							NULL,
+							NULL,
+							NULL);
+}
+
+/*
+ * Variant of ExecSeqScan() but when qual evaluation is required.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchWithQual(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	/*
+	 * Use pg_assume() for != NULL tests to make the compiler realize no
+	 * runtime check for the field is needed in ExecScanExtended().
+	 */
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) SeqNextBatchSlot,
+							(ExecScanRecheckMtd) SeqRecheck,
+							NULL,
+							pstate->qual,
+							NULL);
+}
+
+/*
+ * Variant of ExecSeqScan() but when projection is required.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchWithProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) SeqNextBatchSlot,
+							(ExecScanRecheckMtd) SeqRecheck,
+							NULL,
+							NULL,
+							pstate->ps_ProjInfo);
+}
+
+/*
+ * Variant of ExecSeqScan() but when qual evaluation and projection are
+ * required.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchWithQualProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) SeqNextBatchSlot,
+							(ExecScanRecheckMtd) SeqRecheck,
+							NULL,
+							pstate->qual,
+							pstate->ps_ProjInfo);
+}
+
+/* Batch SeqScan enablement and dispatch */
+static void
+ExecSeqScanInitBatching(SeqScanState *scanstate, int eflags)
+{
+	bool use_batch =
+		(scanstate->ss.ps.state->es_epq_active == NULL) &&
+		!(eflags & EXEC_FLAG_BACKWARD) &&
+		!scanstate->ss.ps.plan->parallel_aware &&
+		scanstate->ss.ss_currentRelation->rd_tableam &&
+		scanstate->ss.ss_currentRelation->rd_tableam->scan_getnextbatch != NULL;
+
+	if (use_batch)
+	{
+		/* XXX fixed 64 for PoC */
+		const int cap = 64;
+		TupleDesc scandesc = RelationGetDescr(scanstate->ss.ss_currentRelation);
+
+		scanstate->ss.ss_batch_maxslots = cap;
+		scanstate->ss.ss_batch_filled = 0;
+		scanstate->ss.ss_batch_next = 0;
+
+		/* HeapTuple input slots to avoid per-slot buffer pin churn */
+		scanstate->ss.ss_batch_inslots =
+			palloc(sizeof(TupleTableSlot *) * cap);
+		for (int i = 0; i < cap; i++)
+			scanstate->ss.ss_batch_inslots[i] =
+				MakeSingleTupleTableSlot(scandesc, &TTSOpsHeapTuple);
+
+		/* Choose batch variant to preserve your specialization matrix */
+		if (scanstate->ss.ps.qual == NULL)
+		{
+			if (scanstate->ss.ps.ps_ProjInfo == NULL)
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatch;
+			else
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchWithProject;
+		}
+		else
+		{
+			if (scanstate->ss.ps.ps_ProjInfo == NULL)
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchWithQual;
+			else
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchWithQualProject;
+		}
+	}
+}
+
+/* ----------------------------------------------------------------
  *		ExecInitSeqScan
  * ----------------------------------------------------------------
  */
@@ -280,6 +454,8 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithQualProject;
 	}
 
+	ExecSeqScanInitBatching(scanstate, eflags);
+
 	return scanstate;
 }
 
@@ -304,6 +480,8 @@ ExecEndSeqScan(SeqScanState *node)
 	 */
 	if (scanDesc != NULL)
 		table_endscan(scanDesc);
+	for (int i = 0; i < node->ss.ss_batch_maxslots; i++)
+		ExecDropSingleTupleTableSlot(node->ss.ss_batch_inslots[i]);
 }
 
 /* ----------------------------------------------------------------

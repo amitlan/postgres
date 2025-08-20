@@ -1619,6 +1619,11 @@ typedef struct ScanState
 	Relation	ss_currentRelation;
 	struct TableScanDescData *ss_currentScanDesc;
 	TupleTableSlot *ss_ScanTupleSlot;
+
+	TupleTableSlot **ss_batch_inslots;	/* array of input slots */
+	int				ss_batch_maxslots;	/* capacity, 64 for now */
+	int				ss_batch_filled;	/* tuples fetched in current batch */
+	int				ss_batch_next;		/* next index within current batch */
 } ScanState;
 
 /* ----------------
