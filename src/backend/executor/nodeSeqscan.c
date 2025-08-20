@@ -258,12 +258,9 @@ ExecSeqScanBatch(PlanState *pstate)
 	Assert(pstate->qual == NULL);
 	Assert(pstate->ps_ProjInfo == NULL);
 
-	return ExecScanExtended(&node->ss,
-							(ExecScanAccessMtd) SeqNextBatchSlot,
-							(ExecScanRecheckMtd) SeqRecheck,
-							NULL,
-							NULL,
-							NULL);
+	return ExecScanExtendedBatch(&node->ss,
+								 (ExecScanAccessBatchMtd) SeqNextBatch,
+								 NULL, NULL);
 }
 
 /*
@@ -282,12 +279,9 @@ ExecSeqScanBatchWithQual(PlanState *pstate)
 	pg_assume(pstate->qual != NULL);
 	Assert(pstate->ps_ProjInfo == NULL);
 
-	return ExecScanExtended(&node->ss,
-							(ExecScanAccessMtd) SeqNextBatchSlot,
-							(ExecScanRecheckMtd) SeqRecheck,
-							NULL,
-							pstate->qual,
-							NULL);
+	return ExecScanExtendedBatch(&node->ss,
+								 (ExecScanAccessBatchMtd) SeqNextBatch,
+								 pstate->qual, NULL);
 }
 
 /*
@@ -302,12 +296,9 @@ ExecSeqScanBatchWithProject(PlanState *pstate)
 	Assert(pstate->qual == NULL);
 	pg_assume(pstate->ps_ProjInfo != NULL);
 
-	return ExecScanExtended(&node->ss,
-							(ExecScanAccessMtd) SeqNextBatchSlot,
-							(ExecScanRecheckMtd) SeqRecheck,
-							NULL,
-							NULL,
-							pstate->ps_ProjInfo);
+	return ExecScanExtendedBatch(&node->ss,
+								 (ExecScanAccessBatchMtd) SeqNextBatch,
+								 NULL, pstate->ps_ProjInfo);
 }
 
 /*
@@ -323,12 +314,9 @@ ExecSeqScanBatchWithQualProject(PlanState *pstate)
 	pg_assume(pstate->qual != NULL);
 	pg_assume(pstate->ps_ProjInfo != NULL);
 
-	return ExecScanExtended(&node->ss,
-							(ExecScanAccessMtd) SeqNextBatchSlot,
-							(ExecScanRecheckMtd) SeqRecheck,
-							NULL,
-							pstate->qual,
-							pstate->ps_ProjInfo);
+	return ExecScanExtendedBatch(&node->ss,
+								 (ExecScanAccessBatchMtd) SeqNextBatch,
+								 pstate->qual, pstate->ps_ProjInfo);
 }
 
 /* Batch SeqScan enablement and dispatch */

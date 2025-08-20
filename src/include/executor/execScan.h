@@ -243,4 +243,56 @@ ExecScanExtended(ScanState *node,
 	}
 }
 
+static inline TupleTableSlot *
+ExecScanExtendedBatch(ScanState *node,
+					  ExecScanAccessBatchMtd accessBatchMtd,
+					  ExprState *qual, ProjectionInfo *projInfo)
+{
+	ExprContext *econtext = node->ps.ps_ExprContext;
+
+	/* Batch path does not support EPQ */
+	Assert(node->ps.state->es_epq_active == NULL);
+	Assert(node->ss_batch_inslots != NULL);
+	Assert(node->ss_batch_maxslots > 0);
+
+	for (;;)
+	{
+		TupleTableSlot *in;
+
+		/* Get next input slot from current batch, or refill */
+		if (node->ss_batch_next >= node->ss_batch_filled)
+		{
+			node->ss_batch_filled = node->ss_batch_next = 0;
+			if (!accessBatchMtd(node))
+			return NULL;
+		}
+
+		in = node->ss_batch_inslots[node->ss_batch_next++];
+
+		/* No qual, no projection: direct return */
+		if (qual == NULL && projInfo == NULL)
+			return in;
+
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = in;
+
+		/* Qual only */
+		if (projInfo == NULL)
+		{
+			if (qual == NULL || ExecQual(qual, econtext))
+				return in;
+			else
+				InstrCountFiltered1(node, 1);
+			continue;
+		}
+
+		/* Projection (with or without qual) */
+		if (qual == NULL || ExecQual(qual, econtext))
+			return ExecProject(projInfo);
+		else
+			InstrCountFiltered1(node, 1);
+		/* else try next tuple */
+	}
+}
+
 #endif							/* EXECSCAN_H */
