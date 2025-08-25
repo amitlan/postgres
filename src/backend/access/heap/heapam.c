@@ -1421,6 +1421,49 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	return true;
 }
 
+/* ----------------
+ * heap_count_tuples
+ * ----------------
+ */
+TupleTableSlot *
+heap_count_tuples(TableScanDesc sscan, TupleTableSlot *slot)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+	int			count = 0;
+
+	/*
+	 * advance the scan until we run out of stuff to scan
+	 */
+	while (true)
+	{
+		heap_fetch_next_buffer(scan, ForwardScanDirection);
+
+		/* did we run out of blocks to scan? */
+		if (!BufferIsValid(scan->rs_cbuf))
+			break;
+
+		Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
+
+		/* prune the page and determine visible tuple offsets */
+		heap_prepare_pagescan((TableScanDesc) scan);
+		count += scan->rs_ntuples;
+	}
+
+	/* end of scan */
+	if (BufferIsValid(scan->rs_cbuf))
+		ReleaseBuffer(scan->rs_cbuf);
+	scan->rs_cbuf = InvalidBuffer;
+	scan->rs_cblock = InvalidBlockNumber;
+	scan->rs_prefetch_block = InvalidBlockNumber;
+	scan->rs_inited = false;
+
+	slot->tts_values[0] = Int32GetDatum(count);
+	slot->tts_isnull[0] = false;
+	slot->tts_nvalid = 1;
+	slot->tts_flags &= ~TTS_FLAG_EMPTY;
+	return slot;
+}
+
 void
 heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 				  ItemPointer maxtid)

@@ -50,6 +50,7 @@
 #include "commands/vacuum.h"
 #include "common/file_utils.h"
 #include "common/scram-common.h"
+#include "executor/executor.h"
 #include "jit/jit.h"
 #include "libpq/auth.h"
 #include "libpq/libpq.h"
@@ -2085,6 +2086,17 @@ struct config_bool ConfigureNamesBool[] =
 		},
 		&jit_tuple_deforming,
 		true,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"direct_count_tuples", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Count heap relations rows directly"),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&direct_count_tuples,
+		false,
 		NULL, NULL, NULL
 	},
 

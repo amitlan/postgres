@@ -2246,6 +2246,9 @@ ExecAgg(PlanState *pstate)
 	AggState   *node = castNode(AggState, pstate);
 	TupleTableSlot *result = NULL;
 
+	if (direct_count_tuples)
+		return ExecProcNode(outerPlanState(node));
+
 	CHECK_FOR_INTERRUPTS();
 
 	if (!node->agg_done)

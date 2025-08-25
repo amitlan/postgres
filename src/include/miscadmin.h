@@ -287,6 +287,7 @@ extern PGDLLIMPORT double VacuumCostDelay;
 extern PGDLLIMPORT int VacuumCostBalance;
 extern PGDLLIMPORT bool VacuumCostActive;
 
+extern PGDLLIMPORT bool direct_count_tuples;
 
 /* in utils/misc/stack_depth.c */
 

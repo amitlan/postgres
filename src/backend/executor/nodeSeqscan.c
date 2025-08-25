@@ -28,6 +28,7 @@
 #include "postgres.h"
 
 #include "access/relscan.h"
+#include "access/heapam.h"
 #include "access/tableam.h"
 #include "executor/execScan.h"
 #include "executor/executor.h"
@@ -75,9 +76,15 @@ SeqNext(SeqScanState *node)
 		node->ss.ss_currentScanDesc = scandesc;
 	}
 
-	/*
-	 * get the next tuple from the table
-	 */
+	if (direct_count_tuples)
+	{
+		if (node->done)
+			return NULL;
+
+		node->done = true;
+		return heap_count_tuples(scandesc, slot);
+	}
+
 	if (table_scan_getnextslot(scandesc, direction, slot))
 		return slot;
 	return NULL;
