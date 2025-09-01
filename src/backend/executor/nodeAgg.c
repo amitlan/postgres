@@ -255,6 +255,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "common/hashfn.h"
+#include "executor/execBatch.h"
 #include "executor/execExpr.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
@@ -268,6 +269,7 @@
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/expandeddatum.h"
+#include "utils/fmgroids.h"
 #include "utils/injection_point.h"
 #include "utils/logtape.h"
 #include "utils/lsyscache.h"
@@ -3267,6 +3269,114 @@ hashagg_reset_spill_state(AggState *aggstate)
 }
 
 
+/* ----------------
+ * AggCanFastCount
+ *		Return true when we can compute COUNT(*) by summing child
+ * 		batch counts.
+ *
+ * Requirements:
+ *	- plain (non-partial) aggregation
+ *	- no grouping keys or grouping sets
+ *	- exactly one aggregate: COUNT(*) without filter
+ *	- child exposes ExecProcNodeBatch
+ *	- Agg itself has no HAVING qual (not checked here yet)
+ * ----------------
+ */
+
+static bool
+AggCanFastCount(AggState *aggstate)
+{
+	Agg	*agg = castNode(Agg, aggstate->ss.ps.plan);
+	AggStatePerAgg per;
+
+	/* Must be a scalar (plain) aggregate, not grouped/hashed/sorted */
+	if (agg->aggstrategy != AGG_PLAIN)
+		return false;
+
+	/* No grouping keys or grouping sets */
+	if (agg->numCols != 0)
+		return false;
+	if (agg->groupingSets != NIL)
+		return false;
+
+	/* Simple (non-partial) agg, no grouping sets, no groups */
+	if (aggstate->aggsplit != AGGSPLIT_SIMPLE)
+		return false;
+	/* Exactly one aggregate: COUNT(*) with no filter */
+	if (aggstate->numaggs != 1)
+		return false;
+
+	per = &aggstate->peragg[0];
+	if (per->aggref->aggkind != AGGKIND_NORMAL)
+		return false;
+	if (per->aggref->aggfilter != NULL)
+		return false;
+	if (per->aggref->aggfnoid != F_COUNT_ANY &&
+		per->aggref->aggfnoid != F_COUNT_)
+		return false;
+
+	/* No HAVING qual allowed */
+	if (aggstate->ss.ps.qual != NULL)
+		return false;
+
+	/* Child must advertise a batch-producing entry */
+	if (outerPlanState(aggstate) == NULL ||
+		outerPlanState(aggstate)->ExecProcNodeBatch == NULL)
+		return false;
+
+	return true;
+}
+
+static TupleTableSlot *
+ExecAggFastCount(PlanState *ps)
+{
+	AggState *aggstate = castNode(AggState, ps);
+	PlanState *child = outerPlanState(aggstate);
+	int64 total = 0;
+	TupleTableSlot *result;
+
+	if (aggstate->agg_done)
+		return NULL;
+
+	for (;;)
+	{
+		TupleBatch *b = ExecProcNodeBatch(child);
+
+		if (b == NULL)
+			break;
+		Assert(b->nrows >= 0);
+		total += b->nrows;
+	}
+
+	/*
+	 * Seed the single group's transition state with the total so that
+	 * finalize_aggregates() and project_aggregates() can run as usual.
+	 *
+	 * For plain COUNT(*), trans type is int8, and finalize is identity,
+	 * so placing the final count into the per-group trans slot is enough.
+	 */
+	{
+		int setno = 0; /* no grouping sets in the fast path */
+		AggStatePerGroup pergroup = &aggstate->pergroups[setno][0]; /* single group */
+
+		/* Store the count as the transition value for this aggregate */
+		pergroup->transValue = Int64GetDatum(total);
+		pergroup->transValueIsNull = false;
+
+		/* Defensive: ensure we're projecting the same set we filled */
+		aggstate->current_set = setno;
+	}
+
+	/* Now use the normal Agg tail to produce the output row */
+	finalize_aggregates(aggstate,
+						aggstate->peragg,
+						aggstate->pergroups[aggstate->current_set]);
+
+	result = project_aggregates(aggstate);
+	aggstate->agg_done = true;
+	return result;  /* may be NULL only in degenerate cases; matches core flow */
+}
+
 /* -----------------
  * ExecInitAgg
  *
@@ -4111,6 +4221,13 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 		/* cache compiled expression for outer slot without NULL check */
 		phase->evaltrans_cache[0][0] = phase->evaltrans;
 	}
+
+	/*
+	 * Install fast-path executor for trivial COUNT(*).
+	 * Falls back to ExecAgg if the child cannot provide batch counts.
+	 */
+	if (AggCanFastCount(aggstate))
+		aggstate->ss.ps.ExecProcNode = ExecAggFastCount;
 
 	return aggstate;
 }
