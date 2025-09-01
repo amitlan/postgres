@@ -1001,6 +1001,13 @@
   boot_val => 'true',
 },
 
+{ name => 'executor_batching', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Use tuple batching during execution.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'executor_batching',
+  boot_val => 'true',
+},
+
 { name => 'exit_on_error', type => 'bool', context => 'PGC_USERSET', group => 'ERROR_HANDLING_OPTIONS',
   short_desc => 'Terminate session on any error.',
   variable => 'ExitOnAnyError',

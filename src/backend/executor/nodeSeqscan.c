@@ -204,6 +204,171 @@ ExecSeqScanEPQ(PlanState *pstate)
 }
 
 /* ----------------------------------------------------------------
+ *						Batch Support
+ * ----------------------------------------------------------------
+ */
+static inline bool
+SeqNextBatch(SeqScanState *node)
+{
+	TableScanDesc scandesc;
+	EState	   *estate;
+	ScanDirection direction;
+
+	Assert(node->ss.ps.ps_Batch != NULL);
+
+	/*
+	 * get information from the estate and scan state
+	 */
+	scandesc = node->ss.ss_currentScanDesc;
+	estate = node->ss.ps.state;
+	direction = estate->es_direction;
+	Assert(direction == ForwardScanDirection);
+
+	if (scandesc == NULL)
+	{
+		/*
+		 * We reach here if the scan is not parallel, or if we're serially
+		 * executing a scan that was planned to be parallel.
+		 */
+		scandesc = table_beginscan(node->ss.ss_currentRelation,
+								   estate->es_snapshot,
+								   0, NULL);
+		node->ss.ss_currentScanDesc = scandesc;
+	}
+
+	/* Lazily create the AM batch payload. */
+	if (node->ss.ps.ps_Batch->am_payload == NULL)
+	{
+		const TableAmRoutine *tam PG_USED_FOR_ASSERTS_ONLY = scandesc->rs_rd->rd_tableam;
+
+		Assert(tam && tam->scan_begin_batch);
+		node->ss.ps.ps_Batch->am_payload =
+			table_scan_begin_batch(scandesc, node->ss.ps.ps_Batch->maxslots);
+		node->ss.ps.ps_Batch->ops = table_batch_callbacks(node->ss.ss_currentRelation);
+	}
+
+	node->ss.ps.ps_Batch->ntuples =
+		table_scan_getnextbatch(scandesc, node->ss.ps.ps_Batch->am_payload, direction);
+	node->ss.ps.ps_Batch->nvalid = node->ss.ps.ps_Batch->ntuples;
+	node->ss.ps.ps_Batch->materialized = false;
+
+	return node->ss.ps.ps_Batch->ntuples > 0;
+}
+
+static inline bool
+SeqNextBatchMaterialize(SeqScanState *node)
+{
+	if (SeqNextBatch(node))
+	{
+		TupleBatchMaterializeAll(node->ss.ps.ps_Batch);
+		return true;
+	}
+
+	return false;
+}
+
+static TupleTableSlot *
+ExecSeqScanBatchSlot(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtendedBatchSlot(&node->ss,
+									 (ExecScanAccessBatchMtd) SeqNextBatchMaterialize,
+									 NULL, NULL);
+}
+
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithQual(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	/*
+	 * Use pg_assume() for != NULL tests to make the compiler realize no
+	 * runtime check for the field is needed in ExecScanExtended().
+	 */
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtendedBatchSlot(&node->ss,
+									 (ExecScanAccessBatchMtd) SeqNextBatchMaterialize,
+									 pstate->qual, NULL);
+}
+
+/*
+ * Variant of ExecSeqScan() but when projection is required.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtendedBatchSlot(&node->ss,
+									 (ExecScanAccessBatchMtd) SeqNextBatchMaterialize,
+									 NULL, pstate->ps_ProjInfo);
+}
+
+/*
+ * Variant of ExecSeqScan() but when qual evaluation and projection are
+ * required.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithQualProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtendedBatchSlot(&node->ss,
+									 (ExecScanAccessBatchMtd) SeqNextBatchMaterialize,
+									 pstate->qual, pstate->ps_ProjInfo);
+}
+
+/* Batch SeqScan enablement and dispatch */
+static void
+SeqScanInitBatching(SeqScanState *scanstate, int eflags)
+{
+	const int cap = EXEC_BATCH_ROWS;
+	TupleDesc	scandesc = RelationGetDescr(scanstate->ss.ss_currentRelation);
+
+	scanstate->ss.ps.ps_Batch = TupleBatchCreate(scandesc, cap);
+
+	/* Choose batch variant to preserve your specialization matrix */
+	if (scanstate->ss.ps.qual == NULL)
+	{
+		if (scanstate->ss.ps.ps_ProjInfo == NULL)
+		{
+			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlot;
+		}
+		else
+		{
+			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithProject;
+		}
+	}
+	else
+	{
+		if (scanstate->ss.ps.ps_ProjInfo == NULL)
+		{
+			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
+		}
+		else
+		{
+			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQualProject;
+		}
+	}
+}
+
+/* ----------------------------------------------------------------
  *		ExecInitSeqScan
  * ----------------------------------------------------------------
  */
@@ -211,6 +376,7 @@ SeqScanState *
 ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 {
 	SeqScanState *scanstate;
+	bool	use_batching;
 
 	/*
 	 * Once upon a time it was possible to have an outerPlan of a SeqScan, but
@@ -241,9 +407,12 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 							 node->scan.scanrelid,
 							 eflags);
 
+	use_batching = ScanCanUseBatching(&scanstate->ss, eflags);
+
 	/* and create slot with the appropriate rowtype */
 	ExecInitScanTupleSlot(estate, &scanstate->ss,
 						  RelationGetDescr(scanstate->ss.ss_currentRelation),
+						  use_batching ? &TTSOpsHeapTuple :
 						  table_slot_callbacks(scanstate->ss.ss_currentRelation));
 
 	/*
@@ -280,6 +449,9 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithQualProject;
 	}
 
+	if (use_batching)
+		SeqScanInitBatching(scanstate, eflags);
+
 	return scanstate;
 }
 
@@ -298,6 +470,8 @@ ExecEndSeqScan(SeqScanState *node)
 	 * get information from node
 	 */
 	scanDesc = node->ss.ss_currentScanDesc;
+
+	ScanResetBatching(&node->ss, true);
 
 	/*
 	 * close heap scan
@@ -327,7 +501,7 @@ ExecReScanSeqScan(SeqScanState *node)
 	if (scan != NULL)
 		table_rescan(scan,		/* scan desc */
 					 NULL);		/* new scan keys */
-
+	ScanResetBatching(&node->ss, false);
 	ExecScanReScan((ScanState *) node);
 }
 

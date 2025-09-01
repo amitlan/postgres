@@ -3,6 +3,7 @@
 backend_sources += files(
   'execAmi.c',
   'execAsync.c',
+  'execBatch.c',
   'execCurrent.c',
   'execExpr.c',
   'execExprInterp.c',

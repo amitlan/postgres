@@ -30,6 +30,7 @@
 #define EXECNODES_H
 
 #include "access/tupconvert.h"
+#include "executor/execBatch.h"
 #include "executor/instrument.h"
 #include "fmgr.h"
 #include "lib/ilist.h"
@@ -1149,6 +1150,10 @@ typedef struct JsonExprState
  */
 typedef TupleTableSlot *(*ExecProcNodeMtd) (PlanState *pstate);
 
+/* Return a batch; may reuse caller-provided envelope. NULL => end of scan. */
+struct TupleBatch;
+typedef struct TupleBatch TupleBatch;
+
 /* ----------------
  *		PlanState node
  *
@@ -1203,6 +1208,9 @@ typedef struct PlanState
 	TupleTableSlot *ps_ResultTupleSlot; /* slot for my result tuples */
 	ExprContext *ps_ExprContext;	/* node's expression-evaluation context */
 	ProjectionInfo *ps_ProjInfo;	/* info for doing tuple projection */
+
+	/* Batching state if node supports it. */
+	TupleBatch *ps_Batch;
 
 	bool		async_capable;	/* true if node is async-capable */
 

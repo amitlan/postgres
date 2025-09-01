@@ -103,6 +103,17 @@ table_slot_create(Relation relation, List **reglist)
 	return slot;
 }
 
+/* ----------------------------------------------------------------------------
+ * TupleBatch support routines
+ * ----------------------------------------------------------------------------
+ */
+const TupleBatchOps *
+table_batch_callbacks(Relation relation)
+{
+	if (relation->rd_tableam)
+		return relation->rd_tableam->batch_callbacks(relation);
+	elog(ERROR, "relation does not support TupleBatch operations");
+}
 
 /* ----------------------------------------------------------------------------
  * Table scan functions.
