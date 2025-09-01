@@ -1023,7 +1023,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 					int nkeys,
 					ScanKey key)
 {
-	HeapTuple	tuple = &(scan->rs_ctup);
+	HeapTuple tuple = &scan->rs_ctup;
 	Page		page;
 	uint32		lineindex;
 	uint32		linesleft;
@@ -1104,6 +1104,121 @@ continue_page:
 	scan->rs_inited = false;
 }
 
+/*
+ * heapgettup_pagemode_batch
+ *		Collect up to 'maxitems' visible tuples from a single page in page mode.
+ *
+ * This function returns a *batch* of tuples from one heap page. If the
+ * current page (as tracked by the scan desc) has no more tuples left,
+ * it will advance to the next page and prepare it (via heap_prepare_pagescan).
+ * It will not cross a page boundary while filling the batch.
+ *
+ * Return value:
+ *		number of tuples written into 'tdata' (0 at end-of-scan).
+ *
+ * Side effects:
+ *	- Ensures rs_cbuf pins the page from which tuples were produced.
+ *	- Sets rs_cblock, rs_cindex, rs_ntuples consistently (same as
+ *	  heapgettup_pagemode’s inner-loop effects).
+ *	- Does *not* change buffer pin counts except through normal page
+ *	  transitions performed by heap_fetch_next_buffer().
+ */
+static int
+heapgettup_pagemode_batch(HeapScanDesc scan,
+						  ScanDirection dir,
+						  int nkeys, ScanKey key,
+						  HeapTupleData *tdata,
+						  int maxitems)
+{
+	Page		page;
+	uint32		lineindex;
+	uint32		linesleft;
+	int			nout = 0;
+
+	Assert(ScanDirectionIsForward(dir));
+	Assert(scan->rs_base.rs_flags & SO_ALLOW_PAGEMODE);
+	Assert(maxitems > 0);
+
+	/*
+	 * If we have no current page (or the current page is exhausted),
+	 * advance to the next page that has any visible tuples and prepare it.
+	 * This mirrors the outer loop of heapgettup_pagemode(), but we stop
+	 * as soon as we have a prepared page; we never produce from two pages.
+	 */
+	for (;;)
+	{
+		if (BufferIsValid(scan->rs_cbuf))
+		{
+			/* Are there more visible tuples left on this page? */
+			lineindex = scan->rs_cindex + dir;
+			if (ScanDirectionIsForward(dir))
+				linesleft = (lineindex <= (uint32) scan->rs_ntuples) ?
+					(scan->rs_ntuples - lineindex) : 0;
+			else
+				linesleft = scan->rs_cindex;
+			if (linesleft > 0)
+				break;	/* continue on this page */
+		}
+
+		/* Move to next page and prepare its visible tuple list. */
+		heap_fetch_next_buffer(scan, dir);
+
+		if (!BufferIsValid(scan->rs_cbuf))
+		{
+			/* end of scan; keep rs_cbuf invalid like heapgettup_pagemode */
+			scan->rs_cblock = InvalidBlockNumber;
+			scan->rs_prefetch_block = InvalidBlockNumber;
+			scan->rs_inited = false;
+			return 0;
+		}
+
+		Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
+		heap_prepare_pagescan((TableScanDesc) scan);
+
+		/* After prepare, either rs_ntuples > 0 or we'll loop again. */
+		if (scan->rs_ntuples > 0)
+		{
+			lineindex = ScanDirectionIsForward(dir) ? 0 : scan->rs_ntuples - 1;
+			linesleft = scan->rs_ntuples - (ScanDirectionIsForward(dir) ? 0 : 0);
+			break;
+		}
+		/* else: page had no visible tuples; continue to next page */
+	}
+
+	/* From here on, we must only read tuples from this single page. */
+	page = BufferGetPage(scan->rs_cbuf);
+
+	/*
+	 * Walk rs_vistuples[] from 'lineindex', copying headers into tdata[]
+	 * until either the page is exhausted or the batch capacity is reached.
+	 */
+	for (; linesleft > 0 && nout < maxitems; linesleft--, lineindex += dir)
+	{
+		OffsetNumber	lineoff;
+		ItemId			lpp;
+		HeapTupleData *dst = &tdata[nout];
+
+		Assert(lineindex <= (uint32) scan->rs_ntuples);
+		lineoff = scan->rs_vistuples[lineindex];
+		lpp = PageGetItemId(page, lineoff);
+		Assert(ItemIdIsNormal(lpp));
+
+		dst->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+		dst->t_len  = ItemIdGetLength(lpp);
+		dst->t_tableOid = RelationGetRelid(scan->rs_base.rs_rd);
+		ItemPointerSet(&(dst->t_self), scan->rs_cblock, lineoff);
+
+		if (key != NULL &&
+			!HeapKeyTest(dst, RelationGetDescr(scan->rs_base.rs_rd),
+						 nkeys, key))
+			continue;
+
+		scan->rs_cindex = lineindex;
+		nout++;
+	}
+
+	return nout;
+}
 
 /* ----------------------------------------------------------------
  *					 heap access method interface
@@ -1435,6 +1550,97 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 							 scan->rs_cbuf);
 	return true;
 }
+
+/*---------- Batching support -----------*/
+
+/*
+ * heap_scan_begin_batch
+ *
+ * Allocate a HeapBatch with space for 'maxitems' tuple headers. No pin is
+ * taken here. Memory is allocated under the scan's memory context.
+ */
+void *
+heap_begin_batch(TableScanDesc sscan, int maxitems)
+{
+	HeapBatch  *hb;
+	Oid			relid;
+
+	Assert(maxitems > 0);
+
+	hb = palloc(sizeof(HeapBatch));
+	hb->tupdata = palloc(sizeof(HeapTupleData) * maxitems);
+	hb->maxitems = maxitems;
+	hb->nitems = 0;
+	hb->buf = InvalidBuffer;
+
+	/* Initialize static fields of HeapTupleData. Row bodies remain on page. */
+	relid = RelationGetRelid(sscan->rs_rd);
+	for (int i = 0; i < maxitems; i++)
+		hb->tupdata[i].t_tableOid = relid;
+
+	return hb;
+}
+
+/*
+ * heap_scan_end_batch
+ *
+ * Release any outstanding pin and free the batch allocations. Caller will
+ * not use 'am_batch' after this point.
+ */
+void
+heap_end_batch(TableScanDesc sscan, void *am_batch)
+{
+	HeapBatch *hb = (HeapBatch *) am_batch;
+
+	if (BufferIsValid(hb->buf))
+		ReleaseBuffer(hb->buf);
+
+	pfree(hb->tupdata);
+	pfree(hb);
+}
+
+int
+heap_getnextbatch(TableScanDesc sscan, void *am_batch, ScanDirection dir)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapBatch  *hb = (HeapBatch *) am_batch;
+	Buffer		curbuf;
+	int			n;
+
+	Assert(ScanDirectionIsForward(dir));
+	Assert(sscan->rs_flags & SO_ALLOW_PAGEMODE);
+	Assert(hb->maxitems > 0);
+
+	/* Drop prior batch pin, if any. */
+	if (BufferIsValid(hb->buf))
+	{
+		ReleaseBuffer(hb->buf);
+		hb->buf = InvalidBuffer;
+	}
+
+	hb->nitems = 0;
+
+	/* One call per batch, never crosses a page. */
+	n = heapgettup_pagemode_batch(scan, dir,
+								  sscan->rs_nkeys, sscan->rs_key,
+								  hb->tupdata, hb->maxitems);
+
+	if (n == 0)
+		return 0;	/* end of scan */
+
+	/* Hold a shared pin for the batch lifetime so t_data stays valid. */
+	curbuf = scan->rs_cbuf;
+	IncrBufferRefCount(curbuf);
+	hb->buf = curbuf;
+
+	/* Per-tuple stats (can be collapsed into a future _multi() call). */
+	pgstat_count_heap_getnext_batch(sscan->rs_rd, n);
+
+	hb->nitems = n;
+	return n;
+}
+
+/*----- End of batching support -----*/
 
 void
 heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
