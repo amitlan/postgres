@@ -1153,6 +1153,7 @@ typedef TupleTableSlot *(*ExecProcNodeMtd) (PlanState *pstate);
 /* Return a batch; may reuse caller-provided envelope. NULL => end of scan. */
 struct TupleBatch;
 typedef struct TupleBatch TupleBatch;
+typedef TupleBatch *(*ExecProcNodeBatchMtd)(struct PlanState *ps);
 
 /* ----------------
  *		PlanState node
@@ -1176,6 +1177,10 @@ typedef struct PlanState
 	ExecProcNodeMtd ExecProcNode;	/* function to return next tuple */
 	ExecProcNodeMtd ExecProcNodeReal;	/* actual function, if above is a
 										 * wrapper */
+
+	/* Optional batch-producing entry point (NULL => no batching). */
+	ExecProcNodeBatchMtd ExecProcNodeBatch;
+	ExecProcNodeBatchMtd ExecProcNodeBatchReal;
 
 	Instrumentation *instrument;	/* Optional runtime stats for this node */
 	WorkerInstrumentation *worker_instrument;	/* per-worker instrumentation */

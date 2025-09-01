@@ -334,6 +334,37 @@ ExecSeqScanBatchSlotWithQualProject(PlanState *pstate)
 									 pstate->qual, pstate->ps_ProjInfo);
 }
 
+static TupleBatch *
+ExecSeqScanBatch(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtendedBatch(&node->ss,
+								 (ExecScanAccessBatchMtd) SeqNextBatch,
+								 NULL, NULL);
+}
+
+/*
+ * Variant of ExecSeqScan() but when qual evaluation is required.
+ */
+static TupleBatch *
+ExecSeqScanBatchWithQual(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtendedBatch(&node->ss,
+								 (ExecScanAccessBatchMtd) SeqNextBatchMaterialize,
+								 pstate->qual, NULL);
+}
+
 /* Batch SeqScan enablement and dispatch */
 static void
 SeqScanInitBatching(SeqScanState *scanstate, int eflags)
@@ -348,10 +379,12 @@ SeqScanInitBatching(SeqScanState *scanstate, int eflags)
 	{
 		if (scanstate->ss.ps.ps_ProjInfo == NULL)
 		{
+			scanstate->ss.ps.ExecProcNodeBatch = ExecSeqScanBatch;
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlot;
 		}
 		else
 		{
+			scanstate->ss.ps.ExecProcNodeBatch = NULL;
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithProject;
 		}
 	}
@@ -359,10 +392,12 @@ SeqScanInitBatching(SeqScanState *scanstate, int eflags)
 	{
 		if (scanstate->ss.ps.ps_ProjInfo == NULL)
 		{
+			scanstate->ss.ps.ExecProcNodeBatch = ExecSeqScanBatchWithQual;
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
 		}
 		else
 		{
+			scanstate->ss.ps.ExecProcNodeBatch = NULL;
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQualProject;
 		}
 	}

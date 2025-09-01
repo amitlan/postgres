@@ -121,6 +121,8 @@
 
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static TupleTableSlot *ExecProcNodeInstr(PlanState *node);
+static TupleBatch *ExecProcNodeBatchFirst(PlanState *node);
+static TupleBatch *ExecProcNodeBatchInstr(PlanState *node);
 static bool ExecShutdownNode_walker(PlanState *node, void *context);
 
 
@@ -389,6 +391,8 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 	}
 
 	ExecSetExecProcNode(result, result->ExecProcNode);
+	if (result->ExecProcNodeBatch)
+		ExecSetExecProcNodeBatch(result, result->ExecProcNodeBatch);
 
 	/*
 	 * Initialize any initPlans present in this node.  The planner put them in
@@ -489,6 +493,54 @@ ExecProcNodeInstr(PlanState *node)
 	return result;
 }
 
+/*
+ * ExecSetExecProcNodeBatch
+ *		Install ExecProcNodeBatch with first-call wrapper, mirroring row path.
+ */
+void
+ExecSetExecProcNodeBatch(PlanState *node, ExecProcNodeBatchMtd function)
+{
+	node->ExecProcNodeBatchReal = function;
+	node->ExecProcNodeBatch = ExecProcNodeBatchFirst;
+}
+
+/*
+ * ExecProcNodeBatchFirst
+ *		One-time stack-depth check; then pick instrument/no-instrument wrapper.
+ */
+static TupleBatch *
+ExecProcNodeBatchFirst(PlanState *node)
+{
+	check_stack_depth();
+
+	if (node->instrument)
+		node->ExecProcNodeBatch = ExecProcNodeBatchInstr;
+	else
+		node->ExecProcNodeBatch = node->ExecProcNodeBatchReal;
+
+	return node->ExecProcNodeBatch(node);
+}
+
+/*
+ * ExecProcNodeBatchInstr
+ *		Instrumentation wrapper for batch calls.
+ *
+ * Note: we can record nrows as the "tuple" count for this call. That keeps
+ * instrumentation meaningful without changing Instr API.
+ */
+static TupleBatch *
+ExecProcNodeBatchInstr(PlanState *node)
+{
+	TupleBatch *b;
+
+	InstrStartNode(node->instrument);
+
+	b = node->ExecProcNodeBatchReal(node);
+
+	InstrStopNode(node->instrument, b ? (double) b->nvalid : 0.0);
+
+	return b;
+}
 
 /* ----------------------------------------------------------------
  *		MultiExecProcNode
