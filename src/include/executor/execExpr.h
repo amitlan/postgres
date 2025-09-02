@@ -302,6 +302,9 @@ typedef enum ExprEvalOp
 	EEOP_BUILD_OUTER_BATCH_VECTOR,
 	EEOP_BUILD_SCAN_BATCH_VECTOR,
 
+	/* Batched aggregate trans evaluation */
+	EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP,	/* per-row fmgr calls */
+
 	/* non-existent operation, used e.g. to check array lengths */
 	EEOP_LAST
 } ExprEvalOp;
@@ -750,6 +753,7 @@ typedef struct ExprEvalStep
 
 		/* for EEOP_AGG_PLAIN_TRANS_[INIT_][STRICT_]{BYVAL,BYREF} */
 		/* for EEOP_AGG_ORDERED_TRANS_{DATUM,TUPLE} */
+		/* for EEOP_AGG_PLAIN_TRANS_{BATCH,BATCH_ROWLOOP}*/
 		struct
 		{
 			AggStatePerTrans pertrans;
@@ -757,6 +761,7 @@ typedef struct ExprEvalStep
 			int			setno;
 			int			transno;
 			int			setoff;
+			struct BatchVectorSlice *bvs;
 		}			agg_trans;
 
 		/* for EEOP_IS_JSON */
@@ -956,8 +961,17 @@ typedef struct BatchVector
 	int		nrows;			/* #rows loaded into cols/nulls */
 } BatchVector;
 
+/* A slice of BatchVector that maps caller args to BatchVector columns. */
+typedef struct BatchVectorSlice
+{
+	const BatchVector *bv;
+	int			nargs;		/* number of args covered */
+	int16	   *argoffs;	/* length nargs, -1 for non-Var entries */
+} BatchVectorSlice;
+
 extern void ExecBuildInnerBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 extern void ExecBuildOuterBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 extern void ExecBuildScanBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 
+extern void ExecAggPlainTransBatch(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 #endif							/* EXEC_EXPR_H */

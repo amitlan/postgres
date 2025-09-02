@@ -606,6 +606,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_BUILD_INNER_BATCH_VECTOR,
 		&&CASE_EEOP_BUILD_OUTER_BATCH_VECTOR,
 		&&CASE_EEOP_BUILD_SCAN_BATCH_VECTOR,
+		&&CASE_EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP,
 		&&CASE_EEOP_LAST
 	};
 
@@ -2332,6 +2333,14 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* too complex for an inline implementation */
 			ExecBuildScanBatchVector(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP)
+		{
+			/* too complex for an inline implementation */
+			ExecAggPlainTransBatch(state, op, econtext);
 
 			EEO_NEXT();
 		}
@@ -6038,4 +6047,98 @@ ExecBuildBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
 		i++;
 	}
 	bv->nrows = i;
+}
+
+void
+ExecAggPlainTransBatch(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	AggState   *aggstate = castNode(AggState, state->parent);
+	AggStatePerTrans	pertrans = op->d.agg_trans.pertrans;
+	AggStatePerGroup pergroup =
+		&aggstate->all_pergroups[op->d.agg_trans.setoff][op->d.agg_trans.transno];
+	BatchVectorSlice  *bvs = op->d.agg_trans.bvs;
+	FunctionCallInfo	fcinfo = pertrans->transfn_fcinfo;
+	FmgrInfo		   *finfo = fcinfo->flinfo;
+	Datum		newVal;
+	TupleBatch *batch = econtext->outer_batch;
+	int			batch_nrows = bvs ? bvs->bv->nrows : batch->nvalid;
+	int			start_row = 0;
+
+	if (finfo->fn_strict)
+	{
+		if (pergroup->noTransValue && bvs)
+		{
+			const BatchVector *bv = bvs->bv;
+			bool	found = false;
+
+			Assert(bv);
+			for (int i = 0; i < batch_nrows; i++)
+			{
+				for (int j = 0; j < bvs->nargs; j++)
+				{
+					if (!bv->nulls[bvs->argoffs[j]][i])
+					{
+						fcinfo->args[1].value = bv->cols[bvs->argoffs[j]][i];
+						fcinfo->args[1].isnull = false;
+						if (j == bvs->nargs - 1)
+						{
+							found = true;
+							break;
+						}
+					}
+				}
+				if (found)
+					break;
+			}
+			/* If transValue has not yet been initialized, do so now. */
+			ExecAggInitGroup(aggstate, pertrans, pergroup,
+							 op->d.agg_trans.aggcontext);
+			start_row = 1;
+		}
+		else if (pergroup->transValueIsNull)
+			return;
+	}
+
+	switch (ExecEvalStepOp(state, op))
+	{
+		case EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP:
+			/* Loop rows, call the original transfn per element using vector cols. */
+			for (int i = start_row; i < batch_nrows; i++)
+			{
+				bool hasnull = false;
+
+				/* Set up fcinfo args 1..m from column vectors at row i. */
+				if (bvs)
+				{
+					const BatchVector *bv = bvs->bv;
+
+					for (int j = 0; j < bvs->nargs; j++)
+					{
+						int16	argoff = bvs->argoffs[j];
+
+						fcinfo->args[j+1].value = bv->cols[argoff][i];
+						fcinfo->args[j+1].isnull = bv->nulls[argoff][i];
+						if (!hasnull && bv->nulls[argoff][i])
+							hasnull = true;
+					}
+				}
+				/* fcinfo->args[0] is the existing transition state */
+				if (finfo->fn_strict && hasnull)
+					continue;
+				fcinfo->args[0].value = pergroup->transValue;
+				fcinfo->args[0].isnull = pergroup->transValueIsNull;
+				newVal = FunctionCallInvoke(fcinfo);
+				if (!pertrans->transtypeByVal &&
+					DatumGetPointer(newVal) != DatumGetPointer(pergroup->transValue))
+					newVal = ExecAggCopyTransValue(aggstate, pertrans,
+												   newVal, fcinfo->isnull,
+												   pergroup->transValue,
+												   pergroup->transValueIsNull);
+				pergroup->transValue = newVal;
+				pergroup->transValueIsNull = fcinfo->isnull;
+			}
+			break;
+		default:
+			elog(ERROR, "invalid ExprEvalOp in ExecAggPlainTransBatch()");
+	}
 }

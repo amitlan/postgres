@@ -99,4 +99,10 @@ TupleBatchMaterializeAll(TupleBatch *b)
 	TupleBatchUseInput(b, b->ntuples);
 }
 
+static inline void
+TupleBatchConsumeAll(TupleBatch *b)
+{
+	b->next = b->nvalid;
+}
+
 #endif	/* EXECBATCH_H */

@@ -825,6 +825,16 @@ advance_aggregates_batch(AggState *aggstate, TupleBatch *b)
 {
 	ExprContext *tmpcontext = aggstate->tmpcontext;
 	ExprState *evaltrans = aggstate->phase->evaltrans;
+	bool		batch_trans = aggstate->phase->batch_trans;
+
+	if (batch_trans)
+	{
+		tmpcontext->ecxt_outertuple = TupleBatchGetSlot(b, 0);
+		tmpcontext->outer_batch = b;
+		ExecEvalExprNoReturnSwitchContext(evaltrans, tmpcontext);
+		TupleBatchConsumeAll(b);
+		return;
+	}
 
 	while (TupleBatchHasMore(b))
 	{
@@ -1798,7 +1808,8 @@ hashagg_recompile_expressions(AggState *aggstate, bool minslot, bool nullcheck)
 
 		phase->evaltrans_cache[i][j] = ExecBuildAggTrans(aggstate, phase,
 														 dosort, dohash,
-														 nullcheck);
+														 nullcheck,
+														 NULL);
 
 		/* change back */
 		aggstate->ss.ps.outerops = outerops;
@@ -3368,7 +3379,7 @@ hashagg_reset_spill_state(AggState *aggstate)
 	}
 }
 
-static bool
+bool
 AggCanUsePlainBatch(AggState *aggstate)
 {
 	const Agg *aggnode = (const Agg *) aggstate->ss.ps.plan;
@@ -4229,7 +4240,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 			Assert(false);
 
 		phase->evaltrans = ExecBuildAggTrans(aggstate, phase, dosort, dohash,
-											 false);
+											 false, &phase->batch_trans);
 
 		/* cache compiled expression for outer slot without NULL check */
 		phase->evaltrans_cache[0][0] = phase->evaltrans;

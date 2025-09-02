@@ -339,7 +339,8 @@ extern ExprState *ExecInitQual(List *qual, PlanState *parent);
 extern ExprState *ExecInitCheck(List *qual, PlanState *parent);
 extern List *ExecInitExprList(List *nodes, PlanState *parent);
 extern ExprState *ExecBuildAggTrans(AggState *aggstate, struct AggStatePerPhaseData *phase,
-									bool doSort, bool doHash, bool nullcheck);
+									bool doSort, bool doHash, bool nullcheck,
+									bool *batch_trans);
 extern ExprState *ExecBuildHash32FromAttrs(TupleDesc desc,
 										   const TupleTableSlotOps *ops,
 										   FmgrInfo *hashfunctions,
