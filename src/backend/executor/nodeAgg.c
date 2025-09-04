@@ -820,6 +820,20 @@ advance_aggregates(AggState *aggstate)
 									  aggstate->tmpcontext);
 }
 
+static void
+advance_aggregates_batch(AggState *aggstate, TupleBatch *b)
+{
+	ExprContext *tmpcontext = aggstate->tmpcontext;
+	ExprState *evaltrans = aggstate->phase->evaltrans;
+
+	while (TupleBatchHasMore(b))
+	{
+		tmpcontext->ecxt_outertuple = TupleBatchGetNextSlot(b);
+		ExecEvalExprNoReturnSwitchContext(evaltrans, tmpcontext);
+		ResetExprContext(tmpcontext);
+	}
+}
+
 /*
  * Run the transition function for a DISTINCT or ORDER BY aggregate
  * with only one input.  This is called after we have completed
@@ -2262,6 +2276,9 @@ ExecAgg(PlanState *pstate)
 				result = agg_retrieve_hash_table(node);
 				break;
 			case AGG_PLAIN:
+				/* init-time choice */
+				result = node->retrieve_plain(node);
+				break;
 			case AGG_SORTED:
 				result = agg_retrieve_direct(node);
 				break;
@@ -2618,6 +2635,91 @@ agg_retrieve_direct(AggState *aggstate)
 
 	/* No more groups */
 	return NULL;
+}
+
+static TupleTableSlot *
+agg_retrieve_direct_batch(AggState *aggstate)
+{
+	PlanState *child = outerPlanState(aggstate);
+	ExprContext *econtext = aggstate->ss.ps.ps_ExprContext;
+	ExprContext *tmpcontext = aggstate->tmpcontext;
+	const bool hasGroupingSets = aggstate->phase->numsets > 0;
+	TupleTableSlot *firstSlot = aggstate->ss.ss_ScanTupleSlot;
+	TupleBatch *b = NULL;
+
+	Assert(child->ExecProcNodeBatch);
+
+	/* mimic the first-tuple copy from agg_retrieve_direct() */
+	for (;;)
+	{
+		b = ExecProcNodeBatch(child);
+		if (b == NULL)
+		{
+			if (hasGroupingSets)
+			{
+				aggstate->input_done = true;
+				break;
+			}
+			aggstate->agg_done = true;
+			break;
+		}
+		if (b->nvalid == 0)
+			continue;
+
+		TupleBatchMaterializeAll(b);
+		aggstate->grp_firstTuple = ExecCopySlotHeapTuple(TupleBatchGetSlot(b, 0));
+		break;
+	}
+
+	/* initialize_aggregates etc. as in the direct path */
+	ReScanExprContext(econtext);
+	for (int i = 0; i < Max(aggstate->phase->numsets, 1); i++)
+		ReScanExprContext(aggstate->aggcontexts[i]);
+
+	initialize_aggregates(aggstate, aggstate->pergroups,
+						  Max(aggstate->phase->numsets, 1));
+
+	if (aggstate->grp_firstTuple)
+	{
+		ExecForceStoreHeapTuple(aggstate->grp_firstTuple, firstSlot, true);
+		aggstate->grp_firstTuple = NULL;
+		tmpcontext->ecxt_outertuple = firstSlot;
+
+		advance_aggregates_batch(aggstate, b);
+		ResetExprContext(tmpcontext);
+	}
+
+	/* consume remaining rows in current and subsequent batches */
+	if (b)
+	{
+		if (TupleBatchHasMore(b))
+			advance_aggregates_batch(aggstate, b);
+		for (;;)
+		{
+			b = ExecProcNodeBatch(child);
+			if (b == NULL)
+			{
+				if (hasGroupingSets)
+					aggstate->input_done = true;
+				else
+					aggstate->agg_done = true;
+				break;
+			}
+			if (b->nvalid == 0)
+				continue;
+
+			TupleBatchMaterializeAll(b);
+			advance_aggregates_batch(aggstate, b);
+		}
+	}
+
+	/* finalize and project like the direct path */
+	econtext->ecxt_outertuple = firstSlot;
+	prepare_projection_slot(aggstate, econtext->ecxt_outertuple, 0);
+	select_current_set(aggstate, 0, false);
+	finalize_aggregates(aggstate, aggstate->peragg, aggstate->pergroups[0]);
+
+	return project_aggregates(aggstate);
 }
 
 /*
@@ -3266,6 +3368,22 @@ hashagg_reset_spill_state(AggState *aggstate)
 	}
 }
 
+static bool
+AggCanUsePlainBatch(AggState *aggstate)
+{
+	const Agg *aggnode = (const Agg *) aggstate->ss.ps.plan;
+
+	Assert(outerPlanState(aggstate));
+
+	/* grouping sets present -> bail */
+	if (aggnode->groupingSets != NIL)
+		return false;
+
+	if (aggstate->phase->aggstrategy != AGG_PLAIN)
+		return false;
+
+	return outerPlanState(aggstate)->ExecProcNodeBatch;
+}
 
 /* -----------------
  * ExecInitAgg
@@ -4055,6 +4173,11 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 		ereport(ERROR,
 				(errcode(ERRCODE_GROUPING_ERROR),
 				 errmsg("aggregate function calls cannot be nested")));
+
+	if (AggCanUsePlainBatch(aggstate))
+		aggstate->retrieve_plain = agg_retrieve_direct_batch;
+	else
+		aggstate->retrieve_plain = agg_retrieve_direct;
 
 	/*
 	 * Build expressions doing all the transition work at once. We build a

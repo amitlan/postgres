@@ -2543,6 +2543,9 @@ typedef struct AggStatePerGroupData *AggStatePerGroup;
 typedef struct AggStatePerPhaseData *AggStatePerPhase;
 typedef struct AggStatePerHashData *AggStatePerHash;
 
+struct AggState;
+typedef TupleTableSlot *(*AggRetrievePlainFn)(struct AggState *);
+
 typedef struct AggState
 {
 	ScanState	ss;				/* its first field is NodeTag */
@@ -2618,6 +2621,8 @@ typedef struct AggState
 	AggStatePerGroup *all_pergroups;	/* array of first ->pergroups, than
 										 * ->hash_pergroup */
 	SharedAggInfo *shared_info; /* one entry per worker */
+
+	AggRetrievePlainFn retrieve_plain; /* init-time choice */
 } AggState;
 
 /* ----------------
