@@ -461,10 +461,28 @@ int8up(PG_FUNCTION_ARGS)
 Datum
 int8pl(PG_FUNCTION_ARGS)
 {
+	AggBulkArgs *ba = AggGetBulkArgs(fcinfo);
 	int64		arg1 = PG_GETARG_INT64(0);
 	int64		arg2 = PG_GETARG_INT64(1);
 	int64		result;
 
+	if (unlikely(ba))
+	{
+		result = arg1;
+		for (int i = ba->start_row; i < ba->nrows; i++)
+		{
+			if (!ba->isnull[ba->argoffs[0]][i])
+			{
+				arg2 = ba->args[ba->argoffs[0]][i];
+				if (unlikely(pg_add_s64_overflow(arg1, arg2, &result)))
+					ereport(ERROR,
+							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+							 errmsg("bigint out of range")));
+				arg1 = result;
+			}
+		}
+		PG_RETURN_INT64(result);
+	}
 	if (unlikely(pg_add_s64_overflow(arg1, arg2, &result)))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
@@ -718,8 +736,34 @@ int8lcm(PG_FUNCTION_ARGS)
 Datum
 int8inc(PG_FUNCTION_ARGS)
 {
+	AggBulkArgs *ba = AggGetBulkArgs(fcinfo);
 	int64		arg = PG_GETARG_INT64(0);
 	int64		result;
+
+	if (unlikely(ba))
+	{
+		result = arg;
+		if (!ba->hasnull || ba->nargs == 0)
+		{
+			if (unlikely(pg_add_s64_overflow(arg, ba->nrows, &result)))
+					ereport(ERROR,
+							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+							 errmsg("bigint out of range")));
+			PG_RETURN_INT64(result);
+		}
+		for (int i = ba->start_row; i < ba->nrows; i++)
+		{
+			if (!ba->isnull[ba->argoffs[0]][i])
+			{
+				if (unlikely(pg_add_s64_overflow(arg, 1, &result)))
+					ereport(ERROR,
+							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+							 errmsg("bigint out of range")));
+				arg = result;
+			}
+		}
+		PG_RETURN_INT64(result);
+	}
 
 	if (unlikely(pg_add_s64_overflow(arg, 1, &result)))
 		ereport(ERROR,

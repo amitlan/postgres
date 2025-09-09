@@ -607,6 +607,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_BUILD_OUTER_BATCH_VECTOR,
 		&&CASE_EEOP_BUILD_SCAN_BATCH_VECTOR,
 		&&CASE_EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP,
+		&&CASE_EEOP_AGG_PLAIN_TRANS_BATCH_DIRECT,
 		&&CASE_EEOP_LAST
 	};
 
@@ -2338,6 +2339,14 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		}
 
 		EEO_CASE(EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP)
+		{
+			/* too complex for an inline implementation */
+			ExecAggPlainTransBatch(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_AGG_PLAIN_TRANS_BATCH_DIRECT)
 		{
 			/* too complex for an inline implementation */
 			ExecAggPlainTransBatch(state, op, econtext);
@@ -6138,6 +6147,40 @@ ExecAggPlainTransBatch(ExprState *state, ExprEvalStep *op, ExprContext *econtext
 				pergroup->transValueIsNull = fcinfo->isnull;
 			}
 			break;
+
+		case EEOP_AGG_PLAIN_TRANS_BATCH_DIRECT:
+			{
+				void *save = fcinfo->flinfo->fn_extra;
+				AggBulkArgs ba = {batch_nrows, start_row};
+
+				if (bvs)
+				{
+					const BatchVector *bv = bvs->bv;
+
+					Assert(bv);
+					ba.nargs = bvs->nargs;
+					ba.argoffs = bvs->argoffs;
+					ba.args = bv->cols;
+					ba.isnull = bv->nulls;
+					ba.hasnull = bv->hasnull;
+				}
+				fcinfo->flinfo->fn_extra = &ba;
+				fcinfo->args[0].value = pergroup->transValue;
+				fcinfo->args[0].isnull = pergroup->transValueIsNull;
+				fcinfo->isnull = false;		/* just in case transfn doesn't set it */
+				newVal = FunctionCallInvoke(fcinfo);   /* one call for the entire slice */
+				if (!pertrans->transtypeByVal &&
+					DatumGetPointer(newVal) != DatumGetPointer(pergroup->transValue))
+					newVal = ExecAggCopyTransValue(aggstate, pertrans,
+												   newVal, fcinfo->isnull,
+												   pergroup->transValue,
+												   pergroup->transValueIsNull);
+				pergroup->transValue = newVal;
+				pergroup->transValueIsNull = fcinfo->isnull;
+				fcinfo->flinfo->fn_extra = save;
+			}
+			break;
+
 		default:
 			elog(ERROR, "invalid ExprEvalOp in ExecAggPlainTransBatch()");
 	}

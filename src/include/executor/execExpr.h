@@ -304,6 +304,7 @@ typedef enum ExprEvalOp
 
 	/* Batched aggregate trans evaluation */
 	EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP,	/* per-row fmgr calls */
+	EEOP_AGG_PLAIN_TRANS_BATCH_DIRECT,	/* call transfn once with AggBulkArgs */
 
 	/* non-existent operation, used e.g. to check array lengths */
 	EEOP_LAST

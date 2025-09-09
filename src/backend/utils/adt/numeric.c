@@ -6309,6 +6309,23 @@ int4_sum(PG_FUNCTION_ARGS)
 {
 	int64		oldsum;
 	int64		newval;
+	AggBulkArgs *ba = AggGetBulkArgs(fcinfo);
+
+	if (unlikely(ba))
+	{
+		int64	result = (!PG_ARGISNULL(0) ? PG_GETARG_INT64(0) : 0);
+
+		for (int i = ba->start_row; i < ba->nrows; i++)
+		{
+			if (!ba->isnull[ba->argoffs[0]][i])
+			{
+				int32	arg2 = ba->args[ba->argoffs[0]][i];
+
+				result = result + arg2;
+			}
+		}
+		PG_RETURN_INT64(result);
+	}
 
 	if (PG_ARGISNULL(0))
 	{

@@ -3026,6 +3026,7 @@ llvm_compile_expr(ExprState *state)
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
+			case EEOP_AGG_PLAIN_TRANS_BATCH_DIRECT:
 			case EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP:
 				build_EvalXFunc(b, mod, "ExecAggPlainTransBatch",
 								v_state, op, v_econtext);

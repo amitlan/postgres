@@ -2689,7 +2689,6 @@ agg_retrieve_direct_batch(AggState *aggstate)
 
 	initialize_aggregates(aggstate, aggstate->pergroups,
 						  Max(aggstate->phase->numsets, 1));
-
 	if (aggstate->grp_firstTuple)
 	{
 		ExecForceStoreHeapTuple(aggstate->grp_firstTuple, firstSlot, true);

@@ -1363,18 +1363,50 @@ int2smaller(PG_FUNCTION_ARGS)
 Datum
 int4larger(PG_FUNCTION_ARGS)
 {
+	AggBulkArgs *ba = AggGetBulkArgs(fcinfo);
 	int32		arg1 = PG_GETARG_INT32(0);
 	int32		arg2 = PG_GETARG_INT32(1);
 
+	if (unlikely(ba))
+	{
+		int32 result = arg1;
+
+		for (int i = ba->start_row; i < ba->nrows; i++)
+		{
+			if (!ba->isnull[ba->argoffs[0]][i])
+			{
+				arg2 = (int32) ba->args[ba->argoffs[0]][i];
+				if (arg2 > result)
+					result = arg2;
+			}
+		}
+		PG_RETURN_INT32(result);
+	}
 	PG_RETURN_INT32((arg1 > arg2) ? arg1 : arg2);
 }
 
 Datum
 int4smaller(PG_FUNCTION_ARGS)
 {
+	AggBulkArgs *ba = AggGetBulkArgs(fcinfo);
 	int32		arg1 = PG_GETARG_INT32(0);
 	int32		arg2 = PG_GETARG_INT32(1);
 
+	if (unlikely(ba))
+	{
+		int32 result = arg1;
+
+		for (int i = ba->start_row; i < ba->nrows; i++)
+		{
+			if (!ba->isnull[ba->argoffs[0]][i])
+			{
+				arg2 = ba->args[ba->argoffs[0]][i];
+				if (arg2 < result)
+					result = arg2;
+			}
+		}
+		PG_RETURN_INT32(result);
+	}
 	PG_RETURN_INT32((arg1 < arg2) ? arg1 : arg2);
 }
 

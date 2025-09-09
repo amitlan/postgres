@@ -564,6 +564,26 @@ ExecQualAndReset(ExprState *state, ExprContext *econtext)
 }
 #endif
 
+#ifndef FRONTEND
+/* Per-call bulk argument vectors for batched aggregate trans functions. */
+typedef struct AggBulkArgs
+{
+	int		nrows;		/* number of rows in this batch */
+	int		start_row;
+	int16  *argoffs;
+	int		nargs;		/* number of argument vectors */
+	Datum  **args;		/* args[j][i] = j-th arg at row i */
+	bool   **isnull;	/* isnull[j][i] */
+	bool	hasnull;	/* is any datum in args NULL? */
+} AggBulkArgs;
+
+static inline AggBulkArgs *
+AggGetBulkArgs(FunctionCallInfo fcinfo)
+{
+	return (AggBulkArgs *) (fcinfo->flinfo ? fcinfo->flinfo->fn_extra : NULL);
+}
+#endif
+
 extern bool ExecCheck(ExprState *state, ExprContext *econtext);
 
 /*

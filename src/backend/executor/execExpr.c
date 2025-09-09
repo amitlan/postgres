@@ -47,6 +47,7 @@
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/jsonfuncs.h"
 #include "utils/jsonpath.h"
 #include "utils/lsyscache.h"
@@ -3684,6 +3685,28 @@ AggTransCanUseBatch(AggState *as, AggStatePerTrans pt)
 	return true;
 }
 
+/* Return true if this transfn OID is known to accept AggBulkArgs. */
+static bool
+AggTransfnSupportsBulk(Oid fn_oid)
+{
+	/* Phase 1: hard-coded allowlist of built-ins you updated. */
+	static const Oid ok[] =
+	{
+		F_INT8INC_ANY,		/* COUNT(*) transfn */
+		F_INT8INC,			/* COUNT(arg) transfn */
+		F_INT4_SUM,			/* SUM(int) transfn */
+		F_INT4SMALLER,		/* MIN(int) transfn */
+		F_INT4LARGER,		/* MAX(int) transfn */
+		/* add others you make bulk-aware */
+		InvalidOid
+	};
+
+	for (int i = 0; OidIsValid(ok[i]); i++)
+		if (ok[i] == fn_oid)
+			return true;
+	return false;
+}
+
 /*
  * Build transition/combine function invocations for all aggregate transition
  * / combination function invocations in a grouping sets phase. This has to
@@ -4142,7 +4165,10 @@ ExecBuildAggTransCall(ExprState *state, AggState *aggstate,
 		{
 			if (bv)
 				bvs = BatchVectorSliceFromExprArgs(pertrans->aggref->args, bv);
-			scratch->opcode = EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP;
+			if (!AggTransfnSupportsBulk(pertrans->transfn_oid))
+				scratch->opcode = EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP;
+			else
+				scratch->opcode = EEOP_AGG_PLAIN_TRANS_BATCH_DIRECT;
 		}
 		else if (pertrans->transtypeByVal)
 		{
