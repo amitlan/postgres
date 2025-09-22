@@ -401,6 +401,8 @@ SeqScanInitBatching(SeqScanState *scanstate, int eflags)
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQualProject;
 		}
 	}
+
+	scanstate->ss.ps.qual_batch = ExecInitQualBatch((PlanState *) scanstate);
 }
 
 /* ----------------------------------------------------------------

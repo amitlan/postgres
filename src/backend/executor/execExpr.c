@@ -111,6 +111,19 @@ static BatchVector *BatchVectorCreate(Bitmapset *attnos, AttrNumber last_var);
 static bool ExprListAllSimpleVars(const List *args, Bitmapset **allattnos);
 static BatchVectorSlice *BatchVectorSliceFromExprArgs(const List *args,
 													  const BatchVector *bv);
+static int16 BatchVectorFindAttColno(const BatchVector *bv, AttrNumber attno);
+static int16 BatchVectorOffsetForVarExpr(Expr *expr, const BatchVector *bv);
+
+/* private context for the walker */
+typedef struct QualBatchContext
+{
+	List      *leaves;      /* List<Node*> of accepted leaves */
+	Bitmapset *attnos;      /* Vars referenced by accepted leaves */
+	bool		ok;			/* stays true if batchable */
+	AttrNumber	last_scan;	/* last needed attribute in scan slot */
+} QualBatchContext;
+
+static bool qual_batchable_walker(Node *node, void *context);
 
 /*
  * ExecInitExpr: prepare an expression tree for execution
@@ -5213,6 +5226,209 @@ ExprListAllSimpleVars(const List *args, Bitmapset **allattnos)
 	return true;
 }
 
+/* helper: extract Var (allowing RelabelType->Var); returns NULL if not */
+static Var *
+strip_to_var(Node *n)
+{
+	if (n == NULL)
+		return NULL;
+	if (IsA(n, RelabelType))
+		n = (Node *) ((RelabelType *) n)->arg;
+	if (!IsA(n, Var))
+		return NULL;
+	if (((Var *) n)->varattno < 0)
+		return NULL;
+	return (Var *) n;
+}
+
+/* main walker; return true to abort traversal early, false to continue */
+static bool
+qual_batchable_walker(Node *node, void *context)
+{
+	QualBatchContext *cxt = (QualBatchContext *) context;
+
+	if (node == NULL || !cxt->ok)
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_List:
+			return expression_tree_walker(node, qual_batchable_walker, cxt);
+
+		case T_BoolExpr:
+		{
+			BoolExpr *b = (BoolExpr *) node;
+
+			/* Only AND trees are allowed */
+			if (b->boolop != AND_EXPR)
+			{
+				cxt->ok = false;
+				return true; /* abort */
+			}
+			/* Recurse normally over children */
+			return expression_tree_walker(node, qual_batchable_walker, cxt);
+		}
+
+		case T_NullTest:
+		{
+			NullTest *nt = (NullTest *) node;
+			Var		 *v  = strip_to_var((Node *) nt->arg);
+
+			if (v == NULL)
+			{
+				cxt->ok = false;
+				return true;
+			}
+
+			cxt->attnos = bms_add_member(cxt->attnos, v->varattno);
+			if (v->varattno > cxt->last_scan)
+				cxt->last_scan = v->varattno;
+			cxt->leaves = lappend(cxt->leaves, node);
+
+			/* Do NOT recurse into leaf */
+			return false;
+		}
+
+		case T_OpExpr:
+		{
+			OpExpr *op = (OpExpr *) node;
+			List   *args = op->args;
+			Node   *l, *r;
+			Var    *lv,
+				   *rv = NULL;
+
+			/* binary only */
+			if (list_length(args) != 2)
+			{
+				cxt->ok = false;
+				return true;
+			}
+			/* strict operator only (NULL -> false semantics) */
+			if (!func_strict(op->opfuncid))
+			{
+				cxt->ok = false;
+				return true;
+			}
+
+			l = linitial(args);
+			r = lsecond(args);
+			lv = strip_to_var(l);
+			if (lv == NULL)
+			{
+				cxt->ok = false;
+				return true;
+			}
+			cxt->attnos = bms_add_member(cxt->attnos, lv->varattno);
+			if (lv->varattno > cxt->last_scan)
+				cxt->last_scan = lv->varattno;
+
+			if (IsA(r, Const))
+			{
+				/* ok; no attno to add */
+			}
+			else
+			{
+				rv = strip_to_var(r);
+				if (rv == NULL)
+				{
+					cxt->ok = false;
+					return true;
+				}
+				cxt->attnos = bms_add_member(cxt->attnos, rv->varattno);
+				if (rv->varattno > cxt->last_scan)
+					cxt->last_scan = rv->varattno;
+			}
+
+			cxt->leaves = lappend(cxt->leaves, node);
+
+			/* Leaf handled; do NOT recurse into args */
+			return false;
+		}
+
+		/* Whitelist ends here; anything else in the tree rejects */
+		default:
+			cxt->ok = false;
+			break;
+	}
+
+	return true;
+}
+
+/* build a BatchQualTerm from a validated leaf */
+static BatchQualTerm *
+build_term_from_leaf(Node *n, BatchVector *bv)
+{
+	BatchQualTerm *term;
+	BatchQualTermKind kind;
+	bool		strict;
+	int16		l_off;
+	int16		r_off;
+	Datum		r_const = (Datum) 0;
+	bool		r_isnull = false;
+	FmgrInfo   *finfo = NULL;
+	Oid			collation;
+
+	if (IsA(n, NullTest))
+	{
+		NullTest *nt = (NullTest *) n;
+
+		kind = nt->nulltesttype == IS_NULL ? BQTK_IS_NULL : BQTK_IS_NOT_NULL;
+		l_off = BatchVectorOffsetForVarExpr(nt->arg, bv);
+		r_off = -1;
+		strict = false;
+		collation = InvalidOid;
+
+		if (l_off < 0)
+			return NULL;
+	}
+	else if (IsA(n, OpExpr))
+	{
+		OpExpr *op = (OpExpr *) n;
+		Expr   *l  = linitial(op->args);
+		Expr   *r  = lsecond(op->args);
+
+		l_off = BatchVectorOffsetForVarExpr(l, bv);
+		if (l_off < 0)
+			return NULL;
+
+		r_off = BatchVectorOffsetForVarExpr(r, bv);
+		if (IsA(r, Const))
+		{
+			Const *c = (Const *) r;
+
+			kind = BQTK_VAR_CONST;
+			r_const = c->constvalue;
+			r_isnull = c->constisnull;
+			r_off = -1;
+		}
+		else
+		{
+			if (r_off < 0)
+				return NULL;
+			kind = BQTK_VAR_VAR;
+		}
+
+		strict = func_strict(op->opfuncid);
+		collation = exprInputCollation((Node *) op);
+		finfo = palloc(sizeof(FmgrInfo));
+		fmgr_info(op->opfuncid, finfo);
+	}
+	else
+		return NULL;
+
+	term = palloc(sizeof(BatchQualTerm));
+	term->kind = kind;
+	term->strict = strict;
+	term->l_off = l_off;
+	term->r_off = r_off;
+	term->r_const = r_const;
+	term->r_isnull = r_isnull;
+	term->finfo = finfo;
+	term->collation = collation;
+
+	return term;
+}
+
 /* ---------- BatchVector stuff ------------- */
 
 static BatchVector *
@@ -5289,4 +5505,112 @@ BatchVectorSliceFromExprArgs(const List *args, const BatchVector *bv)
 	}
 
 	return bvs;
+}
+
+/*
+ * BatchVectorOffsetForVarExpr
+ *   Map a Var (or RelabelType->Var) to its BatchVector column index.
+ *   Returns -1 if the Var’s attno is not present.
+ */
+static int16
+BatchVectorOffsetForVarExpr(Expr *expr, const BatchVector *bv)
+{
+	AttrNumber attno;
+
+	if (!expr_is_simple_var(expr, &attno))
+		return -1;
+
+	return (int16) BatchVectorFindAttColno(bv, attno);
+}
+
+/*
+ * ExecInitQualBatch
+ *	Build a batched-qual EEOP program (AND-only).
+ *	Caller should also keep scalar ps->qual for runtime fallback.
+ */
+ExprState *
+ExecInitQualBatch(PlanState *ps)
+{
+	Node	   *qual = (Node *) ps->plan->qual;
+	QualBatchContext cxt = {NIL, NULL, true, 0};
+	BatchQualRuntime *rt;
+	ExprState  *state;
+	BatchVector *bv;
+	uint64	   *mask;
+	int			mask_words;
+	ListCell   *lc;
+	ExprEvalStep scratch = {0};
+
+	if (qual == NULL)
+		return NULL;
+
+	/* validate + collect leaves/attnos with walker */
+	(void) qual_batchable_walker(qual, &cxt);
+	if (!cxt.ok || cxt.leaves == NIL || bms_is_empty(cxt.attnos))
+		return NULL;
+
+	bv = BatchVectorCreate(cxt.attnos, cxt.last_scan);
+
+	mask_words = (bv->maxrows + 63) >> 6;
+	mask = (uint64 *) palloc0(sizeof(uint64) * mask_words);
+
+	/* Runtime carrier (lifetime == exprstate) */
+	rt = palloc0(sizeof(BatchQualRuntime));
+	rt->mask = mask;
+	rt->mask_words = mask_words;
+
+	/* dedicated ExprState for batched program */
+
+	state = makeNode(ExprState);
+	state->expr = (Expr *) qual;
+	state->parent = ps;
+	state->ext_params = NULL;
+
+	/* mark expression as to be used with ExecQual() */
+	state->flags = EEO_FLAG_IS_QUAL;
+
+	/* Only valid as batch qual if this is set. */
+	state->batch_private = (void *) rt;
+
+	scratch.opcode = EEOP_SCAN_FETCHSOME_BATCH;
+	scratch.d.fetch_batch.last_var = cxt.last_scan;
+	ExprEvalPushStep(state, &scratch);
+
+	scratch.opcode = EEOP_BUILD_SCAN_BATCH_VECTOR;
+	scratch.d.batch_vector.bv = bv;
+	ExprEvalPushStep(state, &scratch);
+
+	scratch.opcode = EEOP_QUAL_BATCH_INITMASK;
+	scratch.d.qualbatch_init.bv = bv;
+	scratch.d.qualbatch_init.mask = mask;
+	scratch.d.qualbatch_init.mask_words = mask_words;
+	ExprEvalPushStep(state, &scratch);
+
+	/* TERM per leaf */
+	foreach(lc, cxt.leaves)
+	{
+		BatchQualTerm *term = build_term_from_leaf((Node *) lfirst(lc), bv);
+
+		if (term == NULL)
+			return NULL;
+
+		scratch.opcode = EEOP_QUAL_BATCH_TERM;
+		scratch.d.qualbatch_term.bv = bv;
+		scratch.d.qualbatch_term.mask = mask;
+		scratch.d.qualbatch_term.mask_words = mask_words;
+		scratch.d.qualbatch_term.term = term;		/* by value */
+		ExprEvalPushStep(state, &scratch);
+	}
+
+	/*
+	 * At the end, we don't need to do anything more.  The last qual expr must
+	 * have yielded TRUE, and since its result is stored in the desired output
+	 * location, we're done.
+	 */
+	scratch.opcode = EEOP_DONE_NO_RETURN;
+	ExprEvalPushStep(state, &scratch);
+
+	ExecReadyExpr(state);
+
+	return state;
 }

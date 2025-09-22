@@ -306,6 +306,10 @@ typedef enum ExprEvalOp
 	EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP,	/* per-row fmgr calls */
 	EEOP_AGG_PLAIN_TRANS_BATCH_DIRECT,	/* call transfn once with AggBulkArgs */
 
+	/* Batched qual evaluation */
+	EEOP_QUAL_BATCH_INITMASK,
+	EEOP_QUAL_BATCH_TERM,
+
 	/* non-existent operation, used e.g. to check array lengths */
 	EEOP_LAST
 } ExprEvalOp;
@@ -796,6 +800,21 @@ typedef struct ExprEvalStep
 		{
 			struct BatchVector *bv;
 		}			batch_vector;
+
+		struct
+		{
+			struct BatchVector *bv; /* filled earlier by BUILD_BATCH_VECTOR */
+			uint64			   *mask;        /* shared mask buffer for this program */
+			int					mask_words;  /* ceil(es_max_batch/64) */
+		}			qualbatch_init;                    /* EEOP_QUAL_BATCH_INITMASK */
+
+		struct
+		{
+			struct BatchVector *bv; /* same bv as init */
+			uint64			   *mask;        /* same mask buffer */
+			int					mask_words;  /* same word count */
+			struct BatchQualTerm *term;      /* compiled leaf */
+		}			qualbatch_term;                    /* EEOP_QUAL_BATCH_TERM */
 	}			d;
 } ExprEvalStep;
 
@@ -975,4 +994,45 @@ extern void ExecBuildOuterBatchVector(ExprState *state, ExprEvalStep *op, ExprCo
 extern void ExecBuildScanBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 
 extern void ExecAggPlainTransBatch(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
+
+/* See ExecQualBatchTerm(). */
+typedef enum BatchQualTermKind
+{
+	BQTK_VAR_CONST,
+	BQTK_VAR_VAR,
+	BQTK_IS_NULL,
+	BQTK_IS_NOT_NULL,
+} BatchQualTermKind;
+
+typedef struct BatchQualTerm
+{
+	BatchQualTermKind kind;
+	bool		strict;		/* follow strict NULL semantics if true */
+	int16		l_off;		/* left VAR column (index into BatchVector) */
+	int16		r_off;		/* right VAR column, or -1 if Const */
+	Datum		r_const;	/* for VAR_CONST */
+	bool		r_isnull;	/* for VAR_CONST */
+	FmgrInfo   *finfo;		/* fmgr for generic binary ops */
+	Oid			collation;	/* op collation */
+} BatchQualTerm;
+
+/*
+ * Runtime view for batched qual programs.
+ * Owned by the ExprState; lifetime == ExprState.
+ */
+typedef struct BatchQualRuntime
+{
+	uint64 *mask;
+	int		mask_words;
+} BatchQualRuntime;
+
+static inline BatchQualRuntime *
+ExecGetBatchQualRuntime(ExprState *batch_qual)
+{
+	return (BatchQualRuntime *) batch_qual->batch_private;
+}
+
+extern void ExecQualBatchInitMask(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
+extern void ExecQualBatchTerm(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
+
 #endif							/* EXEC_EXPR_H */

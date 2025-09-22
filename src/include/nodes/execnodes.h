@@ -146,6 +146,9 @@ typedef struct ExprState
 	 * ExecInitExprRec().
 	 */
 	ErrorSaveContext *escontext;
+
+	/* batched-program runtime (e.g., BatchQualRuntime) */
+	void	 *batch_private;
 } ExprState;
 
 
@@ -1202,6 +1205,7 @@ typedef struct PlanState
 	 * subPlan list, which does not exist in the plan tree).
 	 */
 	ExprState  *qual;			/* boolean qual condition */
+	ExprState  *qual_batch;		/* boolean qual condition evaluated on batches */
 	PlanState  *lefttree;		/* input plan tree(s) */
 	PlanState  *righttree;
 

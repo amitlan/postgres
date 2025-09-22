@@ -312,7 +312,8 @@ ExecScanExtendedBatch(ScanState *node,
 {
 	ExprContext *econtext = node->ps.ps_ExprContext;
 	TupleBatch *b = node->ps.ps_Batch;
-	int			qualified;
+	ExprState  *qual_batch = node->ps.qual_batch;
+	int			qualified = 0;
 
 	/* Batch path does not support EPQ */
 	Assert(node->ps.state->es_epq_active == NULL);
@@ -328,23 +329,28 @@ ExecScanExtendedBatch(ScanState *node,
 
 		if (qual != NULL)
 		{
-			qualified = 0;
-			while (TupleBatchHasMore(b))
+			ResetExprContext(econtext);
+			if (qual_batch)
 			{
-				TupleTableSlot *in = TupleBatchGetNextSlot(b);
-
-				Assert(in);
-				ResetExprContext(econtext);
-				econtext->ecxt_scantuple = in;
-
-				if (ExecQual(qual, econtext))
-				{
-					TupleBatchStoreInOut(b, qualified, in);
-					qualified++;
-				}
-				else
-					InstrCountFiltered1(node, 1);
+				qualified = ExecQualBatch(qual_batch, econtext, b);
 			}
+			else
+			{
+				while (TupleBatchHasMore(b))
+				{
+					TupleTableSlot *slot = TupleBatchGetNextSlot(b);
+
+					Assert(slot);
+					econtext->ecxt_scantuple = slot;
+					if (ExecQual(qual, econtext))
+					{
+						TupleBatchStoreInOut(b, qualified, slot);
+						qualified++;
+					}
+				}
+			}
+			InstrCountFiltered1(node, b->nvalid - qualified);
+			/* Update count and start using b->outslots. */
 			TupleBatchUseOutput(b, qualified);
 		}
 		else

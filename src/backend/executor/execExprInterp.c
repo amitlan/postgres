@@ -608,6 +608,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_BUILD_SCAN_BATCH_VECTOR,
 		&&CASE_EEOP_AGG_PLAIN_TRANS_BATCH_ROWLOOP,
 		&&CASE_EEOP_AGG_PLAIN_TRANS_BATCH_DIRECT,
+		&&CASE_EEOP_QUAL_BATCH_INITMASK,
+		&&CASE_EEOP_QUAL_BATCH_TERM,
 		&&CASE_EEOP_LAST
 	};
 
@@ -2350,7 +2352,19 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* too complex for an inline implementation */
 			ExecAggPlainTransBatch(state, op, econtext);
+			EEO_NEXT();
+		}
 
+
+		EEO_CASE(EEOP_QUAL_BATCH_INITMASK)
+		{
+			ExecQualBatchInitMask(state, op, econtext);
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_QUAL_BATCH_TERM)
+		{
+			ExecQualBatchTerm(state, op, econtext);
 			EEO_NEXT();
 		}
 
@@ -6184,4 +6198,188 @@ ExecAggPlainTransBatch(ExprState *state, ExprEvalStep *op, ExprContext *econtext
 		default:
 			elog(ERROR, "invalid ExprEvalOp in ExecAggPlainTransBatch()");
 	}
+}
+
+/* set mask bits [0..nvalid_bits) to 1; clear padding in the last word */
+static inline void
+mask_init_all_ones(uint64 *a, int nwords, int nvalid_bits)
+{
+	for (int i = 0; i < nwords; i++)
+		a[i] = ~UINT64CONST(0);
+
+	if ((nvalid_bits & 63) != 0)
+	{
+		int rem = nvalid_bits & 63;
+
+		a[nwords - 1] &= (~UINT64CONST(0)) >> (64 - rem);
+	}
+}
+
+static inline void
+mask_clear_bit(uint64 *a, int i)
+{
+	a[i >> 6] &= ~(UINT64CONST(1) << (i & 63));
+}
+
+void
+ExecQualBatchInitMask(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	BatchVector *bv = op->d.qualbatch_init.bv;
+	uint64      *mask = op->d.qualbatch_init.mask;
+	int          nwords = op->d.qualbatch_init.mask_words;
+	int          n = bv->nrows;
+
+	/* initialize to all-pass for current batch size */
+	mask_init_all_ones(mask, nwords, n);
+}
+
+void
+ExecQualBatchTerm(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	BatchVector    *bv   = op->d.qualbatch_term.bv;
+	uint64         *mask = op->d.qualbatch_term.mask;
+	BatchQualTerm  *t    = op->d.qualbatch_term.term;
+	int             n    = bv->nrows;
+
+	switch (t->kind)
+	{
+		case BQTK_IS_NULL:
+		{
+			/* keep bit set only if value IS NULL; clear otherwise */
+			for (int i = 0; i < n; i++)
+			{
+				if (!bv->nulls[t->l_off][i])
+					mask_clear_bit(mask, i);
+			}
+			break;
+		}
+
+		case BQTK_IS_NOT_NULL:
+		{
+			/* keep bit set only if value IS NOT NULL; clear if NULL */
+			for (int i = 0; i < n; i++)
+			{
+				if (bv->nulls[t->l_off][i])
+					mask_clear_bit(mask, i);
+			}
+			break;
+		}
+
+		case BQTK_VAR_CONST:
+		{
+			const bool  r_isnull = t->r_isnull;
+			const Datum r_const  = t->r_const;
+			const bool  strict   = t->strict;
+			const Oid   coll     = t->collation;
+			FmgrInfo   *finfo    = t->finfo;
+			int         loff     = t->l_off;
+
+			for (int i = 0; i < n; i++)
+			{
+				bool ln = bv->nulls[loff][i];
+				bool pass;
+
+				/* WHERE treats NULL as false; strict ops short-circuit */
+				if (strict && (ln || r_isnull))
+					pass = false;
+				else
+				{
+					Datum lv = bv->cols[loff][i];
+
+					pass = DatumGetBool(FunctionCall2Coll(finfo, coll, lv, r_const));
+				}
+
+				if (!pass)
+					mask_clear_bit(mask, i);
+			}
+			break;
+		}
+
+		case BQTK_VAR_VAR:
+		{
+			const bool  strict = t->strict;
+			const Oid   coll   = t->collation;
+			FmgrInfo   *finfo  = t->finfo;
+			int         loff   = t->l_off;
+			int         roff   = t->r_off;
+
+			for (int i = 0; i < n; i++)
+			{
+				bool  ln = bv->nulls[loff][i];
+				bool  rn = bv->nulls[roff][i];
+				bool  pass;
+
+				if (strict && (ln || rn))
+					pass = false;
+				else
+				{
+					Datum lv = bv->cols[loff][i];
+					Datum rv = bv->cols[roff][i];
+
+					pass = DatumGetBool(FunctionCall2Coll(finfo, coll, lv, rv));
+				}
+
+				if (!pass)
+					mask_clear_bit(mask, i);
+			}
+			break;
+		}
+
+		default:
+			/* should not happen; leave mask unchanged */
+			break;
+	}
+}
+
+static inline bool
+mask_is_empty(const uint64 *mask, int nwords)
+{
+	for (int i = 0; i < nwords; i++)
+	{
+		if (mask[i] != 0)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * ExecQualBatch
+ *		Evaluate a compiled qual (EEOP_QUAL) for a batch of rows.
+ *
+ * Returns the number of true rows (optional convenience for callers).
+ */
+int
+ExecQualBatch(ExprState *state, ExprContext *econtext, TupleBatch *b)
+{
+	int		i;
+	uint64 *mask;
+	int		kept = 0;
+	BatchQualRuntime *rt = ExecGetBatchQualRuntime(state);;
+
+	/* verify that expression was compiled using ExecInitQual */
+	Assert(state->flags & EEO_FLAG_IS_QUAL);
+	Assert(rt && rt->mask && rt->mask_words);
+
+	/* run the batched EEOP program once */
+	econtext->scan_batch = b;
+	ExecEvalExprNoReturn(state, econtext);
+
+	mask = rt->mask;
+	if (mask_is_empty(mask, rt->mask_words))
+		return 0;
+
+	/* Add survivors into outslots */
+	TupleBatchRewind(b);
+	i = 0;
+	while (TupleBatchHasMore(b))
+	{
+		TupleTableSlot *slot = TupleBatchGetNextSlot(b);
+
+		/* mask bit set => row survives */
+		if (mask[i >> 6] & (UINT64CONST(1) << (i & 63)))
+			TupleBatchStoreInOut(b, kept++, slot);
+		i++;
+	}
+
+	return kept;
 }

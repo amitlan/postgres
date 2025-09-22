@@ -3033,6 +3033,17 @@ llvm_compile_expr(ExprState *state)
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
+			case EEOP_QUAL_BATCH_INITMASK:
+				build_EvalXFunc(b, mod, "ExecQualBatchInitMask",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+			case EEOP_QUAL_BATCH_TERM:
+				build_EvalXFunc(b, mod, "ExecQualBatchTerm",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
 			case EEOP_LAST:
 				Assert(false);
 				break;

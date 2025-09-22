@@ -187,4 +187,6 @@ void	   *referenced_functions[] =
 	ExecBuildOuterBatchVector,
 	ExecBuildScanBatchVector,
 	ExecAggPlainTransBatch,
+	ExecQualBatchInitMask,
+	ExecQualBatchTerm,
 };

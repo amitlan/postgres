@@ -336,6 +336,7 @@ ExecProcNodeBatch(PlanState *node)
 extern ExprState *ExecInitExpr(Expr *node, PlanState *parent);
 extern ExprState *ExecInitExprWithParams(Expr *node, ParamListInfo ext_params);
 extern ExprState *ExecInitQual(List *qual, PlanState *parent);
+extern ExprState *ExecInitQualBatch(PlanState *ps);
 extern ExprState *ExecInitCheck(List *qual, PlanState *parent);
 extern List *ExecInitExprList(List *nodes, PlanState *parent);
 extern ExprState *ExecBuildAggTrans(AggState *aggstate, struct AggStatePerPhaseData *phase,
@@ -583,6 +584,8 @@ AggGetBulkArgs(FunctionCallInfo fcinfo)
 	return (AggBulkArgs *) (fcinfo->flinfo ? fcinfo->flinfo->fn_extra : NULL);
 }
 #endif
+
+extern int ExecQualBatch(ExprState *state, ExprContext *econtext, TupleBatch *b);
 
 extern bool ExecCheck(ExprState *state, ExprContext *econtext);
 
