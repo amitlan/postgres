@@ -59,6 +59,7 @@
 #include "access/heaptoast.h"
 #include "catalog/pg_type.h"
 #include "commands/sequence.h"
+#include "executor/execBatch.h"
 #include "executor/execExpr.h"
 #include "executor/nodeSubplan.h"
 #include "funcapi.h"
@@ -187,6 +188,11 @@ static pg_attribute_always_inline void ExecAggPlainTransByRef(AggState *aggstate
 															  ExprContext *aggcontext,
 															  int setno);
 static char *ExecGetJsonValueItemString(JsonbValue *item, bool *resnull);
+
+static pg_attribute_always_inline void ExecBuildBatchVector(ExprState *state,
+															ExprEvalStep *op,
+															ExprContext *econtext,
+															TupleBatch *b);
 
 /*
  * ScalarArrayOpExprHashEntry
@@ -446,7 +452,6 @@ ExecReadyInterpretedExpr(ExprState *state)
 	state->evalfunc_private = ExecInterpExpr;
 }
 
-
 /*
  * Evaluate expression identified by "state" in the execution context
  * given by "econtext".  *isnull is set to the is-null flag for the result,
@@ -466,6 +471,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 	TupleTableSlot *scanslot;
 	TupleTableSlot *oldslot;
 	TupleTableSlot *newslot;
+	TupleBatch *innerbatch;
+	TupleBatch *outerbatch;
+	TupleBatch *scanbatch;
 
 	/*
 	 * This array has to be in the same order as enum ExprEvalOp.
@@ -479,6 +487,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_SCAN_FETCHSOME,
 		&&CASE_EEOP_OLD_FETCHSOME,
 		&&CASE_EEOP_NEW_FETCHSOME,
+		&&CASE_EEOP_INNER_FETCHSOME_BATCH,
+		&&CASE_EEOP_OUTER_FETCHSOME_BATCH,
+		&&CASE_EEOP_SCAN_FETCHSOME_BATCH,
 		&&CASE_EEOP_INNER_VAR,
 		&&CASE_EEOP_OUTER_VAR,
 		&&CASE_EEOP_SCAN_VAR,
@@ -592,6 +603,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_AGG_PRESORTED_DISTINCT_MULTI,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_DATUM,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_TUPLE,
+		&&CASE_EEOP_BUILD_INNER_BATCH_VECTOR,
+		&&CASE_EEOP_BUILD_OUTER_BATCH_VECTOR,
+		&&CASE_EEOP_BUILD_SCAN_BATCH_VECTOR,
 		&&CASE_EEOP_LAST
 	};
 
@@ -612,6 +626,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 	scanslot = econtext->ecxt_scantuple;
 	oldslot = econtext->ecxt_oldtuple;
 	newslot = econtext->ecxt_newtuple;
+	innerbatch = econtext->inner_batch;
+	outerbatch = econtext->outer_batch;
+	scanbatch = econtext->scan_batch;
 
 #if defined(EEO_USE_COMPUTED_GOTO)
 	EEO_DISPATCH();
@@ -654,6 +671,36 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			CheckOpSlotCompatibility(op, scanslot);
 
 			slot_getsomeattrs(scanslot, op->d.fetch.last_var);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_INNER_FETCHSOME_BATCH)
+		{
+			CheckOpSlotCompatibility(op, innerslot);
+
+			Assert(innerbatch);
+			slot_getsomeattrs_batch(innerbatch, op->d.fetch_batch.last_var);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_OUTER_FETCHSOME_BATCH)
+		{
+			CheckOpSlotCompatibility(op, outerslot);
+
+			Assert(outerbatch);
+			slot_getsomeattrs_batch(outerbatch, op->d.fetch_batch.last_var);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_SCAN_FETCHSOME_BATCH)
+		{
+			CheckOpSlotCompatibility(op, scanslot);
+
+			Assert(scanbatch);
+			slot_getsomeattrs_batch(scanbatch, op->d.fetch_batch.last_var);
 
 			EEO_NEXT();
 		}
@@ -2261,6 +2308,30 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* too complex for an inline implementation */
 			ExecEvalAggOrderedTransTuple(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_BUILD_INNER_BATCH_VECTOR)
+		{
+			/* too complex for an inline implementation */
+			ExecBuildInnerBatchVector(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_BUILD_OUTER_BATCH_VECTOR)
+		{
+			/* too complex for an inline implementation */
+			ExecBuildOuterBatchVector(state, op, econtext);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_BUILD_SCAN_BATCH_VECTOR)
+		{
+			/* too complex for an inline implementation */
+			ExecBuildScanBatchVector(state, op, econtext);
 
 			EEO_NEXT();
 		}
@@ -5913,4 +5984,58 @@ ExecAggPlainTransByRef(AggState *aggstate, AggStatePerTrans pertrans,
 	pergroup->transValueIsNull = fcinfo->isnull;
 
 	MemoryContextSwitchTo(oldContext);
+}
+
+void
+ExecBuildInnerBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	Assert(econtext->inner_batch);
+	ExecBuildBatchVector(state, op, econtext, econtext->inner_batch);
+}
+
+void
+ExecBuildOuterBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	Assert(econtext->outer_batch);
+	ExecBuildBatchVector(state, op, econtext, econtext->outer_batch);
+}
+
+void
+ExecBuildScanBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	Assert(econtext->scan_batch);
+	ExecBuildBatchVector(state, op, econtext, econtext->scan_batch);
+}
+
+static pg_attribute_always_inline void
+ExecBuildBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
+					 TupleBatch *b)
+{
+	struct BatchVector *bv = op->d.batch_vector.bv;
+	int		i = 0;
+
+	if (bv->ncols == 0)
+		return;
+
+	/* Fetch each requested attribute into column vectors. */
+	TupleBatchRewind(b);
+	while (TupleBatchHasMore(b))
+	{
+		TupleTableSlot *slot = TupleBatchGetNextSlot(b);
+
+		for (int j = 0; j < bv->ncols; j++)
+		{
+			AttrNumber attno = bv->attnos[j];
+			Datum  *cols  = bv->cols[j];
+			bool   *nulls  = bv->nulls[j];
+
+			Assert(attno <= slot->tts_nvalid);
+			cols[i] = slot->tts_values[attno - 1];
+			nulls[i] = slot->tts_isnull[attno - 1];
+			if (!bv->hasnull && nulls[i])
+				bv->hasnull = true;
+		}
+		i++;
+	}
+	bv->nrows = i;
 }

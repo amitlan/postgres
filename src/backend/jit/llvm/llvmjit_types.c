@@ -179,7 +179,11 @@ void	   *referenced_functions[] =
 	MakeExpandedObjectReadOnlyInternal,
 	slot_getmissingattrs,
 	slot_getsomeattrs_int,
+	slot_getsomeattrs_batch,
 	strlen,
 	varsize_any,
 	ExecInterpExprStillValid,
+	ExecBuildInnerBatchVector,
+	ExecBuildOuterBatchVector,
+	ExecBuildScanBatchVector,
 };

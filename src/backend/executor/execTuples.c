@@ -2111,6 +2111,38 @@ slot_getsomeattrs_int(TupleTableSlot *slot, int attnum)
 	}
 }
 
+void
+slot_getsomeattrs_batch(struct TupleBatch *b, int attnum)
+{
+	while (TupleBatchHasMore(b))
+	{
+		TupleTableSlot *slot = TupleBatchGetNextSlot(b);
+
+		/* Check for caller errors */
+		Assert(attnum > 0);
+
+		if (unlikely(attnum > slot->tts_tupleDescriptor->natts))
+			elog(ERROR, "invalid attribute number %d", attnum);
+
+		/* XXX - there should perhaps also be a batch-level att_nvalid */
+		if (attnum < slot->tts_nvalid)
+			continue;
+
+		/* Fetch as many attributes as possible from the underlying tuple. */
+		slot->tts_ops->getsomeattrs(slot, attnum);
+
+		/*
+		 * If the underlying tuple doesn't have enough attributes, tuple
+		 * descriptor must have the missing attributes.
+		 */
+		if (unlikely(slot->tts_nvalid < attnum))
+		{
+			slot_getmissingattrs(slot, slot->tts_nvalid, attnum);
+			slot->tts_nvalid = attnum;
+		}
+	}
+}
+
 /* ----------------------------------------------------------------
  *		ExecTypeFromTL
  *
