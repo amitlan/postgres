@@ -993,7 +993,8 @@ extern void ExecBuildInnerBatchVector(ExprState *state, ExprEvalStep *op, ExprCo
 extern void ExecBuildOuterBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 extern void ExecBuildScanBatchVector(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 
-extern void ExecAggPlainTransBatch(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
+extern void ExecAggPlainTransBatchDirect(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
+extern void ExecAggPlainTransBatchRowloop(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 
 /* See ExecQualBatchTerm(). */
 typedef enum BatchQualTermKind
