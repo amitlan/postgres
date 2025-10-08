@@ -1269,8 +1269,8 @@ exprSetCollation(Node *expr, Oid collation)
 			{
 				JsonBehavior *behavior = (JsonBehavior *) expr;
 
-				if (behavior->expr)
-					exprSetCollation(behavior->expr, collation);
+				Assert(behavior->expr == NULL ||
+					   exprCollation(behavior->expr) == collation);
 			}
 			break;
 		case T_NullTest:
