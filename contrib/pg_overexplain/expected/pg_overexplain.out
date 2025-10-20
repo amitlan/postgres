@@ -452,6 +452,8 @@ SELECT * FROM vegetables WHERE genus = 'daucus';
  Seq Scan on daucus vegetables
    Filter: (genus = 'daucus'::text)
    Scan RTI: 2
+   Elided Node Type: Append
+   Elided Node RTIs: 1
  RTI 1 (relation, inherited, in-from-clause):
    Eref: vegetables (id, name, genus)
    Relation: vegetables
@@ -465,7 +467,7 @@ SELECT * FROM vegetables WHERE genus = 'daucus';
    Relation Kind: relation
    Relation Lock Mode: AccessShareLock
  Unprunable RTIs: 1 2
-(16 rows)
+(18 rows)
 
 -- Also test a case that involves a write.
 EXPLAIN (RANGE_TABLE, COSTS OFF)
