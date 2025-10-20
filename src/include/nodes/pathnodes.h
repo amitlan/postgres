@@ -135,6 +135,9 @@ typedef struct PlannerGlobal
 	/* "flat" list of RTEPermissionInfos */
 	List	   *finalrteperminfos;
 
+	/* list of SubPlanRTInfo nodes */
+	List	   *subrtinfos;
+
 	/* "flat" list of PlanRowMarks */
 	List	   *finalrowmarks;
 
