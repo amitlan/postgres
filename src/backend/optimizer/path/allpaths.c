@@ -128,8 +128,10 @@ static Path *get_cheapest_parameterized_child_path(PlannerInfo *root,
 												   Relids required_outer);
 static void accumulate_append_subpath(Path *path,
 									  List **subpaths,
-									  List **special_subpaths);
-static Path *get_singleton_append_subpath(Path *path);
+									  List **special_subpaths,
+									  List **child_append_relid_sets);
+static Path *get_singleton_append_subpath(Path *path,
+										  List **child_append_relid_sets);
 static void set_dummy_rel_pathlist(RelOptInfo *rel);
 static void set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 								  Index rti, RangeTblEntry *rte);
@@ -1406,11 +1408,15 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 {
 	List	   *subpaths = NIL;
 	bool		subpaths_valid = true;
+	List	   *subpath_cars = NIL;
 	List	   *startup_subpaths = NIL;
 	bool		startup_subpaths_valid = true;
+	List	   *startup_subpath_cars = NIL;
 	List	   *partial_subpaths = NIL;
+	List	   *partial_subpath_cars = NIL;
 	List	   *pa_partial_subpaths = NIL;
 	List	   *pa_nonpartial_subpaths = NIL;
+	List	   *pa_subpath_cars = NIL;
 	bool		partial_subpaths_valid = true;
 	bool		pa_subpaths_valid;
 	List	   *all_child_pathkeys = NIL;
@@ -1443,7 +1449,7 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		if (childrel->pathlist != NIL &&
 			childrel->cheapest_total_path->param_info == NULL)
 			accumulate_append_subpath(childrel->cheapest_total_path,
-									  &subpaths, NULL);
+									  &subpaths, NULL, &subpath_cars);
 		else
 			subpaths_valid = false;
 
@@ -1472,7 +1478,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 			Assert(cheapest_path->param_info == NULL);
 			accumulate_append_subpath(cheapest_path,
 									  &startup_subpaths,
-									  NULL);
+									  NULL,
+									  &startup_subpath_cars);
 		}
 		else
 			startup_subpaths_valid = false;
@@ -1483,7 +1490,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 		{
 			cheapest_partial_path = linitial(childrel->partial_pathlist);
 			accumulate_append_subpath(cheapest_partial_path,
-									  &partial_subpaths, NULL);
+									  &partial_subpaths, NULL,
+									  &partial_subpath_cars);
 		}
 		else
 			partial_subpaths_valid = false;
@@ -1512,7 +1520,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 				Assert(cheapest_partial_path != NULL);
 				accumulate_append_subpath(cheapest_partial_path,
 										  &pa_partial_subpaths,
-										  &pa_nonpartial_subpaths);
+										  &pa_nonpartial_subpaths,
+										  &pa_subpath_cars);
 			}
 			else
 			{
@@ -1531,7 +1540,8 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 				 */
 				accumulate_append_subpath(nppath,
 										  &pa_nonpartial_subpaths,
-										  NULL);
+										  NULL,
+										  &pa_subpath_cars);
 			}
 		}
 
@@ -1606,14 +1616,16 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 	 * if we have zero or one live subpath due to constraint exclusion.)
 	 */
 	if (subpaths_valid)
-		add_path(rel, (Path *) create_append_path(root, rel, subpaths, NIL,
+		add_path(rel, (Path *) create_append_path(root, rel, subpaths,
+												  NIL, subpath_cars,
 												  NIL, NULL, 0, false,
 												  -1));
 
 	/* build an AppendPath for the cheap startup paths, if valid */
 	if (startup_subpaths_valid)
 		add_path(rel, (Path *) create_append_path(root, rel, startup_subpaths,
-												  NIL, NIL, NULL, 0, false, -1));
+												  NIL, startup_subpath_cars,
+												  NIL, NULL, 0, false, -1));
 
 	/*
 	 * Consider an append of unordered, unparameterized partial paths.  Make
@@ -1654,6 +1666,7 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 
 		/* Generate a partial append path. */
 		appendpath = create_append_path(root, rel, NIL, partial_subpaths,
+										partial_subpath_cars,
 										NIL, NULL, parallel_workers,
 										enable_parallel_append,
 										-1);
@@ -1704,6 +1717,7 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 
 		appendpath = create_append_path(root, rel, pa_nonpartial_subpaths,
 										pa_partial_subpaths,
+										pa_subpath_cars,
 										NIL, NULL, parallel_workers, true,
 										partial_rows);
 		add_partial_path(rel, (Path *) appendpath);
@@ -1737,6 +1751,7 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 
 		/* Select the child paths for an Append with this parameterization */
 		subpaths = NIL;
+		subpath_cars = NIL;
 		subpaths_valid = true;
 		foreach(lcr, live_childrels)
 		{
@@ -1759,12 +1774,13 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 				subpaths_valid = false;
 				break;
 			}
-			accumulate_append_subpath(subpath, &subpaths, NULL);
+			accumulate_append_subpath(subpath, &subpaths, NULL,
+									  &subpath_cars);
 		}
 
 		if (subpaths_valid)
 			add_path(rel, (Path *)
-					 create_append_path(root, rel, subpaths, NIL,
+					 create_append_path(root, rel, subpaths, NIL, subpath_cars,
 										NIL, required_outer, 0, false,
 										-1));
 	}
@@ -1791,6 +1807,7 @@ add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 				continue;
 
 			appendpath = create_append_path(root, rel, NIL, list_make1(path),
+											list_make1(rel->relids),
 											NIL, NULL,
 											path->parallel_workers, true,
 											partial_rows);
@@ -1874,8 +1891,11 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 	{
 		List	   *pathkeys = (List *) lfirst(lcp);
 		List	   *startup_subpaths = NIL;
+		List	   *startup_subpath_cars = NIL;
 		List	   *total_subpaths = NIL;
+		List	   *total_subpath_cars = NIL;
 		List	   *fractional_subpaths = NIL;
+		List	   *fractional_subpath_cars = NIL;
 		bool		startup_neq_total = false;
 		bool		fraction_neq_total = false;
 		bool		match_partition_order;
@@ -2038,16 +2058,23 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				 * just a single subpath (and hence aren't doing anything
 				 * useful).
 				 */
-				cheapest_startup = get_singleton_append_subpath(cheapest_startup);
-				cheapest_total = get_singleton_append_subpath(cheapest_total);
+				cheapest_startup =
+					get_singleton_append_subpath(cheapest_startup,
+												 &startup_subpath_cars);
+				cheapest_total =
+					get_singleton_append_subpath(cheapest_total,
+												 &total_subpath_cars);
 
 				startup_subpaths = lappend(startup_subpaths, cheapest_startup);
 				total_subpaths = lappend(total_subpaths, cheapest_total);
 
 				if (cheapest_fractional)
 				{
-					cheapest_fractional = get_singleton_append_subpath(cheapest_fractional);
-					fractional_subpaths = lappend(fractional_subpaths, cheapest_fractional);
+					cheapest_fractional =
+						get_singleton_append_subpath(cheapest_fractional,
+													 &fractional_subpath_cars);
+					fractional_subpaths =
+						lappend(fractional_subpaths, cheapest_fractional);
 				}
 			}
 			else
@@ -2057,13 +2084,16 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				 * child paths for the MergeAppend.
 				 */
 				accumulate_append_subpath(cheapest_startup,
-										  &startup_subpaths, NULL);
+										  &startup_subpaths, NULL,
+										  &startup_subpath_cars);
 				accumulate_append_subpath(cheapest_total,
-										  &total_subpaths, NULL);
+										  &total_subpaths, NULL,
+										  &total_subpath_cars);
 
 				if (cheapest_fractional)
 					accumulate_append_subpath(cheapest_fractional,
-											  &fractional_subpaths, NULL);
+											  &fractional_subpaths, NULL,
+											  &fractional_subpath_cars);
 			}
 		}
 
@@ -2075,6 +2105,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 													  rel,
 													  startup_subpaths,
 													  NIL,
+													  startup_subpath_cars,
 													  pathkeys,
 													  NULL,
 													  0,
@@ -2085,6 +2116,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 														  rel,
 														  total_subpaths,
 														  NIL,
+														  total_subpath_cars,
 														  pathkeys,
 														  NULL,
 														  0,
@@ -2096,6 +2128,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 														  rel,
 														  fractional_subpaths,
 														  NIL,
+														  fractional_subpath_cars,
 														  pathkeys,
 														  NULL,
 														  0,
@@ -2108,12 +2141,14 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 			add_path(rel, (Path *) create_merge_append_path(root,
 															rel,
 															startup_subpaths,
+															startup_subpath_cars,
 															pathkeys,
 															NULL));
 			if (startup_neq_total)
 				add_path(rel, (Path *) create_merge_append_path(root,
 																rel,
 																total_subpaths,
+																total_subpath_cars,
 																pathkeys,
 																NULL));
 
@@ -2121,6 +2156,7 @@ generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 				add_path(rel, (Path *) create_merge_append_path(root,
 																rel,
 																fractional_subpaths,
+																fractional_subpath_cars,
 																pathkeys,
 																NULL));
 		}
@@ -2223,7 +2259,8 @@ get_cheapest_parameterized_child_path(PlannerInfo *root, RelOptInfo *rel,
  * paths).
  */
 static void
-accumulate_append_subpath(Path *path, List **subpaths, List **special_subpaths)
+accumulate_append_subpath(Path *path, List **subpaths, List **special_subpaths,
+						  List **child_append_relid_sets)
 {
 	if (IsA(path, AppendPath))
 	{
@@ -2232,6 +2269,8 @@ accumulate_append_subpath(Path *path, List **subpaths, List **special_subpaths)
 		if (!apath->path.parallel_aware || apath->first_partial_path == 0)
 		{
 			*subpaths = list_concat(*subpaths, apath->subpaths);
+			*child_append_relid_sets =
+				lappend(*child_append_relid_sets, path->parent->relids);
 			return;
 		}
 		else if (special_subpaths != NULL)
@@ -2246,6 +2285,8 @@ accumulate_append_subpath(Path *path, List **subpaths, List **special_subpaths)
 												  apath->first_partial_path);
 			*special_subpaths = list_concat(*special_subpaths,
 											new_special_subpaths);
+			*child_append_relid_sets =
+				lappend(*child_append_relid_sets, path->parent->relids);
 			return;
 		}
 	}
@@ -2254,6 +2295,8 @@ accumulate_append_subpath(Path *path, List **subpaths, List **special_subpaths)
 		MergeAppendPath *mpath = (MergeAppendPath *) path;
 
 		*subpaths = list_concat(*subpaths, mpath->subpaths);
+		*child_append_relid_sets =
+			lappend(*child_append_relid_sets, path->parent->relids);
 		return;
 	}
 
@@ -2265,10 +2308,15 @@ accumulate_append_subpath(Path *path, List **subpaths, List **special_subpaths)
  *		Returns the single subpath of an Append/MergeAppend, or just
  *		return 'path' if it's not a single sub-path Append/MergeAppend.
  *
+ * As a side effect, whenever we return a single subpath rather than the
+ * original path, add the relid set for the original path to
+ * child_append_relid_sets, so that those relids don't entirely disappear
+ * from the final plan.
+ *
  * Note: 'path' must not be a parallel-aware path.
  */
 static Path *
-get_singleton_append_subpath(Path *path)
+get_singleton_append_subpath(Path *path, List **child_append_relid_sets)
 {
 	Assert(!path->parallel_aware);
 
@@ -2277,14 +2325,22 @@ get_singleton_append_subpath(Path *path)
 		AppendPath *apath = (AppendPath *) path;
 
 		if (list_length(apath->subpaths) == 1)
+		{
+			*child_append_relid_sets =
+				lappend(*child_append_relid_sets, path->parent->relids);
 			return (Path *) linitial(apath->subpaths);
+		}
 	}
 	else if (IsA(path, MergeAppendPath))
 	{
 		MergeAppendPath *mpath = (MergeAppendPath *) path;
 
 		if (list_length(mpath->subpaths) == 1)
+		{
+			*child_append_relid_sets =
+				lappend(*child_append_relid_sets, path->parent->relids);
 			return (Path *) linitial(mpath->subpaths);
+		}
 	}
 
 	return path;
@@ -2313,7 +2369,7 @@ set_dummy_rel_pathlist(RelOptInfo *rel)
 	rel->partial_pathlist = NIL;
 
 	/* Set up the dummy path */
-	add_path(rel, (Path *) create_append_path(NULL, rel, NIL, NIL,
+	add_path(rel, (Path *) create_append_path(NULL, rel, NIL, NIL, NIL,
 											  NIL, rel->lateral_relids,
 											  0, false, -1));
 

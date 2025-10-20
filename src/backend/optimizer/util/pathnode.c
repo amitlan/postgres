@@ -1300,6 +1300,7 @@ AppendPath *
 create_append_path(PlannerInfo *root,
 				   RelOptInfo *rel,
 				   List *subpaths, List *partial_subpaths,
+				   List *child_append_relid_sets,
 				   List *pathkeys, Relids required_outer,
 				   int parallel_workers, bool parallel_aware,
 				   double rows)
@@ -1309,6 +1310,7 @@ create_append_path(PlannerInfo *root,
 
 	Assert(!parallel_aware || parallel_workers > 0);
 
+	pathnode->child_append_relid_sets = child_append_relid_sets;
 	pathnode->path.pathtype = T_Append;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = rel->reltarget;
@@ -1471,6 +1473,7 @@ MergeAppendPath *
 create_merge_append_path(PlannerInfo *root,
 						 RelOptInfo *rel,
 						 List *subpaths,
+						 List *child_append_relid_sets,
 						 List *pathkeys,
 						 Relids required_outer)
 {
@@ -1486,6 +1489,7 @@ create_merge_append_path(PlannerInfo *root,
 	 */
 	Assert(bms_is_empty(rel->lateral_relids) && bms_is_empty(required_outer));
 
+	pathnode->child_append_relid_sets = child_append_relid_sets;
 	pathnode->path.pathtype = T_MergeAppend;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = rel->reltarget;
@@ -3950,6 +3954,7 @@ reparameterize_path(PlannerInfo *root, Path *path,
 				}
 				return (Path *)
 					create_append_path(root, rel, childpaths, partialpaths,
+									   apath->child_append_relid_sets,
 									   apath->path.pathkeys, required_outer,
 									   apath->path.parallel_workers,
 									   apath->path.parallel_aware,

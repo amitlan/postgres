@@ -70,12 +70,14 @@ extern TidRangePath *create_tidrangescan_path(PlannerInfo *root,
 											  Relids required_outer);
 extern AppendPath *create_append_path(PlannerInfo *root, RelOptInfo *rel,
 									  List *subpaths, List *partial_subpaths,
+									  List *child_append_relid_sets,
 									  List *pathkeys, Relids required_outer,
 									  int parallel_workers, bool parallel_aware,
 									  double rows);
 extern MergeAppendPath *create_merge_append_path(PlannerInfo *root,
 												 RelOptInfo *rel,
 												 List *subpaths,
+												 List *child_append_relid_sets,
 												 List *pathkeys,
 												 Relids required_outer);
 extern GroupResultPath *create_group_result_path(PlannerInfo *root,

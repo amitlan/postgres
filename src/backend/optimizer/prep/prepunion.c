@@ -843,7 +843,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 	 * union child.
 	 */
 	apath = (Path *) create_append_path(root, result_rel, cheapest_pathlist,
-										NIL, NIL, NULL, 0, false, -1);
+										NIL, NIL, NIL, NULL, 0, false, -1);
 
 	/*
 	 * Estimate number of groups.  For now we just assume the output is unique
@@ -889,7 +889,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 
 		papath = (Path *)
 			create_append_path(root, result_rel, NIL, partial_pathlist,
-							   NIL, NULL, parallel_workers,
+							   NIL, NIL, NULL, parallel_workers,
 							   enable_parallel_append, -1);
 		gpath = (Path *)
 			create_gather_path(root, result_rel, papath,
@@ -1018,6 +1018,7 @@ generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
 			path = (Path *) create_merge_append_path(root,
 													 result_rel,
 													 ordered_pathlist,
+													 NIL,
 													 union_pathkeys,
 													 NULL);
 
@@ -1224,8 +1225,10 @@ generate_nonunion_paths(SetOperationStmt *op, PlannerInfo *root,
 				 * between the set op targetlist and the targetlist of the
 				 * left input.  The Append will be removed in setrefs.c.
 				 */
-				apath = (Path *) create_append_path(root, result_rel, list_make1(lpath),
-													NIL, NIL, NULL, 0, false, -1);
+				apath = (Path *) create_append_path(root, result_rel,
+													list_make1(lpath),
+													NIL, NIL, NIL, NULL, 0,
+													false, -1);
 
 				add_path(result_rel, apath);
 
