@@ -3406,3 +3406,72 @@ SET client_min_messages TO warning;
 DROP SCHEMA fkpart12 CASCADE;
 RESET client_min_messages;
 RESET search_path;
+-- Test for bug where cascading UPDATE on partitioned tables could fail
+-- due to cached ResultRelInfo lacking ri_RootResultRelInfo.
+--
+-- The problem occurred when ExecGetTriggerResultRel() reused a
+-- ResultRelInfo created earlier by afterTriggerInvokeEvents() with
+-- a NULL rootRelInfo.  On a subsequent call, the cached entry was
+-- returned instead of building one with the correct rootRelInfo.
+-- This caused ExecGetChildToRootMap() to skip tuple translation,
+-- leading to incorrect tuple formats or crashes during ON UPDATE
+-- CASCADE between partitioned tables.
+--
+-- https://postgr.es/m/7DCE78D7-0520-4207-822B-92F60AEA14B4@gmail.com
+-- Parent partitioned table
+CREATE SCHEMA fkpart13
+  CREATE TABLE parted_cp_update_bug_1 (a int PRIMARY KEY, b int) PARTITION BY LIST (a)
+  CREATE TABLE parted_cp_update_bug_1_p1 PARTITION OF parted_cp_update_bug_1 FOR VALUES IN (1)
+  CREATE TABLE parted_cp_update_bug_1_p2 PARTITION OF parted_cp_update_bug_1 FOR VALUES IN (2)
+-- Child 1. Partitioned. One child is attached after column surgery to
+-- mirror Dmitry's case where the ResultRelInfo cache path is exercised.
+  CREATE TABLE parted_cp_update_bug_2 (a int PRIMARY KEY, b int,
+	FOREIGN KEY (a) REFERENCES parted_cp_update_bug_1 ON UPDATE CASCADE) PARTITION BY LIST (a)
+  CREATE TABLE parted_cp_update_bug_2_p1 PARTITION OF parted_cp_update_bug_2 FOR VALUES IN (1) PARTITION BY LIST (a)
+  CREATE TABLE parted_cp_update_bug_2_p1_p1 PARTITION OF parted_cp_update_bug_2_p1 FOR VALUES IN (1)
+  CREATE TABLE parted_cp_update_bug_2_p2 (a int NOT NULL, c int, b int)
+-- Child 2. Partitioned. Will reference both parent and child1.
+  CREATE TABLE parted_cp_update_bug_3 (a int, b int,
+	FOREIGN KEY (a) REFERENCES parted_cp_update_bug_1 ON UPDATE CASCADE,
+	FOREIGN KEY (a) REFERENCES parted_cp_update_bug_2 ON UPDATE CASCADE) PARTITION BY LIST (a)
+  CREATE TABLE parted_cp_update_bug_3_p1 PARTITION OF parted_cp_update_bug_3 FOR VALUES IN (1)
+  CREATE TABLE parted_cp_update_bug_3_p2 PARTITION OF parted_cp_update_bug_3 FOR VALUES IN (2);
+SET search_path TO fkpart13;
+ALTER TABLE parted_cp_update_bug_2_p2 DROP COLUMN c;
+ALTER TABLE parted_cp_update_bug_2 ATTACH PARTITION parted_cp_update_bug_2_p2 FOR VALUES IN (2);
+-- Seed rows go to the a=1 partitions
+INSERT INTO parted_cp_update_bug_1 VALUES (1, 1);
+INSERT INTO parted_cp_update_bug_2 VALUES (1, 1);
+INSERT INTO parted_cp_update_bug_3 VALUES (1, 1);
+-- Cascading update on parent. Before the fix this can take the cached
+-- ResultRelInfo without ri_RootResultRelInfo and fail to translate the tuple
+-- for the partitioned root format.  CTE is used to make the child rel
+-- parted_cp_update_bug_2_p1_p1 appear twice in the result rel lists in the
+-- top-level EState once via the parent updated in the CTE and then again via
+-- the parent updated in the main query
+WITH cte AS (UPDATE parted_cp_update_bug_2_p1 SET a = a) UPDATE parted_cp_update_bug_1 SET a = 2 WHERE a = 1;
+-- Verify that each row moved to its a=2 partition and values are intact
+SELECT tableoid::regclass AS rel, a, b FROM parted_cp_update_bug_1 ORDER BY a;
+            rel            | a | b 
+---------------------------+---+---
+ parted_cp_update_bug_1_p2 | 2 | 1
+(1 row)
+
+SELECT tableoid::regclass AS rel, a, b FROM parted_cp_update_bug_2 ORDER BY a;
+            rel            | a | b 
+---------------------------+---+---
+ parted_cp_update_bug_2_p2 | 2 | 1
+(1 row)
+
+SELECT tableoid::regclass AS rel, a, b FROM parted_cp_update_bug_3 ORDER BY a;
+            rel            | a | b 
+---------------------------+---+---
+ parted_cp_update_bug_3_p2 | 2 | 1
+(1 row)
+
+-- Clean up
+DROP TABLE parted_cp_update_bug_3 CASCADE;
+DROP TABLE parted_cp_update_bug_2 CASCADE;
+DROP TABLE parted_cp_update_bug_1 CASCADE;
+RESET client_min_messages;
+RESET search_path;
