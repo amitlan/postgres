@@ -6503,7 +6503,7 @@ Plan *
 materialize_finished_plan(Plan *subplan)
 {
 	Plan	   *matplan;
-	Path		matpath;		/* dummy for result of cost_material */
+	Path		matpath;		/* dummy for cost_material */
 	Cost		initplan_cost;
 	bool		unsafe_initplans;
 
@@ -6525,7 +6525,9 @@ materialize_finished_plan(Plan *subplan)
 	subplan->total_cost -= initplan_cost;
 
 	/* Set cost data */
+	matpath.parent = NULL;
 	cost_material(&matpath,
+				  enable_material,
 				  subplan->disabled_nodes,
 				  subplan->startup_cost,
 				  subplan->total_cost,
