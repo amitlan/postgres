@@ -7927,7 +7927,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 	 * generate_useful_gather_paths to add path(s) to the main list, and
 	 * finally zap the partial pathlist.
 	 */
-	if (rel_is_partitioned)
+	if (rel_is_partitioned && IS_SIMPLE_REL(rel))
 		rel->pathlist = NIL;
 
 	/*
@@ -7953,7 +7953,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 	}
 
 	/* Finish dropping old paths for a partitioned rel, per comment above */
-	if (rel_is_partitioned)
+	if (rel_is_partitioned && IS_SIMPLE_REL(rel))
 		rel->partial_pathlist = NIL;
 
 	/* Extract SRF-free scan/join target. */
