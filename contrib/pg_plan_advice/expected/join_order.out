@@ -1,0 +1,292 @@
+LOAD 'pg_plan_advice';
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE jo_dim1 (id integer primary key, dim1 text, val1 int)
+	WITH (autovacuum_enabled = false);
+INSERT INTO jo_dim1 (id, dim1, val1)
+	SELECT g, 'some filler text ' || g, (g % 3) + 1
+	  FROM generate_series(1,100) g;
+VACUUM ANALYZE jo_dim1;
+CREATE TABLE jo_dim2 (id integer primary key, dim2 text, val2 int)
+	WITH (autovacuum_enabled = false);
+INSERT INTO jo_dim2 (id, dim2, val2)
+	SELECT g, 'some filler text ' || g, (g % 7) + 1
+	  FROM generate_series(1,1000) g;
+VACUUM ANALYZE jo_dim2;
+CREATE TABLE jo_fact (
+	id int primary key,
+	dim1_id integer not null references jo_dim1 (id),
+	dim2_id integer not null references jo_dim2 (id)
+) WITH (autovacuum_enabled = false);
+INSERT INTO jo_fact
+	SELECT g, (g%100)+1, (g%100)+1 FROM generate_series(1,100000) g;
+VACUUM ANALYZE jo_fact;
+-- We expect to join to d2 first and then d1, since the condition on d2
+-- is more selective.
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_fact f
+	LEFT JOIN jo_dim1 d1 ON f.dim1_id = d1.id
+	LEFT JOIN jo_dim2 d2 ON f.dim2_id = d2.id
+	WHERE val1 = 1 AND val2 = 1;
+                QUERY PLAN                
+------------------------------------------
+ Hash Join
+   Hash Cond: (f.dim1_id = d1.id)
+   ->  Hash Join
+         Hash Cond: (f.dim2_id = d2.id)
+         ->  Seq Scan on jo_fact f
+         ->  Hash
+               ->  Seq Scan on jo_dim2 d2
+                     Filter: (val2 = 1)
+   ->  Hash
+         ->  Seq Scan on jo_dim1 d1
+               Filter: (val1 = 1)
+ Generated Plan Advice:
+   JOIN_ORDER(f d2 d1)
+   HASH_JOIN(d2 d1)
+   SEQ_SCAN(f d2 d1)
+   NO_GATHER(f d1 d2)
+(16 rows)
+
+-- Force a few different join orders. Some of these are very inefficient,
+-- but the planner considers them all viable.
+BEGIN;
+SET LOCAL pg_plan_advice.advice = 'join_order(f d1 d2)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_fact f
+	LEFT JOIN jo_dim1 d1 ON f.dim1_id = d1.id
+	LEFT JOIN jo_dim2 d2 ON f.dim2_id = d2.id
+	WHERE val1 = 1 AND val2 = 1;
+                QUERY PLAN                
+------------------------------------------
+ Hash Join
+   Hash Cond: (f.dim2_id = d2.id)
+   ->  Hash Join
+         Hash Cond: (f.dim1_id = d1.id)
+         ->  Seq Scan on jo_fact f
+         ->  Hash
+               ->  Seq Scan on jo_dim1 d1
+                     Filter: (val1 = 1)
+   ->  Hash
+         ->  Seq Scan on jo_dim2 d2
+               Filter: (val2 = 1)
+ Supplied Plan Advice:
+   JOIN_ORDER(f d1 d2) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d1 d2)
+   HASH_JOIN(d1 d2)
+   SEQ_SCAN(f d1 d2)
+   NO_GATHER(f d1 d2)
+(18 rows)
+
+SET LOCAL pg_plan_advice.advice = 'join_order(f d2 d1)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_fact f
+	LEFT JOIN jo_dim1 d1 ON f.dim1_id = d1.id
+	LEFT JOIN jo_dim2 d2 ON f.dim2_id = d2.id
+	WHERE val1 = 1 AND val2 = 1;
+                QUERY PLAN                
+------------------------------------------
+ Hash Join
+   Hash Cond: (f.dim1_id = d1.id)
+   ->  Hash Join
+         Hash Cond: (f.dim2_id = d2.id)
+         ->  Seq Scan on jo_fact f
+         ->  Hash
+               ->  Seq Scan on jo_dim2 d2
+                     Filter: (val2 = 1)
+   ->  Hash
+         ->  Seq Scan on jo_dim1 d1
+               Filter: (val1 = 1)
+ Supplied Plan Advice:
+   JOIN_ORDER(f d2 d1) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d2 d1)
+   HASH_JOIN(d2 d1)
+   SEQ_SCAN(f d2 d1)
+   NO_GATHER(f d1 d2)
+(18 rows)
+
+SET LOCAL pg_plan_advice.advice = 'join_order(d1 f d2)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_fact f
+	LEFT JOIN jo_dim1 d1 ON f.dim1_id = d1.id
+	LEFT JOIN jo_dim2 d2 ON f.dim2_id = d2.id
+	WHERE val1 = 1 AND val2 = 1;
+               QUERY PLAN                
+-----------------------------------------
+ Hash Join
+   Hash Cond: (f.dim2_id = d2.id)
+   ->  Hash Join
+         Hash Cond: (d1.id = f.dim1_id)
+         ->  Seq Scan on jo_dim1 d1
+               Filter: (val1 = 1)
+         ->  Hash
+               ->  Seq Scan on jo_fact f
+   ->  Hash
+         ->  Seq Scan on jo_dim2 d2
+               Filter: (val2 = 1)
+ Supplied Plan Advice:
+   JOIN_ORDER(d1 f d2) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(d1 f d2)
+   HASH_JOIN(f d2)
+   SEQ_SCAN(d1 f d2)
+   NO_GATHER(f d1 d2)
+(18 rows)
+
+SET LOCAL pg_plan_advice.advice = 'join_order(f (d1 d2))';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_fact f
+	LEFT JOIN jo_dim1 d1 ON f.dim1_id = d1.id
+	LEFT JOIN jo_dim2 d2 ON f.dim2_id = d2.id
+	WHERE val1 = 1 AND val2 = 1;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Hash Join
+   Hash Cond: ((f.dim1_id = d1.id) AND (f.dim2_id = d2.id))
+   ->  Seq Scan on jo_fact f
+   ->  Hash
+         ->  Nested Loop
+               ->  Seq Scan on jo_dim1 d1
+                     Filter: (val1 = 1)
+               ->  Materialize
+                     ->  Seq Scan on jo_dim2 d2
+                           Filter: (val2 = 1)
+ Supplied Plan Advice:
+   JOIN_ORDER(f (d1 d2)) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f (d1 d2))
+   NESTED_LOOP_MATERIALIZE(d2)
+   HASH_JOIN(d2)
+   SEQ_SCAN(f d1 d2)
+   NO_GATHER(f d1 d2)
+(18 rows)
+
+COMMIT;
+-- The unusual formulation of this query is intended to prevent the query
+-- planner from reducing the FULL JOIN to some other join type, so that we
+-- can test what happens with a join type that cannot be reordered.
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_dim1 d1
+	INNER JOIN (jo_fact f FULL JOIN jo_dim2 d2 ON f.dim2_id + 0 = d2.id + 0)
+	ON d1.id = f.dim1_id OR f.dim1_id IS NULL;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   Join Filter: ((d1.id = f.dim1_id) OR (f.dim1_id IS NULL))
+   ->  Merge Full Join
+         Merge Cond: (((d2.id + 0)) = ((f.dim2_id + 0)))
+         ->  Sort
+               Sort Key: ((d2.id + 0))
+               ->  Seq Scan on jo_dim2 d2
+         ->  Sort
+               Sort Key: ((f.dim2_id + 0))
+               ->  Seq Scan on jo_fact f
+   ->  Materialize
+         ->  Seq Scan on jo_dim1 d1
+ Generated Plan Advice:
+   JOIN_ORDER(d2 f d1)
+   MERGE_JOIN_PLAIN(f)
+   NESTED_LOOP_MATERIALIZE(d1)
+   SEQ_SCAN(d2 f d1)
+   NO_GATHER(d1 f d2)
+(18 rows)
+
+-- We should not be able to force the planner to join f to d1 first, because
+-- that is not a valid join order, but we should be able to force the planner
+-- to make either d2 or f the driving table.
+BEGIN;
+-- XXX: The advice feedback says 'partially matched' here which isn't exactly
+-- wrong given the way that flag is handled in the code, but it's at the very
+-- least confusing. Something should probably be improved here.
+SET LOCAL pg_plan_advice.advice = 'join_order(f d1 d2)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_dim1 d1
+	INNER JOIN (jo_fact f FULL JOIN jo_dim2 d2 ON f.dim2_id + 0 = d2.id + 0)
+	ON d1.id = f.dim1_id OR f.dim1_id IS NULL;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   Disabled: true
+   Join Filter: ((d1.id = f.dim1_id) OR (f.dim1_id IS NULL))
+   ->  Merge Full Join
+         Disabled: true
+         Merge Cond: (((d2.id + 0)) = ((f.dim2_id + 0)))
+         ->  Sort
+               Sort Key: ((d2.id + 0))
+               ->  Seq Scan on jo_dim2 d2
+         ->  Sort
+               Sort Key: ((f.dim2_id + 0))
+               ->  Seq Scan on jo_fact f
+   ->  Seq Scan on jo_dim1 d1
+ Supplied Plan Advice:
+   JOIN_ORDER(f d1 d2) /* partially matched */
+ Generated Plan Advice:
+   JOIN_ORDER(d2 f d1)
+   MERGE_JOIN_PLAIN(f)
+   NESTED_LOOP_PLAIN(d1)
+   SEQ_SCAN(d2 f d1)
+   NO_GATHER(d1 f d2)
+(21 rows)
+
+SET LOCAL pg_plan_advice.advice = 'join_order(f d2 d1)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_dim1 d1
+	INNER JOIN (jo_fact f FULL JOIN jo_dim2 d2 ON f.dim2_id + 0 = d2.id + 0)
+	ON d1.id = f.dim1_id OR f.dim1_id IS NULL;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   Join Filter: ((d1.id = f.dim1_id) OR (f.dim1_id IS NULL))
+   ->  Merge Full Join
+         Merge Cond: (((f.dim2_id + 0)) = ((d2.id + 0)))
+         ->  Sort
+               Sort Key: ((f.dim2_id + 0))
+               ->  Seq Scan on jo_fact f
+         ->  Sort
+               Sort Key: ((d2.id + 0))
+               ->  Seq Scan on jo_dim2 d2
+   ->  Materialize
+         ->  Seq Scan on jo_dim1 d1
+ Supplied Plan Advice:
+   JOIN_ORDER(f d2 d1) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(f d2 d1)
+   MERGE_JOIN_PLAIN(d2)
+   NESTED_LOOP_MATERIALIZE(d1)
+   SEQ_SCAN(f d2 d1)
+   NO_GATHER(d1 f d2)
+(20 rows)
+
+SET LOCAL pg_plan_advice.advice = 'join_order(d2 f d1)';
+EXPLAIN (COSTS OFF, PLAN_ADVICE)
+SELECT * FROM jo_dim1 d1
+	INNER JOIN (jo_fact f FULL JOIN jo_dim2 d2 ON f.dim2_id + 0 = d2.id + 0)
+	ON d1.id = f.dim1_id OR f.dim1_id IS NULL;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   Join Filter: ((d1.id = f.dim1_id) OR (f.dim1_id IS NULL))
+   ->  Merge Full Join
+         Merge Cond: (((d2.id + 0)) = ((f.dim2_id + 0)))
+         ->  Sort
+               Sort Key: ((d2.id + 0))
+               ->  Seq Scan on jo_dim2 d2
+         ->  Sort
+               Sort Key: ((f.dim2_id + 0))
+               ->  Seq Scan on jo_fact f
+   ->  Materialize
+         ->  Seq Scan on jo_dim1 d1
+ Supplied Plan Advice:
+   JOIN_ORDER(d2 f d1) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(d2 f d1)
+   MERGE_JOIN_PLAIN(f)
+   NESTED_LOOP_MATERIALIZE(d1)
+   SEQ_SCAN(d2 f d1)
+   NO_GATHER(d1 f d2)
+(20 rows)
+
+COMMIT;
+-- XXX: add tests for join order prefix matching
+-- XXX: join_order(justonerel) shouldn't report partially matched

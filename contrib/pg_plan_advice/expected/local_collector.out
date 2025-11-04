@@ -1,0 +1,65 @@
+CREATE EXTENSION pg_plan_advice;
+SET debug_parallel_query = off;
+-- Try clearing advice before we've collected any.
+SELECT pg_clear_collected_local_advice();
+ pg_clear_collected_local_advice 
+---------------------------------
+ 
+(1 row)
+
+-- Set a small advice collection limit so that we'll exceed it.
+SET pg_plan_advice.local_collection_limit = 2;
+-- Set up a dummy table.
+CREATE TABLE dummy_table (a int primary key, b text)
+	WITH (autovacuum_enabled = false, parallel_workers = 0);
+-- Test queries.
+SELECT * FROM dummy_table a, dummy_table b;
+ a | b | a | b 
+---+---+---+---
+(0 rows)
+
+SELECT * FROM dummy_table;
+ a | b 
+---+---
+(0 rows)
+
+-- Should return the advice from the second test query.
+SELECT advice FROM pg_get_collected_local_advice() ORDER BY id LIMIT 1;
+         advice         
+------------------------
+ SEQ_SCAN(dummy_table) +
+ NO_GATHER(dummy_table)
+(1 row)
+
+-- Now try clearing advice again.
+SELECT pg_clear_collected_local_advice();
+ pg_clear_collected_local_advice 
+---------------------------------
+ 
+(1 row)
+
+-- Raise the collection limit so that the collector uses multiple chunks.
+SET pg_plan_advice.local_collection_limit = 2000;
+-- Push a bunch of queries through the collector.
+DO $$
+BEGIN
+	FOR x IN 1..2000 LOOP
+		EXECUTE 'SELECT * FROM dummy_table';
+	END LOOP;
+END
+$$;
+-- Check that the collector worked.
+SELECT COUNT(*) FROM pg_get_collected_local_advice();
+ count 
+-------
+  2000
+(1 row)
+
+-- And clear one more time, to verify that this doesn't cause a problem
+-- even with a larger number of entries.
+SELECT pg_clear_collected_local_advice();
+ pg_clear_collected_local_advice 
+---------------------------------
+ 
+(1 row)
+
