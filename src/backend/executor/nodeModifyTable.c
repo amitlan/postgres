@@ -3034,7 +3034,16 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 			{
 				resultRelInfo->ri_RowIdAttNo =
 					ExecFindJunkAttributeInTlist(subplan->targetlist, "ctid");
-				if (!AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo))
+
+				/*
+				 * For heap relations, a ctid junk attribute must be present.
+				 * For partitioned tables, require it only when at least one
+				 * leaf result relation remains in the plan.  If the plan has
+				 * only the dummy root (no leaves), no rows can be produced
+				 * and ctid is not needed.
+				 */
+				if (!AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo) &&
+					(relkind != RELKIND_PARTITIONED_TABLE || nrels > 1))
 					elog(ERROR, "could not find junk ctid column");
 			}
 			else if (relkind == RELKIND_FOREIGN_TABLE)
