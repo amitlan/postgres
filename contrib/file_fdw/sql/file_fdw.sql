@@ -225,6 +225,40 @@ UPDATE pt set a = 1 where a = 2; -- ERROR
 SELECT tableoid::regclass, * FROM pt;
 SELECT tableoid::regclass, * FROM p1;
 SELECT tableoid::regclass, * FROM p2;
+
+-- Verify that a dummy root partitioned-table result relation works without
+-- error when all child partitions are excluded from the plan (for example,
+-- by constraint exclusion or pruning).  In this case, the executor accepts
+-- a missing ctid for the root result relation since no rows can be produced.
+-- When a foreign-table child is processed before exclusion, a tableoid junk
+-- column may still appear in the targetlist and also wholerow for update.
+
+-- Dummy-root cases where all children are excluded.
+-- With pruning off, the foreign child is processed first, then excluded
+-- by constraint exclusion. EXPLAIN shows tableoid (rewritten to NULL),
+-- and for UPDATE also wholerow as NULL::record. No ctid.
+DROP TABLE p2;
+SET enable_partition_pruning TO off;
+EXPLAIN (COSTS OFF, VERBOSE) DELETE FROM pt WHERE false;
+-- also cover wholerow for UPDATE; expect NULL::oid and NULL::record
+EXPLAIN (COSTS OFF, VERBOSE) UPDATE pt SET b = 'x' WHERE false;
+-- MERGE behaves the same here; expect NULL::oid
+EXPLAIN (COSTS OFF, VERBOSE) MERGE INTO pt t USING (VALUES (1, 'x'::text)) AS s(a, b)
+  ON false WHEN MATCHED THEN UPDATE SET b = s.b;
+
+-- With pruning on, the foreign child is pruned entirely. The plan has only
+-- the dummy root, and EXPLAIN shows ctid (and for UPDATE, ctid plus target).
+SET enable_partition_pruning TO on;
+EXPLAIN (COSTS OFF, VERBOSE) DELETE FROM pt WHERE false;
+EXPLAIN (COSTS OFF, VERBOSE) UPDATE pt SET b = 'x' WHERE false;
+
+-- Foreign child not pruned and it does not support DELETE: error.
+EXPLAIN (COSTS OFF, VERBOSE) DELETE FROM pt WHERE a = 1;
+
+-- Runtime pruning includes the foreign child in the plan; executor errors
+-- since the foreign child does not support the command.
+EXPLAIN (COSTS OFF, VERBOSE) DELETE FROM pt WHERE (SELECT false);
+
 DROP TABLE pt;
 
 -- generated column tests
