@@ -161,7 +161,7 @@ ScanCanUseBatching(ScanState *scanstate, int eflags)
 {
 	Relation	relation = scanstate->ss_currentRelation;
 
-	return	executor_batching &&
+	return	executor_batch_rows > 0 &&
 			(scanstate->ps.state->es_epq_active == NULL) &&
 			!(eflags & EXEC_FLAG_BACKWARD) &&
 			relation && table_supports_batching(relation);

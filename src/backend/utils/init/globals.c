@@ -167,4 +167,4 @@ int			subtransaction_buffers = 0;
 int			transaction_buffers = 0;
 
 /* executor batching */
-bool		executor_batching = false;
+int			executor_batch_rows = 64;
