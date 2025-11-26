@@ -2578,7 +2578,11 @@ ri_PerformCheck(const RI_ConstraintInfo *riinfo,
 						   save_sec_context | SECURITY_LOCAL_USERID_CHANGE |
 						   SECURITY_NOFORCE_RLS);
 
-	/* Finally we can run the query. */
+	/*
+	 * Finally we can run the query.
+	 *
+	 * See SPI_execute_snapshot() for why fire_triggers = false.
+	 */
 	spi_result = SPI_execute_snapshot(qplan,
 									  vals, nulls,
 									  test_snapshot, crosscheck_snapshot,
