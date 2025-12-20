@@ -242,7 +242,11 @@ SeqScanCanUseBatching(SeqScanState *scanstate, int eflags)
 static void
 SeqScanInitBatching(SeqScanState *scanstate)
 {
-	scanstate->batch = RowBatchCreate(executor_batch_rows);
+	EState	   *estate = scanstate->ss.ps.state;
+	bool		track_stats = estate->es_instrument &&
+		(estate->es_instrument & INSTRUMENT_BATCHES);
+
+	scanstate->batch = RowBatchCreate(executor_batch_rows, track_stats);
 
 	/* Choose batch variant */
 	if (scanstate->ss.ps.qual == NULL)
@@ -340,6 +344,8 @@ SeqNextBatch(SeqScanState *node)
 
 	if (!table_scan_getnextbatch(scandesc, b, direction))
 		return false;
+
+	RowBatchRecordStats(b, b->nrows);
 
 	return true;
 }
