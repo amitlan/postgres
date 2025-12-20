@@ -822,3 +822,111 @@ select explain_filter('explain (analyze,buffers off,costs off) select sum(n) ove
 (9 rows)
 
 reset work_mem;
+-- Test BATCHES option
+set executor_batch_rows = 64;
+create table batch_test (a int, b text);
+insert into batch_test select i, repeat('x', 100) from generate_series(1, 10000) i;
+analyze batch_test;
+-- BATCHES without ANALYZE should error
+explain (batches, costs off) select * from batch_test;
+ERROR:  EXPLAIN option BATCHES requires ANALYZE
+-- BATCHES without ANALYZE but with other options
+explain (batches, buffers off, costs off) select * from batch_test;
+ERROR:  EXPLAIN option BATCHES requires ANALYZE
+-- Basic: verify batch stats line appears in text format
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test');
+                         explain_filter                         
+----------------------------------------------------------------
+ Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+   Batches: N  Avg Rows: N.N  Max: N  Min: N
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(4 rows)
+
+-- With filter: batch line still appears
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test where a > 5000');
+                         explain_filter                         
+----------------------------------------------------------------
+ Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+   Filter: (a > N)
+   Rows Removed by Filter: N
+   Batches: N  Avg Rows: N.N  Max: N  Min: N
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(6 rows)
+
+-- With non-batchable qual (OR): batching still active but
+-- batch qual falls back to per-tuple ExecQual
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test where a > 5000 or b is null');
+                         explain_filter                         
+----------------------------------------------------------------
+ Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+   Filter: ((a > N) OR (b IS NULL))
+   Rows Removed by Filter: N
+   Batches: N  Avg Rows: N.N  Max: N  Min: N
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(6 rows)
+
+-- With LIMIT: batch stats appear on child Seq Scan node
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test limit 100');
+                            explain_filter                            
+----------------------------------------------------------------------
+ Limit (actual time=N.N..N.N rows=N.N loops=N)
+   ->  Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+         Batches: N  Avg Rows: N.N  Max: N  Min: N
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(5 rows)
+
+-- Verify batch stats keys present in JSON output
+select
+  j #> '{0,Plan}' ? 'Batches' as has_batches,
+  j #> '{0,Plan}' ? 'Average Batch Rows' as has_avg,
+  j #> '{0,Plan}' ? 'Max Batch Rows' as has_max,
+  j #> '{0,Plan}' ? 'Min Batch Rows' as has_min
+from explain_filter_to_json(
+  'explain (analyze, batches, buffers off, format json) select * from batch_test'
+) as j;
+ has_batches | has_avg | has_max | has_min 
+-------------+---------+---------+---------
+ t           | t       | t       | t
+(1 row)
+
+-- With LIMIT: batch stats keys on child node in JSON
+select
+  j #> '{0,Plan,Plans,0}' ? 'Batches' as child_has_batches,
+  j #> '{0,Plan,Plans,0}' ? 'Average Batch Rows' as child_has_avg,
+  j #> '{0,Plan,Plans,0}' ? 'Max Batch Rows' as child_has_max,
+  j #> '{0,Plan,Plans,0}' ? 'Min Batch Rows' as child_has_min
+from explain_filter_to_json(
+  'explain (analyze, batches, buffers off, format json) select * from batch_test limit 100'
+) as j;
+ child_has_batches | child_has_avg | child_has_max | child_has_min 
+-------------------+---------------+---------------+---------------
+ t                 | t             | t             | t
+(1 row)
+
+-- Batching disabled: no batch stats in text output
+set executor_batch_rows = 0;
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test');
+                         explain_filter                         
+----------------------------------------------------------------
+ Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(3 rows)
+
+-- Batching disabled: no batch keys in JSON
+select
+  j #> '{0,Plan}' ? 'Batches' as has_batches
+from explain_filter_to_json(
+  'explain (analyze, batches, buffers off, format json) select * from batch_test'
+) as j;
+ has_batches 
+-------------
+ f
+(1 row)
+
+reset executor_batch_rows;
+drop table batch_test;
