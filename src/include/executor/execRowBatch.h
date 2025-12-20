@@ -13,6 +13,8 @@
 #ifndef EXECROWBATCH_H
 #define EXECROWBATCH_H
 
+#include <limits.h>
+
 #include "executor/tuptable.h"
 
 typedef struct RowBatchOps RowBatchOps;
@@ -38,6 +40,13 @@ typedef struct RowBatch
 	bool		materialized;		/* tuples in slots valid? */
 
 	TupleTableSlot **slots;			/* row view */
+
+	/* Statistics (populated when EXPLAIN ANALYZE BATCHES) */
+	bool	track_stats;	/* whether to collect stats */
+	int64	stat_batches;	/* total number of batches fetched */
+	int64	stat_rows;		/* total tuples across all batches */
+	int		stat_max_rows;	/* max rows in any single batch */
+	int		stat_min_rows;	/* min rows in any single batch (non-zero) */
 } RowBatch;
 
 /*
@@ -50,8 +59,8 @@ typedef struct RowBatchOps
 } RowBatchOps;
 
 
-/* Create/teardown */
-extern RowBatch *RowBatchCreate(TupleDesc scandesc, int max_rows);
+/* Helpers */
+extern RowBatch *RowBatchCreate(TupleDesc scandesc, int capacity, bool track_stats);
 extern void RowBatchReset(RowBatch *b, bool drop_slots);
 
 /* Validation */
@@ -101,5 +110,10 @@ RowBatchMaterializeAll(RowBatch *b)
 	b->materialized = true;
 	b->pos = 0;
 }
+
+/* === Batching stats. ===*/
+
+extern void RowBatchRecordStats(RowBatch *b, int rows);
+extern double RowBatchAvgRows(RowBatch *b);
 
 #endif	/* EXECROWBATCH_H */

@@ -249,6 +249,8 @@ SeqNextBatch(SeqScanState *node)
 	if (!table_scan_getnextbatch(scandesc, b, direction))
 		return false;
 
+	RowBatchRecordStats(b, b->nrows);
+
 	return true;
 }
 
@@ -337,8 +339,10 @@ SeqScanInitBatching(SeqScanState *scanstate, int eflags)
 {
 	const int cap = executor_batch_rows;
 	TupleDesc	scandesc = RelationGetDescr(scanstate->ss.ss_currentRelation);
+	EState *estate = scanstate->ss.ps.state;
+	bool track_stats = estate->es_instrument && (estate->es_instrument & INSTRUMENT_BATCHES);
 
-	scanstate->ss.ps.ps_Batch = RowBatchCreate(scandesc, cap);
+	scanstate->ss.ps.ps_Batch = RowBatchCreate(scandesc, cap, track_stats);
 
 	/* Choose batch variant to preserve your specialization matrix */
 	if (scanstate->ss.ps.qual == NULL)
