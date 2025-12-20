@@ -13,6 +13,7 @@
 #ifndef EXECBATCH_H
 #define EXECBATCH_H
 
+#include "limits.h"
 #include "executor/tuptable.h"
 
 /*
@@ -45,11 +46,18 @@ typedef struct TupleBatch
 
 	int		nvalid;		/* number of returnable tuples in outslots */
 	int		next;		/* 0-based index of next tuple to be returned */
+
+	/* Statistics (populated when EXPLAIN ANALYZE BATCHES) */
+	bool	track_stats;	/* whether to collect stats */
+	int64	stat_batches;	/* total number of batches fetched */
+	int64	stat_rows;		/* total tuples across all batches */
+	int		stat_max_rows;	/* max rows in any single batch */
+	int		stat_min_rows;	/* min rows in any single batch (non-zero) */
 } TupleBatch;
 
 
 /* Helpers */
-extern TupleBatch *TupleBatchCreate(TupleDesc scandesc, int capacity);
+extern TupleBatch *TupleBatchCreate(TupleDesc scandesc, int capacity, bool track_stats);
 extern void TupleBatchReset(TupleBatch *b, bool drop_slots);
 extern void TupleBatchUseInput(TupleBatch *b, int nvalid);
 extern void TupleBatchUseOutput(TupleBatch *b, int nvalid);
@@ -94,6 +102,31 @@ TupleBatchMaterializeAll(TupleBatch *b)
 
 	b->ops->materialize_all(b->am_payload, b->inslots, b->ntuples);
 	TupleBatchUseInput(b, b->ntuples);
+}
+
+/* === Batching stats. ===*/
+
+static inline void
+TupleBatchRecordStats(TupleBatch *b, int rows)
+{
+	if (!b->track_stats)
+		return;
+
+	b->stat_batches++;
+	b->stat_rows += rows;
+	if (rows > b->stat_max_rows)
+		b->stat_max_rows = rows;
+	if (rows < b->stat_min_rows && rows > 0)
+		b->stat_min_rows = rows;
+}
+
+static inline double
+TupleBatchAvgRows(TupleBatch *b)
+{
+	if (b->stat_batches == 0)
+		return 0.0;
+
+	return (double) b->stat_rows / b->stat_batches;
 }
 
 #endif	/* EXECBATCH_H */

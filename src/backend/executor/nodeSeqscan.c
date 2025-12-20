@@ -213,8 +213,9 @@ SeqNextBatch(SeqScanState *node)
 	TableScanDesc scandesc;
 	EState	   *estate;
 	ScanDirection direction;
+	TupleBatch *b = node->ss.ps.ps_Batch;
 
-	Assert(node->ss.ps.ps_Batch != NULL);
+	Assert(b != NULL);
 
 	/*
 	 * get information from the estate and scan state
@@ -237,22 +238,21 @@ SeqNextBatch(SeqScanState *node)
 	}
 
 	/* Lazily create the AM batch payload. */
-	if (node->ss.ps.ps_Batch->am_payload == NULL)
+	if (b->am_payload == NULL)
 	{
 		const TableAmRoutine *tam PG_USED_FOR_ASSERTS_ONLY = scandesc->rs_rd->rd_tableam;
 
 		Assert(tam && tam->scan_begin_batch);
-		node->ss.ps.ps_Batch->am_payload =
-			table_scan_begin_batch(scandesc, node->ss.ps.ps_Batch->maxslots);
-		node->ss.ps.ps_Batch->ops = table_batch_callbacks(node->ss.ss_currentRelation);
+		b->am_payload = table_scan_begin_batch(scandesc, b->maxslots);
+		b->ops = table_batch_callbacks(node->ss.ss_currentRelation);
 	}
 
-	node->ss.ps.ps_Batch->ntuples =
-		table_scan_getnextbatch(scandesc, node->ss.ps.ps_Batch->am_payload, direction);
-	node->ss.ps.ps_Batch->nvalid = node->ss.ps.ps_Batch->ntuples;
-	node->ss.ps.ps_Batch->materialized = false;
+	b->ntuples = table_scan_getnextbatch(scandesc, b->am_payload, direction);
+	b->nvalid = b->ntuples;
+	b->materialized = false;
+	TupleBatchRecordStats(b, b->ntuples);
 
-	return node->ss.ps.ps_Batch->ntuples > 0;
+	return b->ntuples > 0;
 }
 
 static inline bool
@@ -340,8 +340,10 @@ SeqScanInitBatching(SeqScanState *scanstate, int eflags)
 {
 	const int cap = executor_batch_rows;
 	TupleDesc	scandesc = RelationGetDescr(scanstate->ss.ss_currentRelation);
+	EState *estate = scanstate->ss.ps.state;
+	bool track_stats = estate->es_instrument && (estate->es_instrument & INSTRUMENT_BATCHES);
 
-	scanstate->ss.ps.ps_Batch = TupleBatchCreate(scandesc, cap);
+	scanstate->ss.ps.ps_Batch = TupleBatchCreate(scandesc, cap, track_stats);
 
 	/* Choose batch variant to preserve your specialization matrix */
 	if (scanstate->ss.ps.qual == NULL)

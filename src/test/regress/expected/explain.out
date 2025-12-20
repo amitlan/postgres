@@ -822,3 +822,60 @@ select explain_filter('explain (analyze,buffers off,costs off) select sum(n) ove
 (9 rows)
 
 reset work_mem;
+-- Test BATCHES option
+set executor_batch_rows = 64;
+create table batch_test (a int, b text);
+insert into batch_test select i, repeat('x', 100) from generate_series(1, 10000) i;
+analyze batch_test;
+-- Basic batch stats output
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test');
+                         explain_filter                         
+----------------------------------------------------------------
+ Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+   Batches: N  Avg Rows: N.N  Max: N  Min: N
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(4 rows)
+
+-- With filter
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test where a > 5000');
+                         explain_filter                         
+----------------------------------------------------------------
+ Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+   Filter: (a > N)
+   Rows Removed by Filter: N
+   Batches: N  Avg Rows: N.N  Max: N  Min: N
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(6 rows)
+
+-- With LIMIT - partial scan shows fewer batches
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test limit 100');
+                            explain_filter                            
+----------------------------------------------------------------------
+ Limit (actual time=N.N..N.N rows=N.N loops=N)
+   ->  Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+         Batches: N  Avg Rows: N.N  Max: N  Min: N
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(5 rows)
+
+-- Batching disabled - no batch line
+set executor_batch_rows = 0;
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test');
+                         explain_filter                         
+----------------------------------------------------------------
+ Seq Scan on batch_test (actual time=N.N..N.N rows=N.N loops=N)
+ Planning Time: N.N ms
+ Execution Time: N.N ms
+(3 rows)
+
+reset executor_batch_rows;
+-- JSON format
+select explain_filter_to_json('explain (analyze, batches, buffers off, format json) select * from batch_test where a < 1000') #> '{0,Plan,Batches}';
+ ?column? 
+----------
+ 0
+(1 row)
+
+drop table batch_test;

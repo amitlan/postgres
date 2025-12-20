@@ -188,3 +188,29 @@ select explain_filter('explain (analyze,buffers off,costs off) select sum(n) ove
 -- Test tuplestore storage usage in Window aggregate (memory and disk case, final result is disk)
 select explain_filter('explain (analyze,buffers off,costs off) select sum(n) over(partition by m) from (SELECT n < 3 as m, n from generate_series(1,2500) a(n))');
 reset work_mem;
+
+-- Test BATCHES option
+set executor_batch_rows = 64;
+
+create table batch_test (a int, b text);
+insert into batch_test select i, repeat('x', 100) from generate_series(1, 10000) i;
+analyze batch_test;
+
+-- Basic batch stats output
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test');
+
+-- With filter
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test where a > 5000');
+
+-- With LIMIT - partial scan shows fewer batches
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test limit 100');
+
+-- Batching disabled - no batch line
+set executor_batch_rows = 0;
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test');
+reset executor_batch_rows;
+
+-- JSON format
+select explain_filter_to_json('explain (analyze, batches, buffers off, format json) select * from batch_test where a < 1000') #> '{0,Plan,Batches}';
+
+drop table batch_test;

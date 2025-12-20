@@ -22,6 +22,7 @@
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
 #include "commands/prepare.h"
+#include "executor/execBatch.h"
 #include "foreign/fdwapi.h"
 #include "jit/jit.h"
 #include "libpq/pqformat.h"
@@ -517,6 +518,8 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 		instrument_option |= INSTRUMENT_BUFFERS;
 	if (es->wal)
 		instrument_option |= INSTRUMENT_WAL;
+	if (es->batches)
+		instrument_option |= INSTRUMENT_BATCHES;
 
 	/*
 	 * We always collect timing for the entire statement, even when node-level
@@ -2294,6 +2297,33 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		show_buffer_usage(es, &planstate->instrument->bufusage);
 	if (es->wal && planstate->instrument)
 		show_wal_usage(es, &planstate->instrument->walusage);
+	if (es->batches && planstate->ps_Batch)
+	{
+		TupleBatch *b = planstate->ps_Batch;
+
+		if (b->stat_batches > 0)
+		{
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				ExplainIndentText(es);
+				appendStringInfo(es->str,
+								 "Batches: %lld  Avg Rows: %.1f  Max: %d  Min: %d\n",
+								 (long long) b->stat_batches,
+								 TupleBatchAvgRows(b),
+								 b->stat_max_rows,
+								 b->stat_min_rows == INT_MAX ? 0 : b->stat_min_rows);
+			}
+			else
+			{
+				ExplainPropertyInteger("Batches", NULL, b->stat_batches, es);
+				ExplainPropertyFloat("Average Batch Rows", NULL,
+									 TupleBatchAvgRows(b), 1, es);
+				ExplainPropertyInteger("Max Batch Rows", NULL, b->stat_max_rows, es);
+				ExplainPropertyInteger("Min Batch Rows", NULL,
+									   b->stat_min_rows == INT_MAX ? 0 : b->stat_min_rows, es);
+			}
+		}
+	}
 
 	/* Prepare per-worker buffer/WAL usage */
 	if (es->workers_state && (es->buffers || es->wal) && es->verbose)

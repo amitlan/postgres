@@ -19,7 +19,7 @@
  *		Allocate and initialize a new TupleBatch envelope.
  */
 TupleBatch *
-TupleBatchCreate(TupleDesc scandesc, int capacity)
+TupleBatchCreate(TupleDesc scandesc, int capacity, bool track_stats)
 {
 	TupleBatch  *b;
 	TupleTableSlot **inslots,
@@ -43,6 +43,12 @@ TupleBatchCreate(TupleDesc scandesc, int capacity)
 
 	b->nvalid = 0;
 	b->next = 0;
+
+	b->track_stats = track_stats;
+	b->stat_batches = 0;
+	b->stat_rows = 0;
+	b->stat_max_rows = 0;
+	b->stat_min_rows = INT_MAX;
 
 	return b;
 }
