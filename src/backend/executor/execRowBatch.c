@@ -19,7 +19,7 @@
  *		Allocate and initialize a new RowBatch envelope.
  */
 RowBatch *
-RowBatchCreate(TupleDesc scandesc, int max_rows)
+RowBatchCreate(TupleDesc scandesc, int max_rows, bool track_stats)
 {
 	RowBatch   *b;
 
@@ -33,6 +33,12 @@ RowBatchCreate(TupleDesc scandesc, int max_rows)
 	b->pos = 0;
 	b->materialized = false;
 	b->slots = NULL;
+
+	b->track_stats = track_stats;
+	b->stat_batches = 0;
+	b->stat_rows = 0;
+	b->stat_max_rows = 0;
+	b->stat_min_rows = INT_MAX;
 
 	return b;
 }
@@ -85,4 +91,27 @@ RowBatchReset(RowBatch *b, bool drop_slots)
 	b->nrows = 0;
 	b->pos = 0;
 	b->materialized = false;
+}
+
+void
+RowBatchRecordStats(RowBatch *b, int rows)
+{
+	if (!b->track_stats)
+		return;
+
+	b->stat_batches++;
+	b->stat_rows += rows;
+	if (rows > b->stat_max_rows)
+		b->stat_max_rows = rows;
+	if (rows < b->stat_min_rows && rows > 0)
+		b->stat_min_rows = rows;
+}
+
+double
+RowBatchAvgRows(RowBatch *b)
+{
+	if (b->stat_batches == 0)
+		return 0.0;
+
+	return (double) b->stat_rows / b->stat_batches;
 }

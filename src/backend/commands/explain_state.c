@@ -159,6 +159,8 @@ ParseExplainOptionList(ExplainState *es, List *options, ParseState *pstate)
 								"EXPLAIN", opt->defname, p),
 						 parser_errposition(pstate, opt->location)));
 		}
+		else if (strcmp(opt->defname, "batches") == 0)
+			es->batches = defGetBoolean(opt);
 		else if (!ApplyExtensionExplainOption(es, opt, pstate))
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
