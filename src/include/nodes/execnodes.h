@@ -31,6 +31,7 @@
 
 #include "access/skey.h"
 #include "access/tupconvert.h"
+#include "executor/execBatch.h"
 #include "executor/instrument.h"
 #include "executor/instrument_node.h"
 #include "fmgr.h"
@@ -1205,6 +1206,9 @@ typedef struct PlanState
 	TupleTableSlot *ps_ResultTupleSlot; /* slot for my result tuples */
 	ExprContext *ps_ExprContext;	/* node's expression-evaluation context */
 	ProjectionInfo *ps_ProjInfo;	/* info for doing tuple projection */
+
+	/* Batching state if node supports it. */
+	TupleBatch *ps_Batch;
 
 	bool		async_capable;	/* true if node is async-capable */
 

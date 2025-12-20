@@ -1640,6 +1640,35 @@ heap_begin_batch(TableScanDesc sscan, int maxitems)
 }
 
 /*
+ * heap_scan_materialize_all
+ *
+ * Bind all tuples of the current batch into 'slots'. We bind the
+ * HeapTupleData header that points into the pinned page. No per-row copy.
+ */
+void
+heap_materialize_batch_all(void *am_batch, TupleTableSlot **slots, int n)
+{
+	HeapBatch *hb = (HeapBatch *) am_batch;
+
+	Assert(n <= hb->nitems);
+
+	for (int i = 0; i < n; i++)
+	{
+		HeapTupleData *tuple = &hb->tupdata[i];
+		HeapTupleTableSlot *slot = (HeapTupleTableSlot *) slots[i];
+
+		/* Inline of ExecStoreHeapTuple(tuple, slot, false) */
+		slot->tuple = tuple;
+		slot->off = 0;
+		slot->base.tts_nvalid = 0;
+		slot->base.tts_flags &= ~(TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
+		slot->base.tts_tid = tuple->t_self;
+		slot->base.tts_tableOid = tuple->t_tableOid;
+		slot->base.tts_flags &= ~(TTS_FLAG_SHOULDFREE | TTS_FLAG_EMPTY);
+	}
+}
+
+/*
  * heap_scan_end_batch
  *
  * Release any outstanding pin and free the batch allocations. Caller will

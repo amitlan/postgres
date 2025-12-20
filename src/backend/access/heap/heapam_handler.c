@@ -72,6 +72,21 @@ heapam_slot_callbacks(Relation relation)
 	return &TTSOpsBufferHeapTuple;
 }
 
+/* ------------------------------------------------------------------------
+ * TupleBatch related callbacks for heap AM
+ * ------------------------------------------------------------------------
+ */
+
+static const TupleBatchOps TupleBatchHeapOps =
+{
+	.materialize_all = heap_materialize_batch_all
+};
+
+static const TupleBatchOps *
+heapam_batch_callbacks(Relation relation)
+{
+	return &TupleBatchHeapOps;
+}
 
 /* ------------------------------------------------------------------------
  * Index Scan Callbacks for heap AM
@@ -2631,6 +2646,7 @@ static const TableAmRoutine heapam_methods = {
 	.type = T_TableAmRoutine,
 
 	.slot_callbacks = heapam_slot_callbacks,
+	.batch_callbacks = heapam_batch_callbacks,
 
 	.scan_begin = heap_beginscan,
 	.scan_end = heap_endscan,

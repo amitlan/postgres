@@ -354,6 +354,7 @@ extern bool heap_getnextslot(TableScanDesc sscan,
 extern void *heap_begin_batch(TableScanDesc sscan, int maxitems);
 extern void heap_end_batch(TableScanDesc sscan, void *am_batch);
 extern int heap_getnextbatch(TableScanDesc sscan, void *am_batch, ScanDirection dir);
+extern void heap_materialize_batch_all(void *am_batch, TupleTableSlot **slots, int n);
 
 extern void heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 							  ItemPointer maxtid);
