@@ -22,6 +22,7 @@
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
 #include "commands/prepare.h"
+#include "executor/execRowBatch.h"
 #include "foreign/fdwapi.h"
 #include "jit/jit.h"
 #include "libpq/pqformat.h"
@@ -519,6 +520,8 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 		instrument_option |= INSTRUMENT_BUFFERS;
 	if (es->wal)
 		instrument_option |= INSTRUMENT_WAL;
+	if (es->batches)
+		instrument_option |= INSTRUMENT_BATCHES;
 
 	/*
 	 * We always collect timing for the entire statement, even when node-level
@@ -1370,6 +1373,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 	int			save_indent = es->indent;
 	bool		haschildren;
 	bool		isdisabled;
+	RowBatch   *batch = NULL;
 
 	/*
 	 * Prepare per-worker output buffers, if needed.  We'll append the data in
@@ -2295,6 +2299,46 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		show_buffer_usage(es, &planstate->instrument->instr.bufusage);
 	if (es->wal && planstate->instrument)
 		show_wal_usage(es, &planstate->instrument->instr.walusage);
+
+	/* BATCHES */
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+			batch = castNode(SeqScanState, planstate)->batch;
+			break;
+		default:
+			break;
+	}
+
+	if (es->batches && batch)
+	{
+		RowBatchStats *stats = batch->stats;
+
+		Assert(stats);
+		if (stats->batches > 0)
+		{
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				ExplainIndentText(es);
+				appendStringInfo(es->str,
+								 "Batches: %lld  Avg Rows: %.1f  Max: %d  Min: %d\n",
+								 (long long) stats->batches,
+								 RowBatchAvgRows(batch), stats->max_rows,
+								 stats->min_rows == INT_MAX ? 0 :
+								 stats->min_rows);
+			}
+			else
+			{
+				ExplainPropertyInteger("Batches", NULL, stats->batches, es);
+				ExplainPropertyFloat("Average Batch Rows", NULL,
+									 RowBatchAvgRows(batch), 1, es);
+				ExplainPropertyInteger("Max Batch Rows", NULL, stats->max_rows, es);
+				ExplainPropertyInteger("Min Batch Rows", NULL,
+									   stats->min_rows == INT_MAX ? 0 :
+									   stats->min_rows, es);
+			}
+		}
+	}
 
 	/* Prepare per-worker buffer/WAL usage */
 	if (es->workers_state && (es->buffers || es->wal) && es->verbose)

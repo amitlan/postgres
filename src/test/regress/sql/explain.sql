@@ -188,3 +188,62 @@ select explain_filter('explain (analyze,buffers off,costs off) select sum(n) ove
 -- Test tuplestore storage usage in Window aggregate (memory and disk case, final result is disk)
 select explain_filter('explain (analyze,buffers off,costs off) select sum(n) over(partition by m) from (SELECT n < 3 as m, n from generate_series(1,2500) a(n))');
 reset work_mem;
+
+-- Test BATCHES option
+set executor_batch_rows = 64;
+
+create temp table batch_test (a int, b text);
+insert into batch_test select i, repeat('x', 100) from generate_series(1, 10000) i;
+analyze batch_test;
+
+-- BATCHES without ANALYZE should error
+explain (batches, costs off) select * from batch_test;
+
+-- BATCHES without ANALYZE but with other options
+explain (batches, buffers off, costs off) select * from batch_test;
+
+-- Basic: verify batch stats line appears in text format
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test');
+
+-- With filter: batch line still appears
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test where a > 5000');
+
+-- With non-batchable qual (OR): batching still active but
+-- batch qual falls back to per-tuple ExecQual
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test where a > 5000 or b is null');
+
+-- With LIMIT: batch stats appear on child Seq Scan node
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test limit 100');
+
+-- Verify batch stats keys present in JSON output
+select
+  j #> '{0,Plan}' ? 'Batches' as has_batches,
+  j #> '{0,Plan}' ? 'Average Batch Rows' as has_avg,
+  j #> '{0,Plan}' ? 'Max Batch Rows' as has_max,
+  j #> '{0,Plan}' ? 'Min Batch Rows' as has_min
+from explain_filter_to_json(
+  'explain (analyze, batches, buffers off, format json) select * from batch_test'
+) as j;
+
+-- With LIMIT: batch stats keys on child node in JSON
+select
+  j #> '{0,Plan,Plans,0}' ? 'Batches' as child_has_batches,
+  j #> '{0,Plan,Plans,0}' ? 'Average Batch Rows' as child_has_avg,
+  j #> '{0,Plan,Plans,0}' ? 'Max Batch Rows' as child_has_max,
+  j #> '{0,Plan,Plans,0}' ? 'Min Batch Rows' as child_has_min
+from explain_filter_to_json(
+  'explain (analyze, batches, buffers off, format json) select * from batch_test limit 100'
+) as j;
+
+-- Batching disabled: no batch stats in text output
+set executor_batch_rows = 0;
+select explain_filter('explain (analyze, batches, buffers off, costs off) select * from batch_test');
+
+-- Batching disabled: no batch keys in JSON
+select
+  j #> '{0,Plan}' ? 'Batches' as has_batches
+from explain_filter_to_json(
+  'explain (analyze, batches, buffers off, format json) select * from batch_test'
+) as j;
+
+reset executor_batch_rows;
