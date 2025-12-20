@@ -159,6 +159,8 @@ ParseExplainOptionList(ExplainState *es, List *options, ParseState *pstate)
 								"EXPLAIN", opt->defname, p),
 						 parser_errposition(pstate, opt->location)));
 		}
+		else if (strcmp(opt->defname, "batches") == 0)
+			es->batches = defGetBoolean(opt);
 		else if (!ApplyExtensionExplainOption(es, opt, pstate))
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -197,6 +199,12 @@ ParseExplainOptionList(ExplainState *es, List *options, ParseState *pstate)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("%s options %s and %s cannot be used together",
 						"EXPLAIN", "ANALYZE", "GENERIC_PLAN")));
+
+	/* check that BATCHES is used with EXPLAIN ANALYZE */
+	if (es->batches && !es->analyze)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("EXPLAIN option %s requires ANALYZE", "BATCHES")));
 
 	/* if the summary was not set explicitly, set default value */
 	es->summary = (summary_set) ? es->summary : es->analyze;

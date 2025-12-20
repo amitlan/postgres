@@ -242,8 +242,12 @@ SeqScanCanUseBatching(SeqScanState *scanstate, int eflags)
 static void
 SeqScanInitBatching(SeqScanState *scanstate)
 {
-	RowBatch   *batch = RowBatchCreate(MaxHeapTuplesPerPage);
+	RowBatch   *batch;
+	EState	   *estate = scanstate->ss.ps.state;
+	bool		track_stats = estate->es_instrument &&
+		(estate->es_instrument & INSTRUMENT_BATCHES);
 
+	batch = RowBatchCreate(MaxHeapTuplesPerPage, track_stats);
 	batch->slot = scanstate->ss.ss_ScanTupleSlot;
 	scanstate->batch = batch;
 
@@ -343,6 +347,8 @@ SeqNextBatch(SeqScanState *node)
 
 	if (!table_scan_getnextbatch(scandesc, b, direction))
 		return false;
+
+	RowBatchRecordStats(b, b->nrows);
 
 	return true;
 }
