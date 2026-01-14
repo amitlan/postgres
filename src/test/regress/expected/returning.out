@@ -504,9 +504,9 @@ UPDATE foo SET f4 = 100 WHERE f1 = 5
    Output: (old.tableoid)::regclass, old.ctid, old.f1, old.f2, old.f3, old.f4, old.*, (new.tableoid)::regclass, new.ctid, new.f1, new.f2, new.f3, new.f4, new.*, (((old.f4)::text || '->'::text) || (new.f4)::text)
    Update on pg_temp.foo foo_1
    ->  Result
-         Output: '100'::bigint, foo_1.tableoid, foo_1.ctid
+         Output: '100'::bigint, foo_1.ctid, foo_1.tableoid
          ->  Seq Scan on pg_temp.foo foo_1
-               Output: foo_1.tableoid, foo_1.ctid
+               Output: foo_1.ctid, foo_1.tableoid
                Filter: (foo_1.f1 = 5)
 (8 rows)
 
@@ -530,7 +530,7 @@ DELETE FROM foo WHERE f1 = 5
    Output: (old.tableoid)::regclass, old.ctid, old.f1, old.f2, old.f3, old.f4, (new.tableoid)::regclass, new.ctid, new.f1, new.f2, new.f3, new.f4, foo_1.f1, foo_1.f2, foo_1.f3, foo_1.f4
    Delete on pg_temp.foo foo_1
    ->  Seq Scan on pg_temp.foo foo_1
-         Output: foo_1.tableoid, foo_1.ctid
+         Output: foo_1.ctid, foo_1.tableoid
          Filter: (foo_1.f1 = 5)
 (6 rows)
 
@@ -586,9 +586,9 @@ UPDATE foo SET f4 = 100 WHERE f1 = 5
    Output: (SubPlan expr_1), (SubPlan expr_2), (SubPlan expr_3)
    Update on pg_temp.foo foo_1
    ->  Result
-         Output: '100'::bigint, foo_1.tableoid, foo_1.ctid
+         Output: '100'::bigint, foo_1.ctid, foo_1.tableoid
          ->  Seq Scan on pg_temp.foo foo_1
-               Output: foo_1.tableoid, foo_1.ctid
+               Output: foo_1.ctid, foo_1.tableoid
                Filter: (foo_1.f1 = 5)
    SubPlan expr_1
      ->  Result
@@ -626,7 +626,7 @@ DELETE FROM foo WHERE f1 = 5
    Output: (SubPlan expr_1), (SubPlan expr_2)
    Delete on pg_temp.foo foo_1
    ->  Seq Scan on pg_temp.foo foo_1
-         Output: foo_1.tableoid, foo_1.ctid
+         Output: foo_1.ctid, foo_1.tableoid
          Filter: (foo_1.f1 = 5)
    SubPlan expr_1
      ->  Aggregate
@@ -662,9 +662,9 @@ DELETE FROM foo WHERE f1 = 4 RETURNING old.*,new.*, *;
    Output: old.f1, old.f2, old.f3, old.f4, new.f1, new.f2, new.f3, new.f4, foo_2.f1, foo_2.f2, foo_2.f3, foo_2.f4
    Update on pg_temp.foo foo_2
    ->  Nested Loop
-         Output: (foo_2.f2 || ' (deleted)'::text), '-1'::integer, '-1'::bigint, foo_1.ctid, foo_1.tableoid, foo_2.tableoid, foo_2.ctid
+         Output: (foo_2.f2 || ' (deleted)'::text), '-1'::integer, '-1'::bigint, foo_1.ctid, foo_1.tableoid, foo_2.ctid, foo_2.tableoid
          ->  Seq Scan on pg_temp.foo foo_2
-               Output: foo_2.f2, foo_2.f1, foo_2.tableoid, foo_2.ctid
+               Output: foo_2.f2, foo_2.f1, foo_2.ctid, foo_2.tableoid
                Filter: (foo_2.f1 = 4)
          ->  Seq Scan on pg_temp.foo foo_1
                Output: foo_1.ctid, foo_1.f1, foo_1.tableoid
@@ -687,17 +687,17 @@ UPDATE joinview SET f3 = f3 + 1 WHERE f3 = 57
    Output: old.f1, old.f2, old.f3, old.f4, joinme.other, new.f1, new.f2, new.f3, new.f4, joinme.other, foo_1.f1, foo_1.f2, foo_1.f3, foo_1.f4, joinme.other, (new.f3 - old.f3)
    Update on pg_temp.foo foo_1
    ->  Hash Join
-         Output: foo_2.f1, (foo_2.f3 + 1), joinme.ctid, foo_2.ctid, joinme_1.ctid, joinme.other, foo_1.tableoid, foo_1.ctid, foo_2.tableoid
+         Output: foo_2.f1, (foo_2.f3 + 1), joinme.ctid, foo_2.ctid, joinme_1.ctid, joinme.other, foo_1.ctid, foo_1.tableoid, foo_2.tableoid
          Hash Cond: (foo_1.f2 = joinme.f2j)
          ->  Hash Join
-               Output: foo_1.f2, foo_1.tableoid, foo_1.ctid, joinme_1.ctid, joinme_1.f2j
+               Output: foo_1.f2, foo_1.ctid, foo_1.tableoid, joinme_1.ctid, joinme_1.f2j
                Hash Cond: (joinme_1.f2j = foo_1.f2)
                ->  Seq Scan on pg_temp.joinme joinme_1
                      Output: joinme_1.ctid, joinme_1.f2j
                ->  Hash
-                     Output: foo_1.f2, foo_1.tableoid, foo_1.ctid
+                     Output: foo_1.f2, foo_1.ctid, foo_1.tableoid
                      ->  Seq Scan on pg_temp.foo foo_1
-                           Output: foo_1.f2, foo_1.tableoid, foo_1.ctid
+                           Output: foo_1.f2, foo_1.ctid, foo_1.tableoid
          ->  Hash
                Output: joinme.ctid, joinme.other, joinme.f2j, foo_2.f1, foo_2.f3, foo_2.ctid, foo_2.f2, foo_2.tableoid
                ->  Hash Join

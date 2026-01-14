@@ -457,6 +457,32 @@ SELECT tableoid::regclass, * FROM p2;
  p2       | 2 | xyzzy
 (3 rows)
 
+-- Verify that DELETE/UPDATE on a partitioned table with a foreign partition
+-- that doesn't support the operation works when all partitions are excluded
+-- (by pruning or constraint exclusion). The dummy root should get ctid added.
+DROP TABLE p2;
+SET enable_partition_pruning TO off;
+EXPLAIN (COSTS OFF, VERBOSE) DELETE FROM pt WHERE false;
+           QUERY PLAN           
+--------------------------------
+ Delete on public.pt
+   ->  Result
+         Output: pt.ctid
+         Replaces: Scan on pt
+         One-Time Filter: false
+(5 rows)
+
+SET enable_partition_pruning TO on;
+EXPLAIN (COSTS OFF, VERBOSE) DELETE FROM pt WHERE false;
+           QUERY PLAN           
+--------------------------------
+ Delete on public.pt
+   ->  Result
+         Output: ctid
+         Replaces: Scan on pt
+         One-Time Filter: false
+(5 rows)
+
 DROP TABLE pt;
 -- generated column tests
 \set filename :abs_srcdir '/data/list1.csv'

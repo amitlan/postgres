@@ -242,6 +242,16 @@ UPDATE pt set a = 1 where a = 2; -- ERROR
 SELECT tableoid::regclass, * FROM pt;
 SELECT tableoid::regclass, * FROM p1;
 SELECT tableoid::regclass, * FROM p2;
+
+-- Verify that DELETE/UPDATE on a partitioned table with a foreign partition
+-- that doesn't support the operation works when all partitions are excluded
+-- (by pruning or constraint exclusion). The dummy root should get ctid added.
+DROP TABLE p2;
+SET enable_partition_pruning TO off;
+EXPLAIN (COSTS OFF, VERBOSE) DELETE FROM pt WHERE false;
+SET enable_partition_pruning TO on;
+EXPLAIN (COSTS OFF, VERBOSE) DELETE FROM pt WHERE false;
+
 DROP TABLE pt;
 
 -- generated column tests

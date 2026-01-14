@@ -4585,7 +4585,7 @@ explain (verbose, costs off) execute update_part_abc_view (1, 'd');
    ->  Append
          Subplans Removed: 1
          ->  Seq Scan on public.part_abc_1
-               Output: $2, part_abc_1.tableoid, part_abc_1.ctid
+               Output: $2, part_abc_1.ctid, part_abc_1.tableoid
                Filter: ((part_abc_1.b <> 'a'::text) AND (part_abc_1.a = $1))
 (8 rows)
 
@@ -4604,7 +4604,7 @@ explain (verbose, costs off) execute update_part_abc_view (2, 'a');
    ->  Append
          Subplans Removed: 1
          ->  Seq Scan on public.part_abc_2
-               Output: $2, part_abc_2.tableoid, part_abc_2.ctid
+               Output: $2, part_abc_2.ctid, part_abc_2.tableoid
                Filter: ((part_abc_2.b <> 'a'::text) AND (part_abc_2.a = $1))
 (8 rows)
 

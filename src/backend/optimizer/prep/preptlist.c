@@ -122,8 +122,8 @@ preprocess_targetlist(PlannerInfo *root)
 	{
 		/* row-identity logic expects to add stuff to processed_tlist */
 		root->processed_tlist = tlist;
-		add_row_identity_columns(root, result_relation,
-								 target_rte, target_relation);
+		(void) add_row_identity_columns(root, result_relation,
+										target_rte, target_relation);
 		tlist = root->processed_tlist;
 	}
 

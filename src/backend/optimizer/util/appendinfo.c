@@ -949,8 +949,12 @@ add_row_identity_var(PlannerInfo *root, Var *orig_var,
  * This function adds the row identity columns needed by the core code.
  * FDWs might call add_row_identity_var() for themselves to add nonstandard
  * columns.  (Duplicate requests are fine.)
+ *
+ * Returns true if any row-identity columns were added, false if not.
+ * For foreign tables whose FDW lacks AddForeignUpdateTargets, does
+ * nothing and returns false.
  */
-void
+bool
 add_row_identity_columns(PlannerInfo *root, Index rtindex,
 						 RangeTblEntry *target_rte,
 						 Relation target_relation)
@@ -976,6 +980,7 @@ add_row_identity_columns(PlannerInfo *root, Index rtindex,
 					  InvalidOid,
 					  0);
 		add_row_identity_var(root, var, rtindex, "ctid");
+		return true;
 	}
 	else if (relkind == RELKIND_FOREIGN_TABLE)
 	{
@@ -986,9 +991,17 @@ add_row_identity_columns(PlannerInfo *root, Index rtindex,
 
 		fdwroutine = GetFdwRoutineForRelation(target_relation, false);
 
+		/*
+		 * If the FDW provides AddForeignUpdateTargets, let it add whatever
+		 * row-identity columns it needs.  Otherwise, this child cannot
+		 * provide row identity, so return false to indicate no columns
+		 * were added.
+		 */
 		if (fdwroutine->AddForeignUpdateTargets != NULL)
 			fdwroutine->AddForeignUpdateTargets(root, rtindex,
 												target_rte, target_relation);
+		else
+			return false;
 
 		/*
 		 * For UPDATE, we need to make the FDW fetch unchanged columns by
@@ -1016,7 +1029,11 @@ add_row_identity_columns(PlannerInfo *root, Index rtindex,
 						  0);
 			add_row_identity_var(root, var, rtindex, "wholerow");
 		}
+
+		return true;
 	}
+
+	return false;
 }
 
 /*
@@ -1074,8 +1091,8 @@ distribute_row_identity_vars(PlannerInfo *root)
 		Relation	target_relation;
 
 		target_relation = table_open(target_rte->relid, NoLock);
-		add_row_identity_columns(root, result_relation,
-								 target_rte, target_relation);
+		(void) add_row_identity_columns(root, result_relation,
+										target_rte, target_relation);
 		table_close(target_relation, NoLock);
 		build_base_rel_tlists(root, root->processed_tlist);
 		/* There are no ROWID_VAR Vars in this case, so we're done. */

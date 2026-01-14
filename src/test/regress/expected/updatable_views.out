@@ -3248,10 +3248,10 @@ UPDATE v1 SET a=100 WHERE snoop(a) AND leakproof(a) AND a < 7 AND a != 6;
    Update on public.t12 t1_3
    Update on public.t111 t1_4
    ->  Result
-         Output: 100, t1.tableoid, t1.ctid
+         Output: 100, t1.ctid, t1.tableoid
          ->  Append
                ->  Index Scan using t1_a_idx on public.t1 t1_1
-                     Output: t1_1.tableoid, t1_1.ctid
+                     Output: t1_1.ctid, t1_1.tableoid
                      Index Cond: ((t1_1.a > 5) AND (t1_1.a < 7))
                      Filter: ((t1_1.a <> 6) AND EXISTS(SubPlan exists_1) AND snoop(t1_1.a) AND leakproof(t1_1.a))
                      SubPlan exists_1
@@ -3261,15 +3261,15 @@ UPDATE v1 SET a=100 WHERE snoop(a) AND leakproof(a) AND a < 7 AND a != 6;
                              ->  Seq Scan on public.t111 t12_2
                                    Filter: (t12_2.a = t1_1.a)
                ->  Index Scan using t11_a_idx on public.t11 t1_2
-                     Output: t1_2.tableoid, t1_2.ctid
+                     Output: t1_2.ctid, t1_2.tableoid
                      Index Cond: ((t1_2.a > 5) AND (t1_2.a < 7))
                      Filter: ((t1_2.a <> 6) AND EXISTS(SubPlan exists_1) AND snoop(t1_2.a) AND leakproof(t1_2.a))
                ->  Index Scan using t12_a_idx on public.t12 t1_3
-                     Output: t1_3.tableoid, t1_3.ctid
+                     Output: t1_3.ctid, t1_3.tableoid
                      Index Cond: ((t1_3.a > 5) AND (t1_3.a < 7))
                      Filter: ((t1_3.a <> 6) AND EXISTS(SubPlan exists_1) AND snoop(t1_3.a) AND leakproof(t1_3.a))
                ->  Index Scan using t111_a_idx on public.t111 t1_4
-                     Output: t1_4.tableoid, t1_4.ctid
+                     Output: t1_4.ctid, t1_4.tableoid
                      Index Cond: ((t1_4.a > 5) AND (t1_4.a < 7))
                      Filter: ((t1_4.a <> 6) AND EXISTS(SubPlan exists_1) AND snoop(t1_4.a) AND leakproof(t1_4.a))
 (30 rows)
@@ -3295,10 +3295,10 @@ UPDATE v1 SET a=a+1 WHERE snoop(a) AND leakproof(a) AND a = 8;
    Update on public.t12 t1_3
    Update on public.t111 t1_4
    ->  Result
-         Output: (t1.a + 1), t1.tableoid, t1.ctid
+         Output: (t1.a + 1), t1.ctid, t1.tableoid
          ->  Append
                ->  Index Scan using t1_a_idx on public.t1 t1_1
-                     Output: t1_1.a, t1_1.tableoid, t1_1.ctid
+                     Output: t1_1.a, t1_1.ctid, t1_1.tableoid
                      Index Cond: ((t1_1.a > 5) AND (t1_1.a = 8))
                      Filter: (EXISTS(SubPlan exists_1) AND snoop(t1_1.a) AND leakproof(t1_1.a))
                      SubPlan exists_1
@@ -3308,15 +3308,15 @@ UPDATE v1 SET a=a+1 WHERE snoop(a) AND leakproof(a) AND a = 8;
                              ->  Seq Scan on public.t111 t12_2
                                    Filter: (t12_2.a = t1_1.a)
                ->  Index Scan using t11_a_idx on public.t11 t1_2
-                     Output: t1_2.a, t1_2.tableoid, t1_2.ctid
+                     Output: t1_2.a, t1_2.ctid, t1_2.tableoid
                      Index Cond: ((t1_2.a > 5) AND (t1_2.a = 8))
                      Filter: (EXISTS(SubPlan exists_1) AND snoop(t1_2.a) AND leakproof(t1_2.a))
                ->  Index Scan using t12_a_idx on public.t12 t1_3
-                     Output: t1_3.a, t1_3.tableoid, t1_3.ctid
+                     Output: t1_3.a, t1_3.ctid, t1_3.tableoid
                      Index Cond: ((t1_3.a > 5) AND (t1_3.a = 8))
                      Filter: (EXISTS(SubPlan exists_1) AND snoop(t1_3.a) AND leakproof(t1_3.a))
                ->  Index Scan using t111_a_idx on public.t111 t1_4
-                     Output: t1_4.a, t1_4.tableoid, t1_4.ctid
+                     Output: t1_4.a, t1_4.ctid, t1_4.tableoid
                      Index Cond: ((t1_4.a > 5) AND (t1_4.a = 8))
                      Filter: (EXISTS(SubPlan exists_1) AND snoop(t1_4.a) AND leakproof(t1_4.a))
 (30 rows)

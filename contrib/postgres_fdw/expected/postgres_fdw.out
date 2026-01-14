@@ -7399,7 +7399,7 @@ UPDATE rw_view SET b = b + 5;
    Foreign Update on public.foreign_tbl parent_tbl_1
      Remote SQL: UPDATE public.child_tbl SET b = $2 WHERE ctid = $1 RETURNING a, b
    ->  Foreign Scan on public.foreign_tbl parent_tbl_1
-         Output: (parent_tbl_1.b + 5), parent_tbl_1.tableoid, parent_tbl_1.ctid, parent_tbl_1.*
+         Output: (parent_tbl_1.b + 5), parent_tbl_1.ctid, parent_tbl_1.*, parent_tbl_1.tableoid
          Remote SQL: SELECT a, b, ctid FROM public.child_tbl WHERE ((a < b)) FOR UPDATE
 (6 rows)
 
@@ -7414,7 +7414,7 @@ UPDATE rw_view SET b = b + 15;
    Foreign Update on public.foreign_tbl parent_tbl_1
      Remote SQL: UPDATE public.child_tbl SET b = $2 WHERE ctid = $1 RETURNING a, b
    ->  Foreign Scan on public.foreign_tbl parent_tbl_1
-         Output: (parent_tbl_1.b + 15), parent_tbl_1.tableoid, parent_tbl_1.ctid, parent_tbl_1.*
+         Output: (parent_tbl_1.b + 15), parent_tbl_1.ctid, parent_tbl_1.*, parent_tbl_1.tableoid
          Remote SQL: SELECT a, b, ctid FROM public.child_tbl WHERE ((a < b)) FOR UPDATE
 (6 rows)
 
@@ -7470,7 +7470,7 @@ UPDATE rw_view SET b = 'text', c = 123.456;
    Foreign Update on public.child_foreign parent_tbl_1
      Remote SQL: UPDATE public.child_local SET b = $2, c = $3 WHERE ctid = $1 RETURNING a
    ->  Foreign Scan on public.child_foreign parent_tbl_1
-         Output: 'text'::text, 123.456, parent_tbl_1.tableoid, parent_tbl_1.ctid, parent_tbl_1.*
+         Output: 'text'::text, 123.456, parent_tbl_1.ctid, parent_tbl_1.*, parent_tbl_1.tableoid
          Remote SQL: SELECT b, c, a, ctid FROM public.child_local WHERE ((a < 5)) FOR UPDATE
 (6 rows)
 
@@ -8268,7 +8268,7 @@ UPDATE parent_tbl SET b = b + 1;
    Foreign Update on public.foreign_tbl parent_tbl_1
      Remote SQL: UPDATE public.local_tbl SET b = $2 WHERE ctid = $1
    ->  Foreign Scan on public.foreign_tbl parent_tbl_1
-         Output: (parent_tbl_1.b + 1), parent_tbl_1.tableoid, parent_tbl_1.ctid, parent_tbl_1.*
+         Output: (parent_tbl_1.b + 1), parent_tbl_1.ctid, parent_tbl_1.*, parent_tbl_1.tableoid
          Remote SQL: SELECT a, b, ctid FROM public.local_tbl FOR UPDATE
 (6 rows)
 
@@ -8282,7 +8282,7 @@ DELETE FROM parent_tbl;
    Foreign Delete on public.foreign_tbl parent_tbl_1
      Remote SQL: DELETE FROM public.local_tbl WHERE ctid = $1
    ->  Foreign Scan on public.foreign_tbl parent_tbl_1
-         Output: parent_tbl_1.tableoid, parent_tbl_1.ctid
+         Output: parent_tbl_1.ctid, parent_tbl_1.tableoid
          Remote SQL: SELECT ctid FROM public.local_tbl FOR UPDATE
 (6 rows)
 
@@ -8308,12 +8308,12 @@ UPDATE parent_tbl SET b = b + 1;
    Foreign Update on public.foreign_tbl parent_tbl_2
      Remote SQL: UPDATE public.local_tbl SET b = $2 WHERE ctid = $1
    ->  Result
-         Output: (parent_tbl.b + 1), parent_tbl.tableoid, parent_tbl.ctid, (NULL::record)
+         Output: (parent_tbl.b + 1), parent_tbl.ctid, parent_tbl.tableoid, (NULL::record)
          ->  Append
                ->  Seq Scan on public.parent_tbl parent_tbl_1
-                     Output: parent_tbl_1.b, parent_tbl_1.tableoid, parent_tbl_1.ctid, NULL::record
+                     Output: parent_tbl_1.b, parent_tbl_1.ctid, parent_tbl_1.tableoid, NULL::record
                ->  Foreign Scan on public.foreign_tbl parent_tbl_2
-                     Output: parent_tbl_2.b, parent_tbl_2.tableoid, parent_tbl_2.ctid, parent_tbl_2.*
+                     Output: parent_tbl_2.b, parent_tbl_2.ctid, parent_tbl_2.tableoid, parent_tbl_2.*
                      Remote SQL: SELECT a, b, ctid FROM public.local_tbl FOR UPDATE
 (12 rows)
 
@@ -8329,9 +8329,9 @@ DELETE FROM parent_tbl;
      Remote SQL: DELETE FROM public.local_tbl WHERE ctid = $1
    ->  Append
          ->  Seq Scan on public.parent_tbl parent_tbl_1
-               Output: parent_tbl_1.tableoid, parent_tbl_1.ctid
+               Output: parent_tbl_1.ctid, parent_tbl_1.tableoid
          ->  Foreign Scan on public.foreign_tbl parent_tbl_2
-               Output: parent_tbl_2.tableoid, parent_tbl_2.ctid
+               Output: parent_tbl_2.ctid, parent_tbl_2.tableoid
                Remote SQL: SELECT ctid FROM public.local_tbl FOR UPDATE
 (10 rows)
 
@@ -8682,14 +8682,14 @@ update bar set f2 = f2 + 100 where f1 in (select f1 from foo);
    Foreign Update on public.bar2 bar_2
      Remote SQL: UPDATE public.loct2 SET f2 = $2 WHERE ctid = $1
    ->  Hash Join
-         Output: (bar.f2 + 100), foo.ctid, bar.tableoid, bar.ctid, (NULL::record), foo.*, foo.tableoid
+         Output: (bar.f2 + 100), foo.ctid, bar.ctid, bar.tableoid, (NULL::record), foo.*, foo.tableoid
          Inner Unique: true
          Hash Cond: (bar.f1 = foo.f1)
          ->  Append
                ->  Seq Scan on public.bar bar_1
-                     Output: bar_1.f2, bar_1.f1, bar_1.tableoid, bar_1.ctid, NULL::record
+                     Output: bar_1.f2, bar_1.f1, bar_1.ctid, bar_1.tableoid, NULL::record
                ->  Foreign Scan on public.bar2 bar_2
-                     Output: bar_2.f2, bar_2.f1, bar_2.tableoid, bar_2.ctid, bar_2.*
+                     Output: bar_2.f2, bar_2.f1, bar_2.ctid, bar_2.tableoid, bar_2.*
                      Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct2 FOR UPDATE
          ->  Hash
                Output: foo.ctid, foo.f1, foo.*, foo.tableoid
@@ -8729,16 +8729,16 @@ where bar.f1 = ss.f1;
    Foreign Update on public.bar2 bar_2
      Remote SQL: UPDATE public.loct2 SET f2 = $2 WHERE ctid = $1
    ->  Merge Join
-         Output: (bar.f2 + 100), (ROW(foo.f1)), bar.tableoid, bar.ctid, (NULL::record)
+         Output: (bar.f2 + 100), (ROW(foo.f1)), bar.ctid, bar.tableoid, (NULL::record)
          Merge Cond: (bar.f1 = foo.f1)
          ->  Sort
-               Output: bar.f2, bar.f1, bar.tableoid, bar.ctid, (NULL::record)
+               Output: bar.f2, bar.f1, bar.ctid, bar.tableoid, (NULL::record)
                Sort Key: bar.f1
                ->  Append
                      ->  Seq Scan on public.bar bar_1
-                           Output: bar_1.f2, bar_1.f1, bar_1.tableoid, bar_1.ctid, NULL::record
+                           Output: bar_1.f2, bar_1.f1, bar_1.ctid, bar_1.tableoid, NULL::record
                      ->  Foreign Scan on public.bar2 bar_2
-                           Output: bar_2.f2, bar_2.f1, bar_2.tableoid, bar_2.ctid, bar_2.*
+                           Output: bar_2.f2, bar_2.f1, bar_2.ctid, bar_2.tableoid, bar_2.*
                            Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct2 FOR UPDATE
          ->  Sort
                Output: (ROW(foo.f1)), foo.f1
@@ -8888,7 +8888,7 @@ delete from foo where f1 < 5 returning *;
    Foreign Delete on public.foo2 foo_2
    ->  Append
          ->  Index Scan using i_foo_f1 on public.foo foo_1
-               Output: foo_1.tableoid, foo_1.ctid
+               Output: foo_1.ctid, foo_1.tableoid
                Index Cond: (foo_1.f1 < 5)
          ->  Foreign Delete on public.foo2 foo_2
                Remote SQL: DELETE FROM public.loct1 WHERE ((f1 < 5)) RETURNING f1, f2
@@ -8913,10 +8913,10 @@ update bar set f2 = f2 + 100 returning *;
    Update on public.bar bar_1
    Foreign Update on public.bar2 bar_2
    ->  Result
-         Output: (bar.f2 + 100), bar.tableoid, bar.ctid, (NULL::record)
+         Output: (bar.f2 + 100), bar.ctid, bar.tableoid, (NULL::record)
          ->  Append
                ->  Seq Scan on public.bar bar_1
-                     Output: bar_1.f2, bar_1.tableoid, bar_1.ctid, NULL::record
+                     Output: bar_1.f2, bar_1.ctid, bar_1.tableoid, NULL::record
                ->  Foreign Update on public.bar2 bar_2
                      Remote SQL: UPDATE public.loct2 SET f2 = (f2 + 100) RETURNING f1, f2
 (11 rows)
@@ -8948,12 +8948,12 @@ update bar set f2 = f2 + 100;
    Foreign Update on public.bar2 bar_2
      Remote SQL: UPDATE public.loct2 SET f1 = $2, f2 = $3, f3 = $4 WHERE ctid = $1 RETURNING f1, f2, f3
    ->  Result
-         Output: (bar.f2 + 100), bar.tableoid, bar.ctid, (NULL::record)
+         Output: (bar.f2 + 100), bar.ctid, bar.tableoid, (NULL::record)
          ->  Append
                ->  Seq Scan on public.bar bar_1
-                     Output: bar_1.f2, bar_1.tableoid, bar_1.ctid, NULL::record
+                     Output: bar_1.f2, bar_1.ctid, bar_1.tableoid, NULL::record
                ->  Foreign Scan on public.bar2 bar_2
-                     Output: bar_2.f2, bar_2.tableoid, bar_2.ctid, bar_2.*
+                     Output: bar_2.f2, bar_2.ctid, bar_2.tableoid, bar_2.*
                      Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct2 FOR UPDATE
 (12 rows)
 
@@ -8980,10 +8980,10 @@ delete from bar where f2 < 400;
      Remote SQL: DELETE FROM public.loct2 WHERE ctid = $1 RETURNING f1, f2, f3
    ->  Append
          ->  Seq Scan on public.bar bar_1
-               Output: bar_1.tableoid, bar_1.ctid, NULL::record
+               Output: bar_1.ctid, bar_1.tableoid, NULL::record
                Filter: (bar_1.f2 < 400)
          ->  Foreign Scan on public.bar2 bar_2
-               Output: bar_2.tableoid, bar_2.ctid, bar_2.*
+               Output: bar_2.ctid, bar_2.tableoid, bar_2.*
                Remote SQL: SELECT f1, f2, f3, ctid FROM public.loct2 WHERE ((f2 < 400)) FOR UPDATE
 (11 rows)
 
@@ -9024,13 +9024,13 @@ update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a re
    Foreign Update on public.remt1 parent_2
      Remote SQL: UPDATE public.loct1 SET b = $2 WHERE ctid = $1 RETURNING a, b
    ->  Nested Loop
-         Output: (parent.b || remt2.b), remt2.*, remt2.a, remt2.b, parent.tableoid, parent.ctid, (NULL::record)
+         Output: (parent.b || remt2.b), remt2.*, remt2.a, remt2.b, parent.ctid, parent.tableoid, (NULL::record)
          Join Filter: (parent.a = remt2.a)
          ->  Append
                ->  Seq Scan on public.parent parent_1
-                     Output: parent_1.b, parent_1.a, parent_1.tableoid, parent_1.ctid, NULL::record
+                     Output: parent_1.b, parent_1.a, parent_1.ctid, parent_1.tableoid, NULL::record
                ->  Foreign Scan on public.remt1 parent_2
-                     Output: parent_2.b, parent_2.a, parent_2.tableoid, parent_2.ctid, parent_2.*
+                     Output: parent_2.b, parent_2.a, parent_2.ctid, parent_2.tableoid, parent_2.*
                      Remote SQL: SELECT a, b, ctid FROM public.loct1 FOR UPDATE
          ->  Materialize
                Output: remt2.b, remt2.*, remt2.a
@@ -9056,13 +9056,13 @@ delete from parent using remt2 where parent.a = remt2.a returning parent;
    Foreign Delete on public.remt1 parent_2
      Remote SQL: DELETE FROM public.loct1 WHERE ctid = $1 RETURNING a, b
    ->  Nested Loop
-         Output: remt2.*, parent.tableoid, parent.ctid
+         Output: remt2.*, parent.ctid, parent.tableoid
          Join Filter: (parent.a = remt2.a)
          ->  Append
                ->  Seq Scan on public.parent parent_1
-                     Output: parent_1.a, parent_1.tableoid, parent_1.ctid
+                     Output: parent_1.a, parent_1.ctid, parent_1.tableoid
                ->  Foreign Scan on public.remt1 parent_2
-                     Output: parent_2.a, parent_2.tableoid, parent_2.ctid
+                     Output: parent_2.a, parent_2.ctid, parent_2.tableoid
                      Remote SQL: SELECT a, ctid FROM public.loct1 FOR UPDATE
          ->  Materialize
                Output: remt2.*, remt2.a
@@ -9293,7 +9293,7 @@ update utrtest set a = 1 where a = 1 or a = 2 returning *;
          ->  Foreign Update on public.remp utrtest_1
                Remote SQL: UPDATE public.loct SET a = 1 WHERE (((a = 1) OR (a = 2))) RETURNING a, b
          ->  Seq Scan on public.locp utrtest_2
-               Output: 1, utrtest_2.tableoid, utrtest_2.ctid, NULL::record
+               Output: 1, utrtest_2.ctid, NULL::record, utrtest_2.tableoid
                Filter: ((utrtest_2.a = 1) OR (utrtest_2.a = 2))
 (10 rows)
 
@@ -9311,7 +9311,7 @@ update utrtest set a = 1 where a = 2 returning *;
    Output: utrtest_1.a, utrtest_1.b
    Update on public.locp utrtest_1
    ->  Seq Scan on public.locp utrtest_1
-         Output: 1, utrtest_1.tableoid, utrtest_1.ctid
+         Output: 1, utrtest_1.ctid, utrtest_1.tableoid
          Filter: (utrtest_1.a = 2)
 (6 rows)
 
@@ -9342,7 +9342,7 @@ update utrtest set a = 1 returning *;
          ->  Foreign Update on public.remp utrtest_1
                Remote SQL: UPDATE public.loct SET a = 1 RETURNING a, b
          ->  Seq Scan on public.locp utrtest_2
-               Output: 1, utrtest_2.tableoid, utrtest_2.ctid, NULL::record
+               Output: 1, utrtest_2.ctid, NULL::record, utrtest_2.tableoid
 (9 rows)
 
 update utrtest set a = 1 returning *;
@@ -9361,14 +9361,14 @@ update utrtest set a = 1 from (values (1), (2)) s(x) where a = s.x returning *;
      Remote SQL: UPDATE public.loct SET a = $2 WHERE ctid = $1 RETURNING a, b
    Update on public.locp utrtest_2
    ->  Hash Join
-         Output: 1, "*VALUES*".*, "*VALUES*".column1, utrtest.tableoid, utrtest.ctid, utrtest.*
+         Output: 1, "*VALUES*".*, "*VALUES*".column1, utrtest.ctid, utrtest.*, utrtest.tableoid
          Hash Cond: (utrtest.a = "*VALUES*".column1)
          ->  Append
                ->  Foreign Scan on public.remp utrtest_1
-                     Output: utrtest_1.a, utrtest_1.tableoid, utrtest_1.ctid, utrtest_1.*
+                     Output: utrtest_1.a, utrtest_1.ctid, utrtest_1.*, utrtest_1.tableoid
                      Remote SQL: SELECT a, b, ctid FROM public.loct FOR UPDATE
                ->  Seq Scan on public.locp utrtest_2
-                     Output: utrtest_2.a, utrtest_2.tableoid, utrtest_2.ctid, NULL::record
+                     Output: utrtest_2.a, utrtest_2.ctid, NULL::record, utrtest_2.tableoid
          ->  Hash
                Output: "*VALUES*".*, "*VALUES*".column1
                ->  Values Scan on "*VALUES*"
@@ -9400,7 +9400,7 @@ update utrtest set a = 3 returning *;
    Foreign Update on public.remp utrtest_2
    ->  Append
          ->  Seq Scan on public.locp utrtest_1
-               Output: 3, utrtest_1.tableoid, utrtest_1.ctid, NULL::record
+               Output: 3, utrtest_1.ctid, utrtest_1.tableoid, NULL::record
          ->  Foreign Update on public.remp utrtest_2
                Remote SQL: UPDATE public.loct SET a = 3 RETURNING a, b
 (9 rows)
@@ -9418,13 +9418,13 @@ update utrtest set a = 3 from (values (2), (3)) s(x) where a = s.x returning *;
    Foreign Update on public.remp utrtest_2
      Remote SQL: UPDATE public.loct SET a = $2 WHERE ctid = $1 RETURNING a, b
    ->  Hash Join
-         Output: 3, "*VALUES*".*, "*VALUES*".column1, utrtest.tableoid, utrtest.ctid, (NULL::record)
+         Output: 3, "*VALUES*".*, "*VALUES*".column1, utrtest.ctid, utrtest.tableoid, (NULL::record)
          Hash Cond: (utrtest.a = "*VALUES*".column1)
          ->  Append
                ->  Seq Scan on public.locp utrtest_1
-                     Output: utrtest_1.a, utrtest_1.tableoid, utrtest_1.ctid, NULL::record
+                     Output: utrtest_1.a, utrtest_1.ctid, utrtest_1.tableoid, NULL::record
                ->  Foreign Scan on public.remp utrtest_2
-                     Output: utrtest_2.a, utrtest_2.tableoid, utrtest_2.ctid, utrtest_2.*
+                     Output: utrtest_2.a, utrtest_2.ctid, utrtest_2.tableoid, utrtest_2.*
                      Remote SQL: SELECT a, b, ctid FROM public.loct FOR UPDATE
          ->  Hash
                Output: "*VALUES*".*, "*VALUES*".column1
@@ -12325,7 +12325,7 @@ UPDATE async_pt SET c = c || c WHERE b = 0 RETURNING *;
          ->  Foreign Update on public.async_p2 async_pt_2
                Remote SQL: UPDATE public.base_tbl2 SET c = (c || c) WHERE ((b = 0)) RETURNING a, b, c
          ->  Seq Scan on public.async_p3 async_pt_3
-               Output: (async_pt_3.c || async_pt_3.c), async_pt_3.tableoid, async_pt_3.ctid, NULL::record
+               Output: (async_pt_3.c || async_pt_3.c), async_pt_3.ctid, NULL::record, async_pt_3.tableoid
                Filter: (async_pt_3.b = 0)
 (13 rows)
 
@@ -12352,7 +12352,7 @@ DELETE FROM async_pt WHERE b = 0 RETURNING *;
          ->  Foreign Delete on public.async_p2 async_pt_2
                Remote SQL: DELETE FROM public.base_tbl2 WHERE ((b = 0)) RETURNING a, b, c
          ->  Seq Scan on public.async_p3 async_pt_3
-               Output: async_pt_3.tableoid, async_pt_3.ctid
+               Output: async_pt_3.ctid, async_pt_3.tableoid
                Filter: (async_pt_3.b = 0)
 (13 rows)
 

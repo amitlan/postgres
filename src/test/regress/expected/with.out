@@ -3638,21 +3638,21 @@ DELETE FROM a_star USING wcte WHERE aa = q2;
            ->  Result
                  Output: '42'::bigint, '47'::bigint
    ->  Hash Join
-         Output: wcte.*, a_star.tableoid, a_star.ctid
+         Output: wcte.*, a_star.ctid, a_star.tableoid
          Hash Cond: (a_star.aa = wcte.q2)
          ->  Append
                ->  Seq Scan on public.a_star a_star_1
-                     Output: a_star_1.aa, a_star_1.tableoid, a_star_1.ctid
+                     Output: a_star_1.aa, a_star_1.ctid, a_star_1.tableoid
                ->  Seq Scan on public.b_star a_star_2
-                     Output: a_star_2.aa, a_star_2.tableoid, a_star_2.ctid
+                     Output: a_star_2.aa, a_star_2.ctid, a_star_2.tableoid
                ->  Seq Scan on public.c_star a_star_3
-                     Output: a_star_3.aa, a_star_3.tableoid, a_star_3.ctid
+                     Output: a_star_3.aa, a_star_3.ctid, a_star_3.tableoid
                ->  Seq Scan on public.d_star a_star_4
-                     Output: a_star_4.aa, a_star_4.tableoid, a_star_4.ctid
+                     Output: a_star_4.aa, a_star_4.ctid, a_star_4.tableoid
                ->  Seq Scan on public.e_star a_star_5
-                     Output: a_star_5.aa, a_star_5.tableoid, a_star_5.ctid
+                     Output: a_star_5.aa, a_star_5.ctid, a_star_5.tableoid
                ->  Seq Scan on public.f_star a_star_6
-                     Output: a_star_6.aa, a_star_6.tableoid, a_star_6.ctid
+                     Output: a_star_6.aa, a_star_6.ctid, a_star_6.tableoid
          ->  Hash
                Output: wcte.*, wcte.q2
                ->  CTE Scan on wcte

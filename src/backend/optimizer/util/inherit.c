@@ -634,11 +634,14 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 							-1,
 							InvalidOid,
 							0);
-			add_row_identity_var(root, rrvar, childRTindex, "tableoid");
 
-			/* Register any row-identity columns needed by this child. */
-			add_row_identity_columns(root, childRTindex,
-									 childrte, childrel);
+			/*
+			 * Register any row-identity columns needed by this child.
+			 * Add tableoid only if row-identity columns were added.
+			 */
+			if (add_row_identity_columns(root, childRTindex,
+										 childrte, childrel))
+				add_row_identity_var(root, rrvar, childRTindex, "tableoid");
 		}
 	}
 }
