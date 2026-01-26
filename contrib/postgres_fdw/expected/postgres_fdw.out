@@ -12219,6 +12219,7 @@ SELECT * FROM async_pt t1 WHERE t1.b === 505 LIMIT 1;
                Filter: (t1_3.b === 505)
 (14 rows)
 
+SET executor_batch_rows = 1;
 EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
 SELECT * FROM async_pt t1 WHERE t1.b === 505 LIMIT 1;
                                  QUERY PLAN                                 

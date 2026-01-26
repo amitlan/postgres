@@ -182,5 +182,7 @@ ScanResetBatching(ScanState *scanstate, bool drop)
 		}
 		if (drop)
 			pfree(b);
+		scanstate->batch_nqualified = 0;
+		scanstate->batch_outpos = 0;
 	}
 }

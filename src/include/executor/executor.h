@@ -326,6 +326,7 @@ ExecProcNode(PlanState *node)
 extern ExprState *ExecInitExpr(Expr *node, PlanState *parent);
 extern ExprState *ExecInitExprWithParams(Expr *node, ParamListInfo ext_params);
 extern ExprState *ExecInitQual(List *qual, PlanState *parent);
+extern ExprState *ExecInitQualBatch(PlanState *ps);
 extern ExprState *ExecInitCheck(List *qual, PlanState *parent);
 extern List *ExecInitExprList(List *nodes, PlanState *parent);
 extern ExprState *ExecBuildAggTrans(AggState *aggstate, struct AggStatePerPhaseData *phase,
@@ -552,6 +553,9 @@ ExecQualAndReset(ExprState *state, ExprContext *econtext)
 	return ret;
 }
 #endif
+
+extern int ExecQualBatch(ExprState *state, ExprContext *econtext, RowBatch *b,
+						 TupleTableSlot **outslots);
 
 extern bool ExecCheck(ExprState *state, ExprContext *econtext);
 

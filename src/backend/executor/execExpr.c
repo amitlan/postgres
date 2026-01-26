@@ -104,6 +104,16 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 								 bool exists_coerce,
 								 Datum *resv, bool *resnull);
 
+/* private context for the walker */
+typedef struct QualBatchContext
+{
+	List      *leaves;      /* List<Node*> of accepted leaves */
+	Bitmapset *attnos;      /* Vars referenced by accepted leaves */
+	bool		ok;			/* stays true if batchable */
+	AttrNumber	last_scan;	/* last needed attribute in scan slot */
+} QualBatchContext;
+
+static bool qual_batchable_walker(Node *node, void *context);
 
 /*
  * ExecInitExpr: prepare an expression tree for execution
@@ -5063,4 +5073,329 @@ ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 	scratch.d.jsonexpr_coercion.exists_check_domain = exists_coerce &&
 		DomainHasConstraints(returning->typid);
 	ExprEvalPushStep(state, &scratch);
+}
+
+/*
+ * Extract Var attno from expression, unwrapping RelabelType/TargetEntry.
+ * Returns attno > 0 on success, 0 on failure (not a Var, or system column).
+ */
+static AttrNumber
+extract_var_attno(Expr *expr)
+{
+	if (expr == NULL)
+		return 0;
+	if (IsA(expr, TargetEntry))
+		return extract_var_attno(((TargetEntry *) expr)->expr);
+	if (IsA(expr, RelabelType))
+		return extract_var_attno((Expr *) ((RelabelType *) expr)->arg);
+	if (IsA(expr, Var) && ((Var *) expr)->varattno > 0)
+		return ((Var *) expr)->varattno;
+	return 0;
+}
+
+/*
+ * qual_batchable_walker
+ *		Check if a qual tree is eligible for batched evaluation.
+ *
+ * Walks the qual tree and validates that it consists only of:
+ *   - AND expressions (OR/NOT disqualify)
+ *   - NullTest on simple Vars
+ *   - Binary OpExpr with Var op Const or Var op Var arguments
+ *
+ * For OpExpr, the operator must be:
+ *   - Strict: ensures NULL inputs produce NULL/false, matching WHERE semantics
+ *   - Leakproof: required because batching evaluates all rows before filtering,
+ *     which could leak data to non-leakproof operators before security barrier
+ *     quals have a chance to filter rows
+ *
+ * On success, populates cxt->leaves with the leaf nodes and cxt->attnos with
+ * the referenced attribute numbers. Sets cxt->ok = false if any node fails
+ * validation.
+ */
+static bool
+qual_batchable_walker(Node *node, void *context)
+{
+	QualBatchContext *cxt = (QualBatchContext *) context;
+
+	if (node == NULL || !cxt->ok)
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_List:
+			return expression_tree_walker(node, qual_batchable_walker, cxt);
+
+		case T_BoolExpr:
+		{
+			BoolExpr *b = (BoolExpr *) node;
+
+			/* Only AND trees are allowed */
+			if (b->boolop != AND_EXPR)
+			{
+				cxt->ok = false;
+				return true;
+			}
+			/* Recurse normally over children */
+			return expression_tree_walker(node, qual_batchable_walker, cxt);
+		}
+
+		case T_NullTest:
+		{
+			NullTest *nt = (NullTest *) node;
+			AttrNumber  attno = extract_var_attno(nt->arg);
+
+			if (attno == 0)
+			{
+				cxt->ok = false;
+				return true;
+			}
+
+			cxt->attnos = bms_add_member(cxt->attnos, attno);
+			if (attno > cxt->last_scan)
+				cxt->last_scan = attno;
+			cxt->leaves = lappend(cxt->leaves, node);
+
+			/* Do NOT recurse into leaf */
+			return false;
+		}
+
+		case T_OpExpr:
+		{
+			OpExpr *op = (OpExpr *) node;
+			List   *args = op->args;
+			AttrNumber	lattno,
+						rattno;
+
+			/* Only binary operators */
+			if (list_length(args) != 2)
+			{
+				cxt->ok = false;
+				return true;
+			}
+			/* Must be strict (NULL input -> NULL/false result) */
+			if (!func_strict(op->opfuncid))
+			{
+				cxt->ok = false;
+				return true;
+			}
+			/*
+			 * Must be leakproof. Batching changes evaluation order, which
+			 * could leak data through side channels before security barrier
+			 * quals filter rows.
+			 */
+			if (!get_func_leakproof(op->opfuncid))
+			{
+				cxt->ok = false;
+				return true;
+			}
+
+			/* Left arg must be a Var */
+			lattno = extract_var_attno(linitial(op->args));
+			if (lattno == 0)
+			{
+				cxt->ok = false;
+				return true;
+			}
+			cxt->attnos = bms_add_member(cxt->attnos, lattno);
+			if (lattno > cxt->last_scan)
+				cxt->last_scan = lattno;
+
+			/* Right arg must be Const or Var */
+			if (!IsA(lsecond(op->args), Const))
+			{
+				rattno = extract_var_attno(lsecond(op->args));
+				if (rattno == 0)
+				{
+					cxt->ok = false;
+					return true;
+				}
+				cxt->attnos = bms_add_member(cxt->attnos, rattno);
+				if (rattno > cxt->last_scan)
+					cxt->last_scan = rattno;
+			}
+
+			cxt->leaves = lappend(cxt->leaves, node);
+
+			return false;	/* leaf; don't recurse */
+		}
+
+		/* Unhandled node type; fall back to per-tuple evaluation */
+		default:
+			cxt->ok = false;
+			break;
+	}
+
+	return true;
+}
+
+/* build a BatchQualTerm from a validated leaf */
+static BatchQualTerm *
+build_term_from_leaf(Node *n)
+{
+	BatchQualTerm *term;
+	BatchQualTermKind kind;
+	bool		strict;
+	AttrNumber	l_attno;
+	AttrNumber	r_attno;
+	Datum		r_const = (Datum) 0;
+	bool		r_isnull = false;
+	FmgrInfo   *finfo = NULL;
+	Oid			collation;
+
+	if (IsA(n, NullTest))
+	{
+		NullTest *nt = (NullTest *) n;
+
+		kind = nt->nulltesttype == IS_NULL ? BQTK_IS_NULL : BQTK_IS_NOT_NULL;
+		l_attno = extract_var_attno(nt->arg);
+		r_attno = 0;
+		strict = false;
+		collation = InvalidOid;
+
+		if (l_attno == 0)
+			return NULL;
+	}
+	else if (IsA(n, OpExpr))
+	{
+		OpExpr *op = (OpExpr *) n;
+		Expr   *l  = linitial(op->args);
+		Expr   *r  = lsecond(op->args);
+
+		l_attno = extract_var_attno(l);
+		if (l_attno == 0)
+			return NULL;
+
+		if (IsA(r, Const))
+		{
+			Const *c = (Const *) r;
+
+			kind = BQTK_VAR_CONST;
+			r_const = c->constvalue;
+			r_isnull = c->constisnull;
+			r_attno = 0;
+		}
+		else
+		{
+			r_attno = extract_var_attno(r);
+			if (r_attno == 0)
+				return NULL;
+			kind = BQTK_VAR_VAR;
+		}
+
+		strict = func_strict(op->opfuncid);
+		collation = exprInputCollation((Node *) op);
+		finfo = palloc(sizeof(FmgrInfo));
+		fmgr_info(op->opfuncid, finfo);
+	}
+	else
+		return NULL;
+
+	term = palloc(sizeof(BatchQualTerm));
+	term->kind = kind;
+	term->strict = strict;
+	term->l_attno = l_attno;
+	term->r_attno = r_attno;
+	term->r_const = r_const;
+	term->r_isnull = r_isnull;
+	term->finfo = finfo;
+	term->collation = collation;
+
+	return term;
+}
+
+/*
+ * ExecInitQualBatch
+ *		Build a batched-qual ExprState for evaluating scan quals over a RowBatch.
+ *
+ * Returns a dedicated ExprState that evaluates the plan's quals in batch mode,
+ * or NULL if the quals are not eligible for batching. The caller should retain
+ * the regular ps->qual for fallback when batching is not used.
+ *
+ * Batching is only possible when the qual tree consists of:
+ *	- Top-level AND of simple clauses (no OR, NOT)
+ *	- NullTest on a simple Var
+ *	- Binary OpExpr with (Var op Const) or (Var op Var), where the operator
+ *	  is both strict (for proper NULL handling) and leakproof (to avoid
+ *	  leaking data when evaluation order changes vs. security barrier quals)
+ *
+ * The generated EEOP program:
+ *	1. EEOP_SCAN_FETCHSOME_BATCH - deforms all slots in the batch
+ *	2. EEOP_QUAL_BATCH_INITMASK - initializes bitmask to all-pass
+ *	3. EEOP_QUAL_BATCH_TERM (per leaf) - evaluates term, clears failing bits
+ *
+ * The result bitmask is stored in BatchQualRuntime (via ExprState.batch_private)
+ * for the caller to use when populating output slots.
+ */
+ExprState *
+ExecInitQualBatch(PlanState *ps)
+{
+	Node	   *qual = (Node *) ps->plan->qual;
+	QualBatchContext cxt = {NIL, NULL, true, 0};
+	BatchQualRuntime *rt;
+	ExprState  *state;
+	int			maxrows = executor_batch_rows;
+	uint64	   *mask;
+	int			mask_words;
+	ListCell   *lc;
+	ExprEvalStep scratch = {0};
+
+	if (qual == NULL)
+		return NULL;
+
+	/*
+	 * Check if qual tree is batchable; collect leaf nodes and referenced
+	 * attnos.
+	 */
+	(void) qual_batchable_walker(qual, &cxt);
+	if (!cxt.ok || cxt.leaves == NIL || bms_is_empty(cxt.attnos))
+		return NULL;
+
+	/* Allocate bitmask: one bit per row, rounded up to 64-bit words */
+	mask_words = (maxrows + 63) >> 6;
+	mask = (uint64 *) palloc0(sizeof(uint64) * mask_words);
+
+	/* Bundle runtime state; attached to ExprState for access during execution */
+	rt = palloc0(sizeof(BatchQualRuntime));
+	rt->mask = mask;
+	rt->mask_words = mask_words;
+
+	/* Create ExprState for the batched program */
+	state = makeNode(ExprState);
+	state->expr = (Expr *) qual;
+	state->parent = ps;
+	state->ext_params = NULL;
+	state->flags = EEO_FLAG_IS_QUAL;
+	state->batch_private = (void *) rt;
+
+	/* Step 1: deform all slots in batch up to highest referenced attribute */
+	scratch.opcode = EEOP_SCAN_FETCHSOME_BATCH;
+	scratch.d.fetch_batch.last_var = cxt.last_scan;
+	ExprEvalPushStep(state, &scratch);
+
+	/* Step 2 initialize mask to all-ones (all rows pass initially) */
+	scratch.opcode = EEOP_QUAL_BATCH_INITMASK;
+	scratch.d.qualbatch_init.mask = mask;
+	scratch.d.qualbatch_init.mask_words = mask_words;
+	ExprEvalPushStep(state, &scratch);
+
+	/* Step 3: one TERM per qual leaf; each clears mask bits for failing rows */
+	foreach(lc, cxt.leaves)
+	{
+		BatchQualTerm *term = build_term_from_leaf((Node *) lfirst(lc));
+
+		if (term == NULL)
+			return NULL;
+
+		scratch.opcode = EEOP_QUAL_BATCH_TERM;
+		scratch.d.qualbatch_term.term = term;		/* by value */
+		ExprEvalPushStep(state, &scratch);
+	}
+
+	/* Done; mask now indicates which rows survived all quals */
+	scratch.opcode = EEOP_DONE_NO_RETURN;
+	ExprEvalPushStep(state, &scratch);
+
+	ExecReadyExpr(state);
+
+	return state;
 }

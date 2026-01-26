@@ -59,6 +59,7 @@
 #include "access/heaptoast.h"
 #include "catalog/pg_type.h"
 #include "commands/sequence.h"
+#include "executor/execRowBatch.h"
 #include "executor/execExpr.h"
 #include "executor/nodeSubplan.h"
 #include "funcapi.h"
@@ -466,6 +467,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 	TupleTableSlot *scanslot;
 	TupleTableSlot *oldslot;
 	TupleTableSlot *newslot;
+	RowBatch *scanbatch;
 
 	/*
 	 * This array has to be in the same order as enum ExprEvalOp.
@@ -592,6 +594,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_AGG_PRESORTED_DISTINCT_MULTI,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_DATUM,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_TUPLE,
+		&&CASE_EEOP_SCAN_FETCHSOME_BATCH,
+		&&CASE_EEOP_QUAL_BATCH_INITMASK,
+		&&CASE_EEOP_QUAL_BATCH_TERM,
 		&&CASE_EEOP_LAST
 	};
 
@@ -612,6 +617,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 	scanslot = econtext->ecxt_scantuple;
 	oldslot = econtext->ecxt_oldtuple;
 	newslot = econtext->ecxt_newtuple;
+	scanbatch = econtext->scan_batch;
 
 #if defined(EEO_USE_COMPUTED_GOTO)
 	EEO_DISPATCH();
@@ -2262,6 +2268,28 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/* too complex for an inline implementation */
 			ExecEvalAggOrderedTransTuple(state, op, econtext);
 
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_SCAN_FETCHSOME_BATCH)
+		{
+			CheckOpSlotCompatibility(op, scanslot);
+
+			Assert(scanbatch);
+			slot_getsomeattrs_batch(scanbatch, op->d.fetch_batch.last_var);
+
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_QUAL_BATCH_INITMASK)
+		{
+			ExecQualBatchInitMask(state, op, econtext);
+			EEO_NEXT();
+		}
+
+		EEO_CASE(EEOP_QUAL_BATCH_TERM)
+		{
+			ExecQualBatchTerm(state, op, econtext);
 			EEO_NEXT();
 		}
 
@@ -5917,4 +5945,195 @@ ExecAggPlainTransByRef(AggState *aggstate, AggStatePerTrans pertrans,
 	pergroup->transValueIsNull = fcinfo->isnull;
 
 	MemoryContextSwitchTo(oldContext);
+}
+
+/* set mask bits [0..nvalid_bits) to 1; clear padding in the last word */
+static inline void
+mask_init_all_ones(uint64 *a, int nwords, int nvalid_bits)
+{
+	for (int i = 0; i < nwords; i++)
+		a[i] = ~UINT64CONST(0);
+
+	if ((nvalid_bits & 63) != 0)
+	{
+		int rem = nvalid_bits & 63;
+
+		a[nwords - 1] &= (~UINT64CONST(0)) >> (64 - rem);
+	}
+}
+
+static inline void
+mask_clear_bit(uint64 *a, int i)
+{
+	a[i >> 6] &= ~(UINT64CONST(1) << (i & 63));
+}
+
+static inline bool
+mask_is_empty(const uint64 *mask, int nwords)
+{
+	for (int i = 0; i < nwords; i++)
+	{
+		if (mask[i] != 0)
+			return false;
+	}
+	return true;
+}
+
+void
+ExecQualBatchInitMask(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	RowBatch *b = econtext->scan_batch;
+	uint64      *mask = op->d.qualbatch_init.mask;
+	int          nwords = op->d.qualbatch_init.mask_words;
+	int          n = b->nrows;
+
+	/* initialize to all-pass for current batch size */
+	mask_init_all_ones(mask, nwords, n);
+}
+
+void
+ExecQualBatchTerm(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+{
+	BatchQualRuntime *rt = ExecGetBatchQualRuntime(state);
+	RowBatch *b = econtext->scan_batch;
+	TupleTableSlot **slots = b->slots;
+	uint64		   *mask = rt->mask;
+	int				mask_words = rt->mask_words;
+	BatchQualTerm  *t = op->d.qualbatch_term.term;
+	int				n = b->nrows;
+
+	/* Early exit if no rows remain */
+	if (mask_is_empty(mask, mask_words))
+		return;
+
+	switch (t->kind)
+	{
+		case BQTK_IS_NULL:
+		{
+			/* keep bit set only if value IS NULL; clear otherwise */
+			for (int i = 0; i < n; i++)
+			{
+				if (!slots[i]->tts_isnull[t->l_attno-1])
+					mask_clear_bit(mask, i);
+			}
+			break;
+		}
+
+		case BQTK_IS_NOT_NULL:
+		{
+			/* keep bit set only if value IS NOT NULL; clear if NULL */
+			for (int i = 0; i < n; i++)
+			{
+				if (slots[i]->tts_isnull[t->l_attno-1])
+					mask_clear_bit(mask, i);
+			}
+			break;
+		}
+
+		case BQTK_VAR_CONST:
+		{
+			const bool  r_isnull = t->r_isnull;
+			const Datum r_const  = t->r_const;
+			const bool  strict   = t->strict;
+			const Oid   coll     = t->collation;
+			FmgrInfo   *finfo    = t->finfo;
+
+			for (int i = 0; i < n; i++)
+			{
+				bool ln = slots[i]->tts_isnull[t->l_attno-1];
+				bool pass;
+
+				/* WHERE treats NULL as false; strict ops short-circuit */
+				if (strict && (ln || r_isnull))
+					pass = false;
+				else
+				{
+					Datum lv = slots[i]->tts_values[t->l_attno-1];
+
+					pass = DatumGetBool(FunctionCall2Coll(finfo, coll, lv, r_const));
+				}
+
+				if (!pass)
+					mask_clear_bit(mask, i);
+			}
+			break;
+		}
+
+		case BQTK_VAR_VAR:
+		{
+			const bool  strict = t->strict;
+			const Oid   coll   = t->collation;
+			FmgrInfo   *finfo  = t->finfo;
+
+			for (int i = 0; i < n; i++)
+			{
+				bool	ln = slots[i]->tts_isnull[t->l_attno-1];
+				bool	rn = slots[i]->tts_isnull[t->r_attno-1];
+				bool	pass;
+
+				if (strict && (ln || rn))
+					pass = false;
+				else
+				{
+					Datum lv = slots[i]->tts_values[t->l_attno-1];
+					Datum rv = slots[i]->tts_values[t->r_attno-1];
+
+					pass = DatumGetBool(FunctionCall2Coll(finfo, coll, lv, rv));
+				}
+
+				if (!pass)
+					mask_clear_bit(mask, i);
+			}
+			break;
+		}
+
+		default:
+			/* should not happen; leave mask unchanged */
+			break;
+	}
+}
+
+/*
+ * ExecQualBatch
+ *		Evaluate a batched qual over all rows in a RowBatch.
+ *
+ * Runs the EEOP program built by ExecInitQualBatch, which produces a bitmask
+ * indicating which rows pass the qual. Rows that pass are copied to the
+ * batch's output slots (b->outslots).
+ *
+ * Returns the number of qualifying rows. The caller should then call
+ * RowBatchUseOutput(b, qualified) to switch the batch to return from
+ * outslots.
+ *
+ * The batch must be materialized (slots populated) before calling this.
+ */
+int
+ExecQualBatch(ExprState *state, ExprContext *econtext, RowBatch *b,
+			  TupleTableSlot **outslots)
+{
+	uint64 *mask;
+	int		kept = 0;
+	BatchQualRuntime *rt = ExecGetBatchQualRuntime(state);
+
+	/* verify that expression was compiled using ExecInitQualBatch */
+	Assert(state->flags & EEO_FLAG_IS_QUAL);
+	Assert(rt && rt->mask && rt->mask_words);
+
+	/* run the batched EEOP program once */
+	econtext->scan_batch = b;
+	ExecEvalExprNoReturn(state, econtext);
+
+	mask = rt->mask;
+	if (mask_is_empty(mask, rt->mask_words))
+		return 0;
+
+	/* Add survivors into outslots */
+	for (int i = 0; i < b->nrows; i++)
+	{
+		/* mask bit set => row survives */
+		if (mask[i >> 6] & (UINT64CONST(1) << (i & 63)))
+			outslots[kept++] = b->slots[i];
+	}
+
+	return kept;
 }

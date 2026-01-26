@@ -109,6 +109,9 @@ llvm_compile_expr(ExprState *state)
 	LLVMValueRef v_newslot;
 	LLVMValueRef v_resultslot;
 
+	/* batches */
+	LLVMValueRef v_scanbatch;
+
 	/* nulls/values of slots */
 	LLVMValueRef v_innervalues;
 	LLVMValueRef v_innernulls;
@@ -221,6 +224,11 @@ llvm_compile_expr(ExprState *state)
 									 v_state,
 									 FIELDNO_EXPRSTATE_RESULTSLOT,
 									 "v_resultslot");
+	v_scanbatch = l_load_struct_gep(b,
+									StructExprContext,
+									v_econtext,
+									FIELDNO_EXPRCONTEXT_SCANBATCH,
+									"v_scanbatch");
 
 	/* build global values/isnull pointers */
 	v_scanvalues = l_load_struct_gep(b,
@@ -2936,6 +2944,33 @@ llvm_compile_expr(ExprState *state)
 
 			case EEOP_AGG_ORDERED_TRANS_TUPLE:
 				build_EvalXFunc(b, mod, "ExecEvalAggOrderedTransTuple",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+
+			case EEOP_SCAN_FETCHSOME_BATCH:
+				{
+					LLVMValueRef params[2];
+
+					params[0] = v_scanbatch;
+					params[1] = l_int32_const(lc, op->d.fetch_batch.last_var);
+
+						l_call(b,
+							   llvm_pg_var_func_type("slot_getsomeattrs_batch"),
+							   llvm_pg_func(mod, "slot_getsomeattrs_batch"),
+							   params, lengthof(params), "");
+
+					LLVMBuildBr(b, opblocks[opno + 1]);
+					break;
+				}
+
+			case EEOP_QUAL_BATCH_INITMASK:
+				build_EvalXFunc(b, mod, "ExecQualBatchInitMask",
+								v_state, op, v_econtext);
+				LLVMBuildBr(b, opblocks[opno + 1]);
+				break;
+			case EEOP_QUAL_BATCH_TERM:
+				build_EvalXFunc(b, mod, "ExecQualBatchTerm",
 								v_state, op, v_econtext);
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;

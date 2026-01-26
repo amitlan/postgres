@@ -148,6 +148,9 @@ typedef struct ExprState
 	 * ExecInitExprRec().
 	 */
 	ErrorSaveContext *escontext;
+
+	/* batched-program runtime (e.g., BatchQualRuntime) */
+	void	 *batch_private;
 } ExprState;
 
 
@@ -313,6 +316,10 @@ typedef struct ExprContext
 	TupleTableSlot *ecxt_oldtuple;
 #define FIELDNO_EXPRCONTEXT_NEWTUPLE 15
 	TupleTableSlot *ecxt_newtuple;
+
+	/* For batched evaluation using batch-aware EEOPs */
+#define FIELDNO_EXPRCONTEXT_SCANBATCH 16
+	RowBatch	   *scan_batch;
 
 	/* Link to containing EState (NULL if a standalone ExprContext) */
 	struct EState *ecxt_estate;
@@ -1187,7 +1194,9 @@ typedef struct PlanState
 	 * state trees parallel links in the associated plan tree (except for the
 	 * subPlan list, which does not exist in the plan tree).
 	 */
-	ExprState  *qual;			/* boolean qual condition */
+	ExprState  *qual;			/* boolean qual condition (per tuple) */
+	ExprState  *qual_batch;		/* batched qual program, NULL if qual not
+								 * batchable */
 	PlanState  *lefttree;		/* input plan tree(s) */
 	PlanState  *righttree;
 
@@ -1629,6 +1638,11 @@ typedef struct ScanState
 	Relation	ss_currentRelation;
 	struct TableScanDescData *ss_currentScanDesc;
 	TupleTableSlot *ss_ScanTupleSlot;
+
+	/* Batch qual selection state (executor-owned) */
+	TupleTableSlot **batch_outslots;	/* surviving slots after batch qual */
+	int			batch_nqualified;		/* number of survivors */
+	int			batch_outpos;			/* iteration position */
 } ScanState;
 
 /* ----------------

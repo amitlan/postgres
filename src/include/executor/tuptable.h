@@ -346,6 +346,8 @@ extern Datum ExecFetchSlotHeapTupleDatum(TupleTableSlot *slot);
 extern void slot_getmissingattrs(TupleTableSlot *slot, int startAttNum,
 								 int lastAttNum);
 extern void slot_getsomeattrs_int(TupleTableSlot *slot, int attnum);
+struct RowBatch;
+extern void slot_getsomeattrs_batch(struct RowBatch *b, int attnum);
 
 
 #ifndef FRONTEND

@@ -292,10 +292,28 @@ typedef enum ExprEvalOp
 	EEOP_AGG_ORDERED_TRANS_DATUM,
 	EEOP_AGG_ORDERED_TRANS_TUPLE,
 
+	/*
+	 * Batched qual evaluation opcodes
+	 *
+	 * These opcodes implement batch-mode qual evaluation where an entire
+	 * RowBatch is processed at once rather than tuple-by-tuple.
+	 *
+	 * EEOP_SCAN_FETCHSOME_BATCH: Call slot_getsomeattrs() on all slots in
+	 *     the batch to ensure needed attributes are deformed.
+	 *
+	 * EEOP_QUAL_BATCH_INITMASK: Initialize the result bitmask to all-ones
+	 *     (all rows initially pass).
+	 *
+	 * EEOP_QUAL_BATCH_TERM: Evaluate one qual leaf (NullTest or OpExpr) over
+	 *     all rows, clearing mask bits for rows that fail.
+	 */
+	EEOP_SCAN_FETCHSOME_BATCH,
+	EEOP_QUAL_BATCH_INITMASK,
+	EEOP_QUAL_BATCH_TERM,
+
 	/* non-existent operation, used e.g. to check array lengths */
 	EEOP_LAST
 } ExprEvalOp;
-
 
 typedef struct ExprEvalStep
 {
@@ -330,6 +348,12 @@ typedef struct ExprEvalStep
 			/* type of slot, can only be relied upon if fixed is set */
 			const TupleTableSlotOps *kind;
 		}			fetch;
+
+		struct
+		{
+			/* attribute number up to which to fetch (inclusive) */
+			int			last_var;
+		}			fetch_batch;
 
 		/* for EEOP_INNER/OUTER/SCAN/OLD/NEW_[SYS]VAR */
 		struct
@@ -769,6 +793,17 @@ typedef struct ExprEvalStep
 			void	   *json_coercion_cache;
 			ErrorSaveContext *escontext;
 		}			jsonexpr_coercion;
+
+		struct
+		{
+			uint64			   *mask;		/* shared mask buffer for this program */
+			int					mask_words; /* ceil(es_max_batch/64) */
+		}			qualbatch_init;			/* EEOP_QUAL_BATCH_INITMASK */
+
+		struct
+		{
+			struct BatchQualTerm *term;		/* compiled leaf */
+		}			qualbatch_term;			/* EEOP_QUAL_BATCH_TERM */
 	}			d;
 } ExprEvalStep;
 
@@ -916,5 +951,52 @@ extern void ExecEvalAggOrderedTransDatum(ExprState *state, ExprEvalStep *op,
 										 ExprContext *econtext);
 extern void ExecEvalAggOrderedTransTuple(ExprState *state, ExprEvalStep *op,
 										 ExprContext *econtext);
+
+/* See ExecQualBatchTerm(). */
+typedef enum BatchQualTermKind
+{
+	BQTK_VAR_CONST,
+	BQTK_VAR_VAR,
+	BQTK_IS_NULL,
+	BQTK_IS_NOT_NULL,
+} BatchQualTermKind;
+
+typedef struct BatchQualTerm
+{
+	BatchQualTermKind kind;
+	bool		strict;		/* follow strict NULL semantics if true */
+	AttrNumber	l_attno;	/* left VAR column */
+	AttrNumber	r_attno;	/* right VAR column, or -1 if Const */
+	Datum		r_const;	/* for VAR_CONST */
+	bool		r_isnull;	/* for VAR_CONST */
+	FmgrInfo   *finfo;		/* fmgr for generic binary ops */
+	Oid			collation;	/* op collation */
+} BatchQualTerm;
+
+/*
+ * BatchQualRuntime - execution state for batched qual evaluation
+ *
+ * Attached to ExprState.batch_private for the batched qual program.
+ * Contains the bitmask that tracks which rows pass the qual (bit set = pass),
+ * and references to the BatchVector for EEOP_QUAL_BATCH_TERM to use.
+ *
+ * The mask uses standard bit operations: word = i/64, bit = i%64.
+ * Initialized to all-ones by EEOP_QUAL_BATCH_INITMASK, then each
+ * EEOP_QUAL_BATCH_TERM clears bits for failing rows.
+ */
+typedef struct BatchQualRuntime
+{
+	uint64		   *mask;
+	int				mask_words;
+} BatchQualRuntime;
+
+static inline BatchQualRuntime *
+ExecGetBatchQualRuntime(ExprState *batch_qual)
+{
+	return (BatchQualRuntime *) batch_qual->batch_private;
+}
+
+extern void ExecQualBatchInitMask(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
+extern void ExecQualBatchTerm(ExprState *state, ExprEvalStep *op, ExprContext *econtext);
 
 #endif							/* EXEC_EXPR_H */

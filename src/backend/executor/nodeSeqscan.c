@@ -281,6 +281,31 @@ ExecSeqScanBatchSlot(PlanState *pstate)
 }
 
 static TupleTableSlot *
+ExecSeqScanBatchSlotWithBatchQual(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+	ScanState	 *ss = &node->ss;
+
+	for (;;)
+	{
+		/* Return next qualified slot if available */
+		if (ss->batch_outpos < ss->batch_nqualified)
+			return ss->batch_outslots[ss->batch_outpos++];
+
+		/* Exhausted — fetch next batch, materialize, eval quals */
+		if (!SeqNextBatchMaterialize(node))
+			return NULL;
+
+		ss->batch_nqualified = ExecQualBatch(pstate->qual_batch,
+											 pstate->ps_ExprContext,
+											 ss->ps.ps_Batch,
+											 ss->batch_outslots);
+		ss->batch_outpos = 0;
+		InstrCountFiltered1(ss, ss->ps.ps_Batch->nrows - ss->batch_nqualified);
+	}
+}
+
+static TupleTableSlot *
 ExecSeqScanBatchSlotWithQual(PlanState *pstate)
 {
 	SeqScanState *node = castNode(SeqScanState, pstate);
@@ -343,6 +368,12 @@ SeqScanInitBatching(SeqScanState *scanstate, int eflags)
 	bool track_stats = estate->es_instrument && (estate->es_instrument & INSTRUMENT_BATCHES);
 
 	scanstate->ss.ps.ps_Batch = RowBatchCreate(scandesc, cap, track_stats);
+	scanstate->ss.ps.qual_batch = ExecInitQualBatch((PlanState *) scanstate);
+
+	/* Executor-owned selection state for batch qual eval */
+	scanstate->ss.batch_outslots = palloc(sizeof(TupleTableSlot *) * cap);
+	scanstate->ss.batch_nqualified = 0;
+	scanstate->ss.batch_outpos = 0;
 
 	/* Choose batch variant to preserve your specialization matrix */
 	if (scanstate->ss.ps.qual == NULL)
@@ -360,7 +391,10 @@ SeqScanInitBatching(SeqScanState *scanstate, int eflags)
 	{
 		if (scanstate->ss.ps.ps_ProjInfo == NULL)
 		{
-			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
+			if (scanstate->ss.ps.qual_batch == NULL)
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
+			else
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithBatchQual;
 		}
 		else
 		{
