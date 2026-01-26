@@ -1019,6 +1019,8 @@ table_rescan_set_params(TableScanDesc scan, ScanKeyData *key,
 static inline bool
 table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
+	bool	result;
+
 	slot->tts_tableOid = RelationGetRelid(sscan->rs_rd);
 
 	/* We don't expect actual scans using NoMovementScanDirection */
@@ -1033,7 +1035,9 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	if (unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan))
 		elog(ERROR, "unexpected table_scan_getnextslot call during logical decoding");
 
-	return sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+	result = sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+	pg_assume(result == !TupIsNull(slot));
+	return result;
 }
 
 /* ----------------------------------------------------------------------------
