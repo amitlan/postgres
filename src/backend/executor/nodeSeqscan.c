@@ -63,17 +63,6 @@ SeqNext(SeqScanState *node)
 	direction = estate->es_direction;
 	slot = node->ss.ss_ScanTupleSlot;
 
-	if (scandesc == NULL)
-	{
-		/*
-		 * We reach here if the scan is not parallel, or if we're serially
-		 * executing a scan that was planned to be parallel.
-		 */
-		scandesc = table_beginscan(node->ss.ss_currentRelation,
-								   estate->es_snapshot,
-								   0, NULL);
-		node->ss.ss_currentScanDesc = scandesc;
-	}
 
 	/*
 	 * get the next tuple from the table
@@ -257,6 +246,21 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	 */
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
+
+	/*
+	 * Build the TableScanDesc unless we're just doing an EXPLAIN without
+	 * ANALYZE.  Parallel SeqScan's TableScanDesc is built by
+	 * ExecSeqScanInitializeDSM or ExecSeqScanInitializeWorker.
+	 */
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0 &&
+		node->scan.plan.parallel_aware == false)
+	{
+		scanstate->ss.ss_currentScanDesc =
+			table_beginscan(scanstate->ss.ss_currentRelation,
+							estate->es_snapshot,
+							0,
+							NULL);
+	}
 
 	/*
 	 * When EvalPlanQual() is not in use, assign ExecProcNode for this node
