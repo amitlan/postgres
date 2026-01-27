@@ -251,4 +251,73 @@ ExecScanExtended(ScanState *node,
 	}
 }
 
+/*
+ * ExecScanExtendedBatchSlot
+ *		Batch-driven variant of ExecScanExtended.
+ *
+ * Returns one tuple at a time to callers, but internally fetches tuples
+ * in batches from the AM via accessBatchMtd. This reduces per-tuple AM
+ * call overhead while preserving the single-slot interface expected by
+ * parent nodes.
+ *
+ * The batch is refilled when exhausted by calling accessBatchMtd, which
+ * returns false at end-of-scan.
+ *
+ * Note: EPQ is not supported in the batch path; callers must ensure
+ * es_epq_active is NULL before using this function.
+ */
+static inline TupleTableSlot *
+ExecScanExtendedBatchSlot(ScanState *node,
+						  ExecScanAccessBatchMtd accessBatchMtd,
+						  ExprState *qual, ProjectionInfo *projInfo)
+{
+	ExprContext *econtext = node->ps.ps_ExprContext;
+	RowBatch *b = node->ps.ps_Batch;
+
+	/* Batch path does not support EPQ */
+	Assert(node->ps.state->es_epq_active == NULL);
+	Assert(RowBatchIsValid(b));
+
+	for (;;)
+	{
+		TupleTableSlot *in;
+
+		CHECK_FOR_INTERRUPTS();
+
+		/* Get next input slot from current batch, or refill */
+		if (!RowBatchHasMore(b))
+		{
+			if (!accessBatchMtd(node))
+				return NULL;
+		}
+
+		in = RowBatchGetNextSlot(b);
+		Assert(in);
+
+		/* No qual, no projection: direct return */
+		if (qual == NULL && projInfo == NULL)
+			return in;
+
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = in;
+
+		/* Qual only */
+		if (projInfo == NULL)
+		{
+			if (qual == NULL || ExecQual(qual, econtext))
+				return in;
+			else
+				InstrCountFiltered1(node, 1);
+			continue;
+		}
+
+		/* Projection (with or without qual) */
+		if (qual == NULL || ExecQual(qual, econtext))
+			return ExecProject(projInfo);
+		else
+			InstrCountFiltered1(node, 1);
+		/* else try next tuple */
+	}
+}
+
 #endif							/* EXECSCAN_H */

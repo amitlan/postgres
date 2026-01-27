@@ -72,7 +72,6 @@ heapam_slot_callbacks(Relation relation)
 	return &TTSOpsBufferHeapTuple;
 }
 
-
 /* ------------------------------------------------------------------------
  * Index Scan Callbacks for heap AM
  * ------------------------------------------------------------------------

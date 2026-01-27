@@ -18,6 +18,7 @@
  */
 #include "postgres.h"
 
+#include "access/tableam.h"
 #include "executor/executor.h"
 #include "executor/execScan.h"
 #include "miscadmin.h"
@@ -152,5 +153,34 @@ ExecScanReScan(ScanState *node)
 					epqstate->relsubs_blocked[rtindex - 1];
 			}
 		}
+	}
+}
+
+bool
+ScanCanUseBatching(ScanState *scanstate, int eflags)
+{
+	Relation	relation = scanstate->ss_currentRelation;
+
+	return	executor_batch_rows > 1 &&
+			(scanstate->ps.state->es_epq_active == NULL) &&
+			!(eflags & EXEC_FLAG_BACKWARD) &&
+			relation && table_supports_batching(relation);
+}
+
+void
+ScanResetBatching(ScanState *scanstate, bool drop)
+{
+	RowBatch *b = scanstate->ps.ps_Batch;
+
+	if (b)
+	{
+		RowBatchReset(b, drop);
+		if (b->am_payload)
+		{
+			table_scan_end_batch(scanstate->ss_currentScanDesc, b);
+			b->am_payload = NULL;
+		}
+		if (drop)
+			pfree(b);
 	}
 }

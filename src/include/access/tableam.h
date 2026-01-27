@@ -21,6 +21,7 @@
 #include "access/sdir.h"
 #include "access/xact.h"
 #include "commands/vacuum.h"
+#include "executor/execRowBatch.h"
 #include "executor/tuptable.h"
 #include "storage/read_stream.h"
 #include "utils/rel.h"
@@ -39,6 +40,7 @@ typedef struct BulkInsertStateData BulkInsertStateData;
 typedef struct IndexInfo IndexInfo;
 typedef struct SampleScanState SampleScanState;
 typedef struct ValidateIndexState ValidateIndexState;
+typedef struct RowBatchOps RowBatchOps;
 
 /*
  * Bitmask values for the flags argument to the scan_begin callback.
@@ -304,7 +306,6 @@ typedef struct TableAmRoutine
 	 */
 	const TupleTableSlotOps *(*slot_callbacks) (Relation rel);
 
-
 	/* ------------------------------------------------------------------------
 	 * Table scan callbacks.
 	 * ------------------------------------------------------------------------
@@ -362,6 +363,7 @@ typedef struct TableAmRoutine
 	bool		(*scan_getnextbatch)(TableScanDesc sscan, RowBatch *b,
 									 ScanDirection dir);
 	void		(*scan_end_batch)(TableScanDesc sscan, RowBatch *b);
+
 
 	/*-----------
 	 * Optional functions to provide scanning for ranges of ItemPointers.
@@ -873,6 +875,16 @@ extern const TupleTableSlotOps *table_slot_callbacks(Relation relation);
  */
 extern TupleTableSlot *table_slot_create(Relation relation, List **reglist);
 
+/* ----------------------------------------------------------------------------
+ * RowBatch functions.
+ * ----------------------------------------------------------------------------
+ */
+
+/*
+ * Returns callbacks for manipulating RowBatch for tuples of the given
+ * relation.
+ */
+extern const RowBatchOps *table_batch_callbacks(Relation relation);
 
 /* ----------------------------------------------------------------------------
  * Table scan functions.
@@ -1057,6 +1069,18 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		   direction == BackwardScanDirection);
 
 	return sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+}
+
+/*
+ * table_supports_batching
+ *		Does the relation's AM support batching?
+ */
+static inline bool
+table_supports_batching(Relation relation)
+{
+	const TableAmRoutine *tam = relation->rd_tableam;
+
+	return tam->scan_getnextbatch != NULL;
 }
 
 /*
@@ -2116,5 +2140,6 @@ extern const TableAmRoutine *GetTableAmRoutine(Oid amhandler);
  */
 
 extern const TableAmRoutine *GetHeapamTableAmRoutine(void);
+extern struct RowBatchOps *GetHeapamRowBatchOps(void);
 
 #endif							/* TABLEAM_H */
