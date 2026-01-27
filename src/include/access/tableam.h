@@ -351,6 +351,16 @@ typedef struct TableAmRoutine
 									 ScanDirection direction,
 									 TupleTableSlot *slot);
 
+	/* ------------------------------------------------------------------------
+	 * Batched scan support
+	 * ------------------------------------------------------------------------
+	 */
+
+	void	   *(*scan_begin_batch)(TableScanDesc sscan, int maxitems);
+	int			(*scan_getnextbatch)(TableScanDesc sscan, void *am_batch,
+									 ScanDirection dir);
+	void		(*scan_end_batch)(TableScanDesc sscan, void *am_batch);
+
 	/*-----------
 	 * Optional functions to provide scanning for ranges of ItemPointers.
 	 * Implementations must either provide both of these functions, or neither
@@ -1034,6 +1044,54 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		elog(ERROR, "unexpected table_scan_getnextslot call during logical decoding");
 
 	return sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+}
+
+/*
+ * table_scan_begin_batch
+ *		Allocate AM-owned batch payload with capacity 'maxitems'.
+ */
+static inline void *
+table_scan_begin_batch(TableScanDesc sscan, int maxitems)
+{
+	const TableAmRoutine *tam = sscan->rs_rd->rd_tableam;
+
+	Assert(tam->scan_begin_batch != NULL);
+
+	return tam->scan_begin_batch(sscan, maxitems);
+}
+
+/*
+ * table_scan_getnextbatch
+ *		Fill next batch from the AM. Returns number of tuples, 0 => EOS.
+ *		Batches are single-page in v1. Direction is forward only in v1.
+ */
+static inline int
+table_scan_getnextbatch(TableScanDesc sscan, void *am_batch, ScanDirection dir)
+{
+	const TableAmRoutine *tam = sscan->rs_rd->rd_tableam;
+
+	/* Only forward scans are supported in the batched mode. */
+	Assert(ScanDirectionIsForward(dir));
+	Assert(tam->scan_getnextbatch != NULL);
+
+	return tam->scan_getnextbatch(sscan, am_batch, dir);
+}
+
+/*
+ * table_scan_end_batch
+ *		Release AM-owned resources for the batch payload.
+ */
+static inline void
+table_scan_end_batch(TableScanDesc sscan, void *am_batch)
+{
+	const TableAmRoutine *tam = sscan->rs_rd->rd_tableam;
+
+	if (am_batch == NULL)
+		return;
+
+	Assert(tam->scan_end_batch != NULL);
+
+	tam->scan_end_batch(sscan, am_batch);
 }
 
 /* ----------------------------------------------------------------------------
