@@ -189,6 +189,8 @@ static pg_attribute_always_inline void ExecAggPlainTransByRef(AggState *aggstate
 															  int setno);
 static char *ExecGetJsonValueItemString(JsonbValue *item, bool *resnull);
 
+static Datum ExecInterpQualBatch(ExprState *state, ExprContext *econtext);
+
 /*
  * ScalarArrayOpExprHashEntry
  * 		Hash table entry type used during EEOP_HASHED_SCALARARRAYOP
@@ -265,6 +267,12 @@ ExecReadyInterpretedExpr(ExprState *state)
 	 * callback to the actual method of execution.
 	 */
 	state->evalfunc = ExecInterpExprStillValid;
+
+	if (state->batch_private)
+	{
+		state->evalfunc_private = (void *) ExecInterpQualBatch;
+		return;
+	}
 
 	/* DIRECT_THREADED should not already be set */
 	Assert((state->flags & EEO_FLAG_DIRECT_THREADED) == 0);
@@ -467,7 +475,6 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 	TupleTableSlot *scanslot;
 	TupleTableSlot *oldslot;
 	TupleTableSlot *newslot;
-	RowBatch *scanbatch;
 
 	/*
 	 * This array has to be in the same order as enum ExprEvalOp.
@@ -594,9 +601,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_AGG_PRESORTED_DISTINCT_MULTI,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_DATUM,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_TUPLE,
-		&&CASE_EEOP_SCAN_FETCHSOME_BATCH,
-		&&CASE_EEOP_QUAL_BATCH_INITMASK,
-		&&CASE_EEOP_QUAL_BATCH_TERM,
+		&&CASE_EEOP_BATCH_UNREACHABLE,  /* EEOP_SCAN_FETCHSOME_BATCH */
+		&&CASE_EEOP_BATCH_UNREACHABLE,  /* EEOP_QUAL_BATCH_INITMASK */
+		&&CASE_EEOP_BATCH_UNREACHABLE,  /* EEOP_QUAL_BATCH_TERM */
 		&&CASE_EEOP_LAST
 	};
 
@@ -617,7 +624,6 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 	scanslot = econtext->ecxt_scantuple;
 	oldslot = econtext->ecxt_oldtuple;
 	newslot = econtext->ecxt_newtuple;
-	scanbatch = econtext->scan_batch;
 
 #if defined(EEO_USE_COMPUTED_GOTO)
 	EEO_DISPATCH();
@@ -2271,33 +2277,17 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			EEO_NEXT();
 		}
 
-		EEO_CASE(EEOP_SCAN_FETCHSOME_BATCH)
-		{
-			CheckOpSlotCompatibility(op, scanslot);
-
-			Assert(scanbatch);
-			slot_getsomeattrs_batch(scanbatch, op->d.fetch_batch.last_var);
-
-			EEO_NEXT();
-		}
-
-		EEO_CASE(EEOP_QUAL_BATCH_INITMASK)
-		{
-			ExecQualBatchInitMask(state, op, econtext);
-			EEO_NEXT();
-		}
-
-		EEO_CASE(EEOP_QUAL_BATCH_TERM)
-		{
-			ExecQualBatchTerm(state, op, econtext);
-			EEO_NEXT();
-		}
-
 		EEO_CASE(EEOP_LAST)
 		{
 			/* unreachable */
 			Assert(false);
 			goto out_error;
+		}
+
+		EEO_CASE(EEOP_BATCH_UNREACHABLE)
+		{
+			Assert(false && "batch opcodes use dedicated interpreter");
+			pg_unreachable();
 		}
 	}
 
@@ -6091,6 +6081,34 @@ ExecQualBatchTerm(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 			/* should not happen; leave mask unchanged */
 			break;
 	}
+}
+
+static Datum
+ExecInterpQualBatch(ExprState *state, ExprContext *econtext)
+{
+	ExprEvalStep *op = state->steps;
+	RowBatch *scanbatch = econtext->scan_batch;
+
+	/* Step 1: fetch/deform all slots */
+	Assert(ExecEvalStepOp(state, op) == EEOP_SCAN_FETCHSOME_BATCH);
+	slot_getsomeattrs_batch(scanbatch, op->d.fetch_batch.last_var);
+	op++;
+
+	/* Step 2: initialize mask */
+	Assert(ExecEvalStepOp(state, op) == EEOP_QUAL_BATCH_INITMASK);
+	ExecQualBatchInitMask(state, op, econtext);
+	op++;
+
+	/* Step 3: process all TERM steps */
+	while (ExecEvalStepOp(state, op) == EEOP_QUAL_BATCH_TERM)
+	{
+		ExecQualBatchTerm(state, op, econtext);
+		op++;
+	}
+
+	Assert(ExecEvalStepOp(state, op) == EEOP_DONE_NO_RETURN);
+
+	return (Datum) 0;
 }
 
 /*
