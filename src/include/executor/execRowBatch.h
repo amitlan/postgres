@@ -15,15 +15,7 @@
 
 #include "executor/tuptable.h"
 
-/*
- * RowBatchOps -- AM-specific helpers for lazy materialization.
- */
-typedef struct RowBatchOps
-{
-	void (*materialize_all)(void *am_payload,
-							TupleTableSlot **dst,
-							int nrows);
-} RowBatchOps;
+typedef struct RowBatchOps RowBatchOps;
 
 /*
  * RowBatch
@@ -47,6 +39,15 @@ typedef struct RowBatch
 
 	TupleTableSlot **slots;			/* row view */
 } RowBatch;
+
+/*
+ * RowBatchOps -- AM-specific helpers for lazy materialization.
+ */
+typedef struct RowBatchOps
+{
+	void (*materialize_all)(RowBatch *b,
+							TupleTableSlot **dst);
+} RowBatchOps;
 
 
 /* Create/teardown */
@@ -96,7 +97,7 @@ RowBatchMaterializeAll(RowBatch *b)
 	if (b->ops == NULL || b->ops->materialize_all == NULL)
 		elog(ERROR, "RowBatch has no materialize_all op");
 
-	b->ops->materialize_all(b->am_payload, b->slots, b->nrows);
+	b->ops->materialize_all(b, b->slots);
 	b->materialized = true;
 	b->pos = 0;
 }
