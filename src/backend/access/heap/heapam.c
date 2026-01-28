@@ -43,6 +43,7 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_database_d.h"
 #include "commands/vacuum.h"
+#include "executor/execRowBatch.h"
 #include "pgstat.h"
 #include "port/pg_bitutils.h"
 #include "storage/lmgr.h"
@@ -109,6 +110,7 @@ static int	bottomup_sort_and_shrink(TM_IndexDeleteOp *delstate);
 static XLogRecPtr log_heap_new_cid(Relation relation, HeapTuple tup);
 static HeapTuple ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 										bool *copy);
+static void heap_materialize_into_slots(RowBatch *b);
 
 
 /*
@@ -1153,6 +1155,134 @@ continue_page:
 	scan->rs_inited = false;
 }
 
+/*
+ * heapgettup_pagemode_batch
+ *		Collect up to 'maxitems' visible tuples from a single page in page mode.
+ *
+ * This function returns a *batch* of tuples from one heap page. If the
+ * current page (as tracked by the scan desc) has no more tuples left,
+ * it will advance to the next page and prepare it (via heap_prepare_pagescan).
+ * It will not cross a page boundary while filling the batch.
+ *
+ * Return value:
+ *		number of tuples written into 'tdata' (0 at end-of-scan).
+ *
+ * Side effects:
+ *	- Ensures rs_cbuf pins the page from which tuples were produced.
+ *	- Sets rs_cblock, rs_cindex, rs_ntuples consistently (same as
+ *	  heapgettup_pagemode’s inner-loop effects).
+ *	- Does *not* change buffer pin counts except through normal page
+ *	  transitions performed by heap_fetch_next_buffer().
+ */
+static int
+heapgettup_pagemode_batch(HeapScanDesc scan,
+						  ScanDirection dir,
+						  int nkeys, ScanKey key,
+						  HeapTupleData *tdata,
+						  int maxitems)
+{
+	Page		page;
+	uint32		lineindex;
+	uint32		linesleft;
+	int			nout = 0;
+	Relation	rel = scan->rs_base.rs_rd;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+
+	/*
+	 * Current batching limitations (may be relaxed in future):
+	 *
+	 *	- Forward scans only: backward scan support would require changes to
+	 *	  batch iteration and page advancement logic.
+	 *
+	 *	- Pagemode required: batching relies on the pre-built rs_vistuples[]
+	 *	  array from heap_prepare_pagescan(). This is guaranteed by
+	 *	  ScanCanUseBatching() which only enables batching when SO_ALLOW_PAGEMODE
+	 *	  is set. Unlike heap_getnextslot, we don't support dynamic fallback to
+	 *	  tuple-at-a-time mode since the batch execution path is selected at
+	 *	  ExecInit time.
+	 */
+	Assert(ScanDirectionIsForward(dir));
+	Assert(scan->rs_base.rs_flags & SO_ALLOW_PAGEMODE);
+	Assert(maxitems > 0);
+
+	/*
+	 * Loop until we find tuples that pass the scan key, or reach end of scan.
+	 * We never cross page boundaries within a single batch.
+	 */
+	for (;;)
+	{
+		/*
+		 * Advance to a page with visible tuples if needed.
+		 */
+		if (BufferIsValid(scan->rs_cbuf))
+		{
+			lineindex = scan->rs_cindex + 1;
+			linesleft = (lineindex <= scan->rs_ntuples) ?
+				(scan->rs_ntuples - lineindex) : 0;
+		}
+		else
+			linesleft = 0;
+
+		while (linesleft == 0)
+		{
+			heap_fetch_next_buffer(scan, dir);
+
+			if (!BufferIsValid(scan->rs_cbuf))
+			{
+				/* End of scan */
+				scan->rs_cblock = InvalidBlockNumber;
+				scan->rs_prefetch_block = InvalidBlockNumber;
+				scan->rs_inited = false;
+				return 0;
+			}
+
+			Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
+			heap_prepare_pagescan((TableScanDesc) scan);
+
+			lineindex = 0;
+			linesleft = scan->rs_ntuples;
+		}
+
+		/*
+		 * Walk rs_vistuples[] copying headers into tdata[] until the page
+		 * is exhausted or batch capacity is reached.
+		 */
+		page = BufferGetPage(scan->rs_cbuf);
+
+		for (; linesleft > 0 && nout < maxitems; linesleft--, lineindex++)
+		{
+			OffsetNumber	lineoff;
+			ItemId			lpp;
+			HeapTupleData  *dst = &tdata[nout];
+
+			Assert(lineindex < scan->rs_ntuples);
+			lineoff = scan->rs_vistuples[lineindex];
+			lpp = PageGetItemId(page, lineoff);
+			Assert(ItemIdIsNormal(lpp));
+
+			dst->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+			dst->t_len = ItemIdGetLength(lpp);
+			Assert(dst->t_tableOid == RelationGetRelid(rel));
+			ItemPointerSet(&(dst->t_self), scan->rs_cblock, lineoff);
+
+			if (key != NULL && !HeapKeyTest(dst, tupdesc, nkeys, key))
+				continue;
+
+			scan->rs_cindex = lineindex;
+			nout++;
+		}
+
+		/* Return if we found any tuples; otherwise try next page */
+		if (nout > 0)
+			return nout;
+
+		/* Mark page exhausted so we advance on next iteration */
+		scan->rs_cindex = scan->rs_ntuples;
+	}
+
+	pg_unreachable();
+	return 0;
+}
 
 /* ----------------------------------------------------------------
  *					 heap access method interface
@@ -1474,6 +1604,176 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 							 scan->rs_cbuf);
 	return true;
 }
+
+/*---------- Batching support -----------*/
+
+static const RowBatchOps RowBatchHeapOps =
+{
+	.materialize_into_slots = heap_materialize_into_slots
+};
+
+/*
+ * heap_scan_begin_batch
+ *
+ * Allocate a HeapBatch with space for 'maxitems' tuple headers. No pin is
+ * taken here. Memory is allocated under the scan's memory context.
+ */
+void
+heap_begin_batch(TableScanDesc sscan, RowBatch *b)
+{
+	HeapBatch  *hb;
+	Oid			relid;
+	Size		alloc_size;
+	int			maxitems = b->max_rows;
+
+	Assert(maxitems > 0);
+
+	/* Single allocation for HeapBatch header + tupdata array */
+	alloc_size = sizeof(HeapBatch) + sizeof(HeapTupleData) * maxitems;
+	hb = palloc(alloc_size);
+	hb->tupdata = (HeapTupleData *) ((char *) hb + sizeof(HeapBatch));
+	hb->maxitems = maxitems;
+	hb->nitems = 0;
+	hb->buf = InvalidBuffer;
+
+	/* Initialize static fields of HeapTupleData. Row bodies remain on page. */
+	relid = RelationGetRelid(sscan->rs_rd);
+	for (int i = 0; i < maxitems; i++)
+		hb->tupdata[i].t_tableOid = relid;
+
+	b->am_payload = hb;
+	b->ops = &RowBatchHeapOps;
+
+	/*
+	 * Allocate HeapTuple-typed slots in the RowBatch so that
+	 * heap_materialize_batch_all can store a HeapTupleData pointer
+	 * and TID directly into the HeapTupleTableSlot without copying
+	 * tuple data off the page.
+	 *
+	 * We use TTSOpsHeapTuple rather than TTSOpsBufferHeapTuple because
+	 * the HeapBatch holds a single buffer pin for the entire page;
+	 * per-slot pin tracking is unnecessary and would add overhead.
+	 */
+	RowBatchCreateSlots(b, RelationGetDescr(sscan->rs_rd),
+						&TTSOpsHeapTuple);
+}
+
+/*
+ * heap_scan_end_batch
+ *
+ * Release any outstanding pin and free the batch allocations. Caller will
+ * not use 'am_batch' after this point.
+ */
+void
+heap_end_batch(TableScanDesc sscan, RowBatch *batch)
+{
+	HeapBatch *hb = (HeapBatch *) batch->am_payload;
+
+	if (BufferIsValid(hb->buf))
+		ReleaseBuffer(hb->buf);
+
+	pfree(hb);
+	batch->am_payload = NULL;
+}
+
+/*
+ * heap_reset_batch
+ *		Release the held buffer pin and reset tuple count, but keep the
+ *		HeapBatch allocation intact for reuse on the next getnextbatch call.
+ */
+void
+heap_reset_batch(TableScanDesc sscan, RowBatch *b)
+{
+	HeapBatch   *hb = (HeapBatch *) b->am_payload;
+
+	Assert(hb != NULL);
+	if (BufferIsValid(hb->buf))
+	{
+		ReleaseBuffer(hb->buf);
+		hb->buf = InvalidBuffer;
+	}
+	hb->nitems = 0;
+}
+
+bool
+heap_getnextbatch(TableScanDesc sscan, RowBatch *b, ScanDirection dir)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+	HeapBatch  *hb = (HeapBatch *) b->am_payload;
+	Buffer		curbuf;
+	int			n;
+
+	Assert(ScanDirectionIsForward(dir));
+	Assert(sscan->rs_flags & SO_ALLOW_PAGEMODE);
+	Assert(hb->maxitems > 0);
+
+	/* Drop prior batch pin, if any. */
+	if (BufferIsValid(hb->buf))
+	{
+		ReleaseBuffer(hb->buf);
+		hb->buf = InvalidBuffer;
+	}
+
+	hb->nitems = 0;
+
+	/* One call per batch, never crosses a page. */
+	n = heapgettup_pagemode_batch(scan, dir,
+								  sscan->rs_nkeys, sscan->rs_key,
+								  hb->tupdata, hb->maxitems);
+
+	if (n == 0)
+	{
+		b->nrows = 0;
+		return false;	/* end of scan */
+	}
+
+	/* Hold a shared pin for the batch lifetime so t_data stays valid. */
+	curbuf = scan->rs_cbuf;
+	IncrBufferRefCount(curbuf);
+	hb->buf = curbuf;
+
+	/* Per-tuple stats (can be collapsed into a future _multi() call). */
+	pgstat_count_heap_getnext_batch(sscan->rs_rd, n);
+
+	hb->nitems = n;
+	b->nrows = n;
+	b->materialized = false;
+	b->pos = 0;
+
+	return true;
+}
+
+/*
+ * heap_scan_materialize_into_slots
+ *
+ * Bind all tuples of the current batch into 'slots'. We bind the
+ * HeapTupleData header that points into the pinned page. No per-row copy.
+ */
+static void
+heap_materialize_into_slots(RowBatch *b)
+{
+	HeapBatch *hb = (HeapBatch *) b->am_payload;
+	TupleTableSlot **slots = b->slots;
+
+	Assert(slots != NULL);
+	Assert(b->nrows == hb->nitems);
+
+	for (int i = 0; i < hb->nitems; i++)
+	{
+		HeapTupleData *tuple = &hb->tupdata[i];
+		HeapTupleTableSlot *slot = (HeapTupleTableSlot *) slots[i];
+
+		/* Inline of ExecStoreHeapTuple(tuple, slot, false) */
+		slot->tuple = tuple;
+		slot->off = 0;
+		slot->base.tts_nvalid = 0;
+		slot->base.tts_flags &= ~(TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
+		slot->base.tts_tid = tuple->t_self;
+		slot->base.tts_tableOid = tuple->t_tableOid;
+	}
+}
+
+/*----- End of batching support -----*/
 
 void
 heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
