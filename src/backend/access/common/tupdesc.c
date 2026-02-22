@@ -534,6 +534,15 @@ TupleDescFinalize(TupleDesc tupdesc)
 
 		cattr->attcacheoff = off;
 
+		/*
+		 * attcacheoff is an int16, so don't try and cache any offsets larger
+		 * than will fit in that type.
+		 */
+		if (off > PG_INT16_MAX)
+			break;
+
+		cattr->attcacheoff = off;
+
 		off += cattr->attlen;
 		firstNonCachedOffsetAttr = i + 1;
 	}
