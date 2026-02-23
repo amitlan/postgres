@@ -31,6 +31,7 @@
 
 #include "access/skey.h"
 #include "access/tupconvert.h"
+#include "executor/execRowBatch.h"
 #include "executor/instrument.h"
 #include "executor/instrument_node.h"
 #include "fmgr.h"
