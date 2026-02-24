@@ -153,8 +153,8 @@ struct TupleTableSlotOps
 	 * Fill up first natts entries of tts_values and tts_isnull arrays with
 	 * values from the tuple contained in the slot. The function may be called
 	 * with natts more than the number of attributes available in the tuple,
-	 * in which case it should set tts_nvalid to the number of returned
-	 * columns.
+	 * in which case the function must call slot_getmissingattrs() to populate
+	 * the remaining attributes.
 	 */
 	void		(*getsomeattrs) (TupleTableSlot *slot, int natts);
 
@@ -357,8 +357,9 @@ extern void slot_getsomeattrs_int(TupleTableSlot *slot, int attnum);
 static inline void
 slot_getsomeattrs(TupleTableSlot *slot, int attnum)
 {
+	/* Populate slot with attributes up to 'attnum', if it's not already */
 	if (slot->tts_nvalid < attnum)
-		slot_getsomeattrs_int(slot, attnum);
+		slot->tts_ops->getsomeattrs(slot, attnum);
 }
 
 /*

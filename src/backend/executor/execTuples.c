@@ -73,7 +73,7 @@
 static TupleDesc ExecTypeFromTLInternal(List *targetList,
 										bool skipjunk);
 static pg_attribute_always_inline void slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
-															  int natts);
+															  int reqnatts);
 static inline void tts_buffer_heap_store_tuple(TupleTableSlot *slot,
 											   HeapTuple tuple,
 											   Buffer buffer,
@@ -996,7 +996,10 @@ tts_buffer_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple,
  * slot_deform_heap_tuple
  *		Given a TupleTableSlot, extract data from the slot's physical tuple
  *		into its Datum/isnull arrays.  Data is extracted up through the
- *		natts'th column (caller must ensure this is a legal column number).
+ *		reqnatts'th column.  If there are insufficient attributes in the given
+ *		tuple, then slot_getmissingattrs() is called to populate the
+ *		remainder.  If reqnatts is above the number of attributes in the
+ *		slot's TupleDesc, an error is raised.
  *
  *		This is essentially an incremental version of heap_deform_tuple:
  *		on each call we extract attributes up to the one needed, without
@@ -1008,7 +1011,7 @@ tts_buffer_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple,
  */
 static pg_attribute_always_inline void
 slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
-					   int natts)
+					   int reqnatts)
 {
 	CompactAttribute *cattr;
 	TupleDesc	tupleDesc = slot->tts_tupleDescriptor;
@@ -1017,6 +1020,7 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 	int			firstNonCacheOffsetAttr;
 	int			firstNonGuaranteedAttr;
 	int			firstNullAttr;
+	int			natts;
 	Datum	   *values;
 	bool	   *isnull;
 	char	   *tp;				/* ptr to tuple data */
@@ -1038,7 +1042,7 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 	 * attrs.
 	 */
 	if (TTS_OBEYS_NOT_NULL_CONSTRAINTS(slot))
-		firstNonGuaranteedAttr = Min(natts, tupleDesc->firstNonGuaranteedAttr);
+		firstNonGuaranteedAttr = Min(reqnatts, tupleDesc->firstNonGuaranteedAttr);
 	else
 		firstNonGuaranteedAttr = 0;
 
@@ -1046,12 +1050,11 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 
 	if (HeapTupleHasNulls(tuple))
 	{
-		int			tupnatts = HeapTupleHeaderGetNatts(tup);
-
+		natts = HeapTupleHeaderGetNatts(tup);
 		tp = (char *) tup + MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
-									 BITMAPLEN(tupnatts));
+									 BITMAPLEN(natts));
 
-		natts = Min(tupnatts, natts);
+		natts = Min(natts, reqnatts);
 		if (natts > firstNonGuaranteedAttr)
 		{
 			bits8	   *bp = tup->t_bits;
@@ -1082,8 +1085,13 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 		 * We only need to look at the tuple's natts if we need more than the
 		 * guaranteed number of columns
 		 */
-		if (natts > firstNonGuaranteedAttr)
-			natts = Min(HeapTupleHeaderGetNatts(tup), natts);
+		if (reqnatts > firstNonGuaranteedAttr)
+			natts = Min(HeapTupleHeaderGetNatts(tup), reqnatts);
+		else
+		{
+			/* No need to access the number of attributes in the tuple */
+			natts = reqnatts;
+		}
 
 		/* All attrs can be fetched without checking for NULLs */
 		firstNullAttr = natts;
@@ -1091,7 +1099,7 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 
 	attnum = slot->tts_nvalid;
 	values = slot->tts_values;
-	slot->tts_nvalid = natts;
+	slot->tts_nvalid = reqnatts;
 
 	/* Ensure we calculated tp correctly */
 	Assert(tp == (char *) tup + tup->t_hoff);
@@ -1123,7 +1131,7 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 
 		off += cattr->attlen;
 
-		if (attnum == natts)
+		if (attnum == reqnatts)
 			goto done;
 	}
 	else
@@ -1222,12 +1230,12 @@ slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 											  cattr->attalignby);
 	}
 
+	/* Fetch any missing attrs and raise an error if reqnatts is invalid */
+	if (unlikely(attnum < reqnatts))
+		slot_getmissingattrs(slot, attnum, reqnatts);
 done:
 
-	/*
-	 * Save state for next execution
-	 */
-	slot->tts_nvalid = attnum;
+	/* Save current offset for next execution */
 	*offp = off;
 }
 
@@ -2088,28 +2096,29 @@ slot_getmissingattrs(TupleTableSlot *slot, int startAttNum, int lastAttNum)
 	if (!attrmiss)
 	{
 		/* no missing values array at all, so just fill everything in as NULL */
-		memset(slot->tts_values + startAttNum, 0,
-			   (lastAttNum - startAttNum) * sizeof(Datum));
-		memset(slot->tts_isnull + startAttNum, 1,
-			   (lastAttNum - startAttNum) * sizeof(bool));
+		for (int attnum = startAttNum; attnum < lastAttNum; attnum++)
+		{
+			slot->tts_values[attnum] = (Datum) 0;
+			slot->tts_isnull[attnum] = true;
+		}
 	}
 	else
 	{
-		int			missattnum;
-
-		/* if there is a missing values array we must process them one by one */
-		for (missattnum = startAttNum;
-			 missattnum < lastAttNum;
-			 missattnum++)
+		/* use attrmiss to set the missing values */
+		for (int attnum = startAttNum; attnum < lastAttNum; attnum++)
 		{
-			slot->tts_values[missattnum] = attrmiss[missattnum].am_value;
-			slot->tts_isnull[missattnum] = !attrmiss[missattnum].am_present;
+			slot->tts_values[attnum] = attrmiss[attnum].am_value;
+			slot->tts_isnull[attnum] = !attrmiss[attnum].am_present;
 		}
 	}
+
+	if (unlikely(lastAttNum > slot->tts_tupleDescriptor->natts))
+		elog(ERROR, "invalid attribute number %d", lastAttNum);
 }
 
 /*
- * slot_getsomeattrs_int - workhorse for slot_getsomeattrs()
+ * slot_getsomeattrs_int
+ *		external function to call getsomeattrs() for use in JIT
  */
 void
 slot_getsomeattrs_int(TupleTableSlot *slot, int attnum)
@@ -2118,21 +2127,13 @@ slot_getsomeattrs_int(TupleTableSlot *slot, int attnum)
 	Assert(slot->tts_nvalid < attnum);	/* checked in slot_getsomeattrs */
 	Assert(attnum > 0);
 
-	if (unlikely(attnum > slot->tts_tupleDescriptor->natts))
-		elog(ERROR, "invalid attribute number %d", attnum);
-
 	/* Fetch as many attributes as possible from the underlying tuple. */
 	slot->tts_ops->getsomeattrs(slot, attnum);
 
 	/*
-	 * If the underlying tuple doesn't have enough attributes, tuple
-	 * descriptor must have the missing attributes.
+	 * Avoid putting new code here as that would prevent the compiler from
+	 * using the sibling call optimization for the above function.
 	 */
-	if (unlikely(slot->tts_nvalid < attnum))
-	{
-		slot_getmissingattrs(slot, slot->tts_nvalid, attnum);
-		slot->tts_nvalid = attnum;
-	}
 }
 
 /* ----------------------------------------------------------------
