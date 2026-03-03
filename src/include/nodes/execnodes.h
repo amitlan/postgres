@@ -1637,6 +1637,12 @@ typedef struct SeqScanState
 	ScanState	ss;				/* its first field is NodeTag */
 	Size		pscan_len;		/* size of parallel heap scan descriptor */
 	RowBatch   *batch;			/* NULL if batching disabled */
+
+	/* Batch qual state  */
+	struct BatchQualState *bqs;		/* NULL if quals not batchable */
+	TupleTableSlot **batch_outslots;	/* surviving slots after batch qual */
+	int			batch_nqualified;		/* number of survivors */
+	int			batch_outpos;			/* iteration position */
 } SeqScanState;
 
 /* ----------------

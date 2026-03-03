@@ -4133,9 +4133,11 @@ SELECT * FROM local_tbl t1 LEFT JOIN (SELECT *, (SELECT count(*) FROM async_pt W
 
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM async_pt t1 WHERE t1.b === 505 LIMIT 1;
+SET executor_batch_rows = 1;
 EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF, BUFFERS OFF)
 SELECT * FROM async_pt t1 WHERE t1.b === 505 LIMIT 1;
 SELECT * FROM async_pt t1 WHERE t1.b === 505 LIMIT 1;
+RESET executor_batch_rows;
 
 -- Check with foreign modify
 CREATE TABLE base_tbl3 (a int, b int, c text);

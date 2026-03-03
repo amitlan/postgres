@@ -238,6 +238,8 @@ SeqScanResetBatching(SeqScanState *scanstate, bool drop)
 		}
 		if (drop)
 			pfree(b);
+		scanstate->batch_nqualified = 0;
+		scanstate->batch_outpos = 0;
 	}
 }
 
@@ -427,6 +429,41 @@ ExecSeqScanBatchSlotWithQualProject(PlanState *pstate)
 	return SeqScanBatchSlot(node, pstate->qual, pstate->ps_ProjInfo);
 }
 
+/*
+ * ExecSeqScanBatchSlotWithBatchQual
+ *		Returns one qualified tuple at a time from batched scan with
+ *		standalone batch qual evaluation.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithBatchQual(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(node->bqs != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	for (;;)
+	{
+		/* Return next qualified slot if available */
+		if (node->batch_outpos < node->batch_nqualified)
+			return node->batch_outslots[node->batch_outpos++];
+
+		/* Exhausted current batch — fetch and evaluate next */
+		if (!SeqNextBatchMaterialize(node))
+			return NULL;
+
+		node->batch_nqualified = BatchQualExec(node->bqs,
+											 node->batch,
+											 node->ss.ps.ps_ExprContext,
+											 node->batch_outslots);
+		node->batch_outpos = 0;
+
+		InstrCountFiltered1(&node->ss,
+							node->batch->nrows - node->batch_nqualified);
+	}
+}
+
 /* Batch SeqScan enablement and dispatch */
 static void
 SeqScanInitBatching(SeqScanState *scanstate, int eflags)
@@ -439,26 +476,47 @@ SeqScanInitBatching(SeqScanState *scanstate, int eflags)
 
 	scanstate->batch = RowBatchCreate(scandesc, cap, track_stats);
 
+	/*
+	 * Try to build a standalone batch qual evaluator.  Falls back to
+	 * per-tuple ExecQual if the qual tree isn't fully decomposable.
+	 */
+	scanstate->bqs = BatchQualInit(scanstate->ss.ps.plan->qual);
+
+	if (scanstate->bqs != NULL)
+	{
+		/* Allocate executor-owned selection state */
+		scanstate->batch_outslots = palloc(sizeof(TupleTableSlot *) * cap);
+		scanstate->batch_nqualified = 0;
+		scanstate->batch_outpos = 0;
+	}
+
 	/* Choose batch variant */
 	if (scanstate->ss.ps.qual == NULL)
 	{
 		if (scanstate->ss.ps.ps_ProjInfo == NULL)
-		{
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlot;
-		}
 		else
-		{
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithProject;
-		}
 	}
 	else
 	{
 		if (scanstate->ss.ps.ps_ProjInfo == NULL)
 		{
-			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
+			if (scanstate->bqs != NULL)
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithBatchQual;
+			else
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
 		}
 		else
 		{
+			/*
+			 * Qual + projection.  Batch qual can still help -- the batch
+			 * qual variant returns one slot at a time, so the caller can
+			 * project each survivor individually.
+			 *
+			 * TODO: add ExecSeqScanBatchSlotWithBatchQualProject variant.
+			 * For now, fall through to per-tuple qual + project.
+			 */
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQualProject;
 		}
 	}
