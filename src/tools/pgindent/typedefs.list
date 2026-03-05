@@ -2639,6 +2639,8 @@ RoleSpec
 RoleSpecType
 RoleStmtType
 RollupData
+RowBatch
+RowBatchOps
 RowCompareExpr
 RowExpr
 RowIdentityVarInfo
