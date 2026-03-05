@@ -29,6 +29,7 @@
 
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "executor/execBatchExpr.h"
 #include "executor/execRowBatch.h"
 #include "executor/execScan.h"
 #include "executor/executor.h"
@@ -40,6 +41,8 @@ static TupleTableSlot *ExecSeqScanBatchSlot(PlanState *pstate);
 static TupleTableSlot *ExecSeqScanBatchSlotWithQual(PlanState *pstate);
 static TupleTableSlot *ExecSeqScanBatchSlotWithProject(PlanState *pstate);
 static TupleTableSlot *ExecSeqScanBatchSlotWithQualProject(PlanState *pstate);
+static TupleTableSlot *ExecSeqScanBatchSlotWithBatchQual(PlanState *pstate);
+static TupleTableSlot *ExecSeqScanBatchSlotWithBatchQualProject(PlanState *pstate);
 
 /* ----------------------------------------------------------------
  *						Scan Support
@@ -248,6 +251,21 @@ SeqScanInitBatching(SeqScanState *scanstate)
 
 	scanstate->batch = RowBatchCreate(executor_batch_rows, track_stats);
 
+	/*
+	 * Try to build a standalone batch qual evaluator.  Falls back to
+	 * per-tuple ExecQual if the qual tree isn't fully decomposable.
+	 */
+	scanstate->bqs = BatchQualInit(scanstate->ss.ps.plan->qual);
+
+	if (scanstate->bqs != NULL)
+	{
+		/* Allocate executor-owned selection state */
+		scanstate->batch_outslots = palloc(sizeof(TupleTableSlot *) *
+										   scanstate->batch->max_rows);
+		scanstate->batch_nqualified = 0;
+		scanstate->batch_outpos = 0;
+	}
+
 	/* Choose batch variant */
 	if (scanstate->ss.ps.qual == NULL)
 	{
@@ -258,10 +276,23 @@ SeqScanInitBatching(SeqScanState *scanstate)
 	}
 	else
 	{
-		if (scanstate->ss.ps.ps_ProjInfo == NULL)
-			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
+		/* Batch qual evaluator if quals batchable, per-tuple path otherwise */
+		if (scanstate->bqs != NULL)
+		{
+			/* These functions use BatchQualExec(). */
+			if (scanstate->ss.ps.ps_ProjInfo == NULL)
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithBatchQual;
+			else
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithBatchQualProject;
+		}
 		else
-			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQualProject;
+		{
+			/* These functions use ExecQual(). */
+			if (scanstate->ss.ps.ps_ProjInfo == NULL)
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
+			else
+				scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQualProject;
+		}
 	}
 }
 
@@ -293,6 +324,8 @@ SeqScanResetBatching(SeqScanState *scanstate, bool drop)
 		}
 		if (drop)
 			pfree(b);
+		scanstate->batch_nqualified = 0;
+		scanstate->batch_outpos = 0;
 	}
 }
 
@@ -491,6 +524,87 @@ ExecSeqScanBatchSlotWithQualProject(PlanState *pstate)
 	pg_assume(pstate->ps_ProjInfo != NULL);
 
 	return SeqScanBatchSlot(node, pstate->qual, pstate->ps_ProjInfo);
+}
+
+/*
+ * ExecSeqScanBatchSlotWithBatchQual
+ *		Returns one qualified tuple at a time from a batched scan
+ *		using the batch qual evaluator.
+ *
+ * On each new batch, BatchQualExec evaluates all clauses across
+ * the entire batch at once, compacting survivors into outslots[].
+ * Subsequent calls return one survivor at a time until exhausted,
+ * then the next batch is fetched and evaluated.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithBatchQual(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(node->batch != NULL);
+	Assert(node->bqs != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	for (;;)
+	{
+		/* Return next qualified slot if available */
+		if (node->batch_outpos < node->batch_nqualified)
+			return node->batch_outslots[node->batch_outpos++];
+
+		/* Exhausted current batch -- fetch and evaluate next */
+		if (!SeqNextBatchMaterialize(node))
+			return NULL;
+
+		node->batch_nqualified = BatchQualExec(node->bqs,
+											   node->batch,
+											   node->ss.ps.ps_ExprContext,
+											   node->batch_outslots);
+		node->batch_outpos = 0;
+
+		InstrCountFiltered1(&node->ss,
+							node->batch->nrows - node->batch_nqualified);
+	}
+}
+
+/*
+ * ExecSeqScanBatchSlotWithBatchQualProject
+ *		Same as ExecSeqScanBatchSlotWithBatchQual, but projects each
+ *		surviving tuple before returning it.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithBatchQualProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(node->batch != NULL);
+	Assert(node->bqs != NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	for (;;)
+	{
+		if (node->batch_outpos < node->batch_nqualified)
+		{
+			ResetExprContext(econtext);
+			econtext->ecxt_scantuple =
+				node->batch_outslots[node->batch_outpos++];
+			return ExecProject(pstate->ps_ProjInfo);
+		}
+
+		if (!SeqNextBatchMaterialize(node))
+			return NULL;
+
+		node->batch_nqualified = BatchQualExec(node->bqs,
+											   node->batch,
+											   econtext,
+											   node->batch_outslots);
+		node->batch_outpos = 0;
+
+		InstrCountFiltered1(&node->ss,
+							node->batch->nrows - node->batch_nqualified);
+	}
 }
 
 /* ----------------------------------------------------------------
