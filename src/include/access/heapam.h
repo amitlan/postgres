@@ -101,6 +101,19 @@ typedef struct HeapScanDescData
 } HeapScanDescData;
 typedef struct HeapScanDescData *HeapScanDesc;
 
+/*
+ * HeapBatch -- stateless per-batch buffer. A batch pins one page and
+ * exposes up to maxitems HeapTupleData headers whose t_data point into that
+ * page.
+ */
+typedef struct HeapBatch
+{
+	HeapTupleData  *tupdata;	/* len = maxitems; headers only */
+	int				nitems;		/* tuples produced in last getnextbatch() */
+	int				maxitems;	/* fixed capacity set at begin_batch() */
+	Buffer			buf;		/* single pinned buffer for this batch */
+} HeapBatch;
+
 typedef struct BitmapHeapScanDescData
 {
 	HeapScanDescData rs_heap_base;
@@ -338,6 +351,12 @@ extern void heap_endscan(TableScanDesc sscan);
 extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);
 extern bool heap_getnextslot(TableScanDesc sscan,
 							 ScanDirection direction, TupleTableSlot *slot);
+
+extern void heap_begin_batch(TableScanDesc sscan, RowBatch *batch);
+extern bool heap_getnextbatch(TableScanDesc sscan, RowBatch *batch, ScanDirection dir);
+extern void heap_end_batch(TableScanDesc sscan, RowBatch *batch);
+extern void heap_reset_batch(TableScanDesc sscan, RowBatch *batch);
+
 extern void heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 							  ItemPointer maxtid);
 extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
