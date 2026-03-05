@@ -288,6 +288,7 @@ extern PGDLLIMPORT double VacuumCostDelay;
 extern PGDLLIMPORT int VacuumCostBalance;
 extern PGDLLIMPORT bool VacuumCostActive;
 
+extern PGDLLIMPORT int executor_batch_rows;
 
 /* in utils/misc/stack_depth.c */
 

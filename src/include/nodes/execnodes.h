@@ -70,6 +70,7 @@ typedef struct TupleTableSlot TupleTableSlot;
 typedef struct TupleTableSlotOps TupleTableSlotOps;
 typedef struct WalUsage WalUsage;
 typedef struct WorkerNodeInstrumentation WorkerNodeInstrumentation;
+typedef struct RowBatch RowBatch;
 
 
 /* ----------------
@@ -1670,6 +1671,7 @@ typedef struct SeqScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
 	Size		pscan_len;		/* size of parallel heap scan descriptor */
+	RowBatch   *batch;			/* NULL if batching disabled */
 } SeqScanState;
 
 /* ----------------
