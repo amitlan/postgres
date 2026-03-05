@@ -1004,6 +1004,15 @@
   boot_val => 'true',
 },
 
+{ name => 'executor_batch_rows', type => 'int', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Number of rows to include in batches during execution.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'executor_batch_rows',
+  boot_val => '64',
+  min => '0',
+  max => '1024',
+},
+
 { name => 'exit_on_error', type => 'bool', context => 'PGC_USERSET', group => 'ERROR_HANDLING_OPTIONS',
   short_desc => 'Terminate session on any error.',
   variable => 'ExitOnAnyError',
