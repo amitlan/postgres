@@ -15,6 +15,7 @@ include $(top_builddir)/src/Makefile.global
 OBJS = \
 	execAmi.o \
 	execAsync.o \
+	execRowBatch.o \
 	execCurrent.o \
 	execExpr.o \
 	execExprInterp.o \
