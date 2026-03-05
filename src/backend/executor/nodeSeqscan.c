@@ -29,12 +29,17 @@
 
 #include "access/relscan.h"
 #include "access/tableam.h"
+#include "executor/execRowBatch.h"
 #include "executor/execScan.h"
 #include "executor/executor.h"
 #include "executor/nodeSeqscan.h"
 #include "utils/rel.h"
 
 static TupleTableSlot *SeqNext(SeqScanState *node);
+static TupleTableSlot *ExecSeqScanBatchSlot(PlanState *pstate);
+static TupleTableSlot *ExecSeqScanBatchSlotWithQual(PlanState *pstate);
+static TupleTableSlot *ExecSeqScanBatchSlotWithProject(PlanState *pstate);
+static TupleTableSlot *ExecSeqScanBatchSlotWithQualProject(PlanState *pstate);
 
 /* ----------------------------------------------------------------
  *						Scan Support
@@ -204,6 +209,285 @@ ExecSeqScanEPQ(PlanState *pstate)
 }
 
 /* ----------------------------------------------------------------
+ *						Batch Support
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * SeqScanCanUseBatching
+ *		Check whether this SeqScan can use batch mode execution.
+ *
+ * Batching requires: the GUC is enabled, no EPQ recheck is active,
+ * the scan is forward-only, and the table AM supports batching.
+ */
+static bool
+SeqScanCanUseBatching(SeqScanState *scanstate, int eflags)
+{
+	Relation	relation = scanstate->ss.ss_currentRelation;
+
+	return	executor_batch_rows > 1 &&
+			(scanstate->ss.ps.state->es_epq_active == NULL) &&
+			!(eflags & EXEC_FLAG_BACKWARD) &&
+			relation && table_supports_batching(relation);
+}
+
+/*
+ * SeqScanInitBatching
+ *		Set up batch execution state and select the appropriate
+ *		ExecProcNode variant for batch mode.
+ *
+ * Called from ExecInitSeqScan when SeqScanCanUseBatching returns true.
+ * Overwrites the ExecProcNode pointer set by the non-batch path.
+ */
+static void
+SeqScanInitBatching(SeqScanState *scanstate)
+{
+	scanstate->batch = RowBatchCreate(executor_batch_rows);
+
+	/* Choose batch variant */
+	if (scanstate->ss.ps.qual == NULL)
+	{
+		if (scanstate->ss.ps.ps_ProjInfo == NULL)
+			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlot;
+		else
+			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithProject;
+	}
+	else
+	{
+		if (scanstate->ss.ps.ps_ProjInfo == NULL)
+			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQual;
+		else
+			scanstate->ss.ps.ExecProcNode = ExecSeqScanBatchSlotWithQualProject;
+	}
+}
+
+/*
+ * SeqScanResetBatching
+ *		Reset or tear down batch execution state.
+ *
+ * When drop is false (rescan), resets the RowBatch and releases any
+ * AM-held resources like buffer pins, but keeps allocations for reuse.
+ * When drop is true (end of node), frees everything.
+ */
+static void
+SeqScanResetBatching(SeqScanState *scanstate, bool drop)
+{
+	RowBatch *b = scanstate->batch;
+
+	if (b)
+	{
+		RowBatchReset(b, drop);
+		if (b->am_payload)
+		{
+			if (drop)
+			{
+				table_scan_end_batch(scanstate->ss.ss_currentScanDesc, b);
+				b->am_payload = NULL;
+			}
+			else
+				table_scan_reset_batch(scanstate->ss.ss_currentScanDesc, b);
+		}
+		if (drop)
+			pfree(b);
+	}
+}
+
+/*
+ * SeqNextBatch
+ *		Fetch the next batch of tuples from the table AM.
+ *
+ * Lazily initializes the scan descriptor and AM batch state on first
+ * call.  Returns false at end of scan.
+ */
+static bool
+SeqNextBatch(SeqScanState *node)
+{
+	TableScanDesc scandesc;
+	EState	   *estate;
+	ScanDirection direction;
+	RowBatch *b = node->batch;
+
+	Assert(b != NULL);
+
+	/*
+	 * get information from the estate and scan state
+	 */
+	scandesc = node->ss.ss_currentScanDesc;
+	estate = node->ss.ps.state;
+	direction = estate->es_direction;
+	Assert(ScanDirectionIsForward(direction));
+
+	if (scandesc == NULL)
+	{
+		/*
+		 * We reach here if the scan is not parallel, or if we're serially
+		 * executing a scan that was planned to be parallel.
+		 */
+		scandesc = table_beginscan(node->ss.ss_currentRelation,
+								   estate->es_snapshot,
+								   0, NULL);
+		node->ss.ss_currentScanDesc = scandesc;
+	}
+
+	/* Lazily create the AM batch payload. */
+	if (b->am_payload == NULL)
+	{
+		const TableAmRoutine *tam PG_USED_FOR_ASSERTS_ONLY = scandesc->rs_rd->rd_tableam;
+
+		Assert(tam && tam->scan_begin_batch);
+		table_scan_begin_batch(scandesc, b);
+	}
+
+	if (!table_scan_getnextbatch(scandesc, b, direction))
+		return false;
+
+	return true;
+}
+
+/*
+ * SeqNextBatchMaterialize
+ *      Fetch the next batch and materialize tuples into slots.
+ *
+ * Callers that need to access tuple data through slots (qual
+ * evaluation, projection, direct return) use this rather than
+ * SeqNextBatch alone.  Returns false at end of scan.
+ */
+static bool
+SeqNextBatchMaterialize(SeqScanState *node)
+{
+	if (SeqNextBatch(node))
+	{
+		RowBatchMaterializeAll(node->batch);
+		return true;
+	}
+
+	return false;
+}
+
+/*
+ * SeqScanBatchSlot
+ *		Core loop for batch-driven SeqScan variants.
+ *
+ * Internally fetches tuples in batches from the table AM, but returns
+ * one slot at a time to preserve the single-slot interface expected by
+ * parent nodes.  When the current batch is exhausted, fetches and
+ * materializes the next one.
+ *
+ * qual and projInfo are passed explicitly so the compiler can eliminate
+ * dead branches when inlined into the typed wrapper functions (e.g.
+ * ExecSeqScanBatchSlot passes NULL for both).
+ *
+ * EPQ is not supported in the batch path; asserted at entry.
+ */
+static inline TupleTableSlot *
+SeqScanBatchSlot(SeqScanState *node,
+				 ExprState *qual, ProjectionInfo *projInfo)
+{
+	ExprContext *econtext = node->ss.ps.ps_ExprContext;
+	RowBatch *b = node->batch;
+
+	/* Batch path does not support EPQ */
+	Assert(node->ss.ps.state->es_epq_active == NULL);
+	Assert(RowBatchIsValid(b));
+
+	for (;;)
+	{
+		TupleTableSlot *in;
+
+		CHECK_FOR_INTERRUPTS();
+
+		/* Get next input slot from current batch, or refill */
+		if (!RowBatchHasMore(b))
+		{
+			if (!SeqNextBatchMaterialize(node))
+				return NULL;
+		}
+
+		in = RowBatchGetNextSlot(b);
+		Assert(in);
+
+		/* No qual, no projection: direct return */
+		if (qual == NULL && projInfo == NULL)
+			return in;
+
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = in;
+
+		/* Check qual if present */
+		if (qual != NULL && !ExecQual(qual, econtext))
+		{
+			InstrCountFiltered1(node, 1);
+			continue;
+		}
+
+		/* Project if needed, otherwise return scan tuple directly */
+		if (projInfo != NULL)
+			return ExecProject(projInfo);
+
+		return in;
+	}
+}
+
+static TupleTableSlot *
+ExecSeqScanBatchSlot(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return SeqScanBatchSlot(node, NULL, NULL);
+}
+
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithQual(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	/*
+	 * Use pg_assume() for != NULL tests to make the compiler realize no
+	 * runtime check for the field is needed in ExecScanExtended().
+	 */
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return SeqScanBatchSlot(node, pstate->qual, NULL);
+}
+
+/*
+ * Variant of ExecSeqScan() but when projection is required.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return SeqScanBatchSlot(node, NULL, pstate->ps_ProjInfo);
+}
+
+/*
+ * Variant of ExecSeqScan() but when qual evaluation and projection are
+ * required.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchSlotWithQualProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return SeqScanBatchSlot(node, pstate->qual, pstate->ps_ProjInfo);
+}
+
+/* ----------------------------------------------------------------
  *		ExecInitSeqScan
  * ----------------------------------------------------------------
  */
@@ -280,6 +564,9 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithQualProject;
 	}
 
+	if (SeqScanCanUseBatching(scanstate, eflags))
+		SeqScanInitBatching(scanstate);
+
 	return scanstate;
 }
 
@@ -298,6 +585,8 @@ ExecEndSeqScan(SeqScanState *node)
 	 * get information from node
 	 */
 	scanDesc = node->ss.ss_currentScanDesc;
+
+	SeqScanResetBatching(node, true);
 
 	/*
 	 * close heap scan
@@ -328,6 +617,7 @@ ExecReScanSeqScan(SeqScanState *node)
 		table_rescan(scan,		/* scan desc */
 					 NULL);		/* new scan keys */
 
+	SeqScanResetBatching(node, false);
 	ExecScanReScan((ScanState *) node);
 }
 

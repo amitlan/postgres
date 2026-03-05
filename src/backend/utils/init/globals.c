@@ -165,3 +165,6 @@ int			notify_buffers = 16;
 int			serializable_buffers = 32;
 int			subtransaction_buffers = 0;
 int			transaction_buffers = 0;
+
+/* executor batching */
+int			executor_batch_rows = 64;
