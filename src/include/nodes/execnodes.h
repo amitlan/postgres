@@ -58,6 +58,7 @@ typedef struct PlanState PlanState;
 typedef struct ExecRowMark ExecRowMark;
 typedef struct ExprState ExprState;
 typedef struct ExprContext ExprContext;
+typedef struct RowBatch RowBatch;
 
 
 /* ----------------
@@ -1635,6 +1636,7 @@ typedef struct SeqScanState
 {
 	ScanState	ss;				/* its first field is NodeTag */
 	Size		pscan_len;		/* size of parallel heap scan descriptor */
+	RowBatch   *batch;			/* NULL if batching disabled */
 } SeqScanState;
 
 /* ----------------
