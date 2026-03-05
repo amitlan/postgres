@@ -59,6 +59,7 @@ typedef struct ExecRowMark ExecRowMark;
 typedef struct ExprState ExprState;
 typedef struct ExprContext ExprContext;
 typedef struct RowBatch RowBatch;
+typedef struct BatchQualState BatchQualState;
 
 
 /* ----------------
@@ -1637,6 +1638,12 @@ typedef struct SeqScanState
 	ScanState	ss;				/* its first field is NodeTag */
 	Size		pscan_len;		/* size of parallel heap scan descriptor */
 	RowBatch   *batch;			/* NULL if batching disabled */
+
+	/* Batch qual state  */
+	BatchQualState *bqs;				/* NULL if quals not batchable */
+	int		   *batch_survivors;	/* surviving indices after batch qual */
+	int			batch_nqualified;		/* number of survivors */
+	int			batch_outpos;			/* iteration position */
 } SeqScanState;
 
 /* ----------------

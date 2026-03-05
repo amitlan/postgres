@@ -100,6 +100,15 @@ RowBatchGetNextSlot(RowBatch *b)
 	return b->slot;
 }
 
+/* Returns the tuple at specified pos */
+static inline TupleTableSlot *
+RowBatchGetSlot(RowBatch *b, int pos)
+{
+	if (pos >= b->nrows)
+		return NULL;
+	b->ops->repoint_slot(b, pos);
+	return b->slot;
+}
 /* === Batching stats. ===*/
 
 extern void RowBatchRecordStats(RowBatch *b, int rows);
