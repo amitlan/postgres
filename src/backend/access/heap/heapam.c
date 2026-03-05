@@ -43,6 +43,7 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_database_d.h"
 #include "commands/vacuum.h"
+#include "executor/execRowBatch.h"
 #include "pgstat.h"
 #include "port/pg_bitutils.h"
 #include "storage/lmgr.h"
@@ -109,6 +110,7 @@ static int	bottomup_sort_and_shrink(TM_IndexDeleteOp *delstate);
 static XLogRecPtr log_heap_new_cid(Relation relation, HeapTuple tup);
 static HeapTuple ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 										bool *copy);
+static void heap_materialize_into_slots(RowBatch *b);
 
 
 /*
@@ -695,6 +697,191 @@ heap_prepare_pagescan(TableScanDesc sscan)
 	}
 
 	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+}
+
+/*
+ * heap_prepare_pagebatch
+ *		Prepare all visible tuples from the current page into HeapPageBatch.
+ *
+ * Acquires and releases a shared content lock internally.  On return,
+ * hb->tupdata[0..npageitems-1] holds headers for visible tuples, and
+ * hb->nextitem is reset to 0.
+ *
+ * When the page is all-visible, not on a standby, and no serializable
+ * conflict checking is needed, takes a fast path: one loop over line
+ * pointers directly into tupdata[], bypassing rs_vistuples[] and
+ * per-tuple visibility checks entirely.
+ *
+ * Otherwise delegates to heap_prepare_pagescan for the full
+ * pruning/visibility/serializable-conflict pipeline, then copies
+ * results into tupdata[].
+ *
+ * Opportunistic pruning (heap_page_prune_opt) is called unconditionally
+ * before taking the content lock, matching heap_prepare_pagescan behavior.
+ */
+static void
+heap_prepare_pagebatch(HeapScanDesc scan, HeapPageBatch *hb)
+{
+	Buffer		buffer = scan->rs_cbuf;
+	Snapshot	snapshot = scan->rs_base.rs_snapshot;
+	Page		page;
+	int			lines;
+	int			nout = 0;
+	BlockNumber	block = scan->rs_cblock;
+	bool		all_visible;
+	bool		check_serializable;
+
+	Assert(BufferGetBlockNumber(buffer) == block);
+	Assert(scan->rs_base.rs_flags & SO_ALLOW_PAGEMODE);
+
+	/*
+	 * Prune and repair fragmentation for the whole page, if possible.
+	 * This matches what heap_prepare_pagescan does before examining
+	 * tuple visibility, keeping pruning behavior identical between
+	 * scalar and batch paths.
+	 */
+	heap_page_prune_opt(scan->rs_base.rs_rd, buffer);
+
+	/*
+	 * We must hold share lock on the buffer content while examining
+	 * tuple visibility.  Afterwards, the tuples we have found to be
+	 * visible are guaranteed good as long as we hold the buffer pin.
+	 */
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+
+	page = BufferGetPage(buffer);
+	lines = PageGetMaxOffsetNumber(page);
+
+	/*
+	 * Determine whether we can skip per-tuple visibility checks.
+	 *
+	 * PageIsAllVisible alone is not sufficient:
+	 *
+	 * - On a hot standby, a tuple visible to all transactions on the
+	 *   primary might still be invisible to a read-only transaction
+	 *   on the standby.  The page-level PD_ALL_VISIBLE flag might
+	 *   get propagated without explicit WAL logging (e.g. via a full
+	 *   page write), so we cannot trust it during recovery.
+	 *
+	 * - Under serializable isolation, we must call
+	 *   HeapCheckForSerializableConflictOut for each tuple even on
+	 *   all-visible pages, which requires populated tuple headers.
+	 *
+	 * These are the same conditions heap_prepare_pagescan checks.
+	 */
+	all_visible = PageIsAllVisible(page) &&
+				  !snapshot->takenDuringRecovery;
+	check_serializable =
+		CheckForSerializableConflictOutNeeded(scan->rs_base.rs_rd,
+											  snapshot);
+
+	if (all_visible && !check_serializable)
+	{
+		/*
+		 * Fast path: all tuples are visible, no conflict checks needed.
+		 * Just iterate line pointers and collect normal items directly
+		 * into tupdata[].  No rs_vistuples[], no HeapTupleSatisfiesMVCC,
+		 * no per-tuple snapshot checks.
+		 *
+		 * This is the common case for read-committed queries on a
+		 * primary against a table that is not being actively modified.
+		 */
+		for (OffsetNumber lineoff = FirstOffsetNumber;
+			 lineoff <= lines;
+			 lineoff = OffsetNumberNext(lineoff))
+		{
+			ItemId			lpp = PageGetItemId(page, lineoff);
+			HeapTupleData  *dst;
+
+			if (!ItemIdIsNormal(lpp))
+				continue;
+
+			dst = &hb->tupdata[nout];
+			dst->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+			dst->t_len = ItemIdGetLength(lpp);
+			ItemPointerSet(&dst->t_self, block, lineoff);
+			nout++;
+		}
+	}
+	else if (all_visible && check_serializable)
+	{
+		/*
+		 * All tuples are visible, but we need serializable conflict
+		 * checks.  Collect tuple headers into tupdata[] (same as fast
+		 * path), then run the conflict check for each.
+		 */
+		for (OffsetNumber lineoff = FirstOffsetNumber;
+			 lineoff <= lines;
+			 lineoff = OffsetNumberNext(lineoff))
+		{
+			ItemId			lpp = PageGetItemId(page, lineoff);
+			HeapTupleData  *dst;
+
+			if (!ItemIdIsNormal(lpp))
+				continue;
+
+			dst = &hb->tupdata[nout];
+			dst->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+			dst->t_len = ItemIdGetLength(lpp);
+			dst->t_tableOid = RelationGetRelid(scan->rs_base.rs_rd);
+			ItemPointerSet(&dst->t_self, block, lineoff);
+			nout++;
+		}
+
+		/* Run serializable conflict checks on collected tuples */
+		for (int i = 0; i < nout; i++)
+		{
+			HeapCheckForSerializableConflictOut(true,
+											   scan->rs_base.rs_rd,
+											   &hb->tupdata[i],
+											   buffer, snapshot);
+		}
+	}
+	else
+	{
+		/*
+		 * Non-all-visible page (or hot standby).  Need full pruning
+		 * and per-tuple visibility checks.
+		 *
+		 * Delegate to heap_prepare_pagescan which handles the complex
+		 * pruning/freeze/MVCC/serializable pipeline, writing results
+		 * into rs_vistuples[].  Then copy those into our tupdata[].
+		 *
+		 * We must release our lock first since heap_prepare_pagescan
+		 * acquires its own lock internally.  Then reacquire to read
+		 * the page contents that it validated.
+		 *
+		 * Note: this temporarily mutates rs_ntuples/rs_vistuples in
+		 * the scan desc.  A future patch should replace this with a
+		 * helper that fills a caller-supplied array to fully decouple
+		 * the batch path from scalar scan state.
+		 */
+		LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+		heap_prepare_pagescan((TableScanDesc) scan);
+		LockBuffer(buffer, BUFFER_LOCK_SHARE);
+
+		page = BufferGetPage(buffer);
+
+		for (int i = 0; i < scan->rs_ntuples; i++)
+		{
+			OffsetNumber	lineoff = scan->rs_vistuples[i];
+			ItemId			lpp = PageGetItemId(page, lineoff);
+			HeapTupleData  *dst = &hb->tupdata[nout];
+
+			Assert(ItemIdIsNormal(lpp));
+
+			dst->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+			dst->t_len = ItemIdGetLength(lpp);
+			ItemPointerSet(&dst->t_self, block, lineoff);
+			nout++;
+		}
+	}
+
+	LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+
+	hb->npageitems = nout;
+	hb->nextitem = 0;
+	hb->slice_base = 0;
 }
 
 /*
@@ -1440,7 +1627,7 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 	 * the proper return buffer and return the tuple.
 	 */
 
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	return &scan->rs_ctup;
 }
@@ -1468,12 +1655,253 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	 * the proper return buffer and return the tuple.
 	 */
 
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot,
 							 scan->rs_cbuf);
 	return true;
 }
+
+/*---------- Batching support -----------*/
+
+static const RowBatchOps RowBatchHeapOps =
+{
+	.materialize_into_slots = heap_materialize_into_slots
+};
+
+/*
+ * heap_begin_batch
+ *		Initialize AM-side batch state for a heap scan.
+ *
+ * Allocates a HeapPageBatch with page-level capacity.  tupdata[] is
+ * sized to MaxHeapTuplesPerPage, independent of the executor's
+ * RowBatch.max_rows which controls the slice size.
+ *
+ * Slots are created with HeapTuple ops so that materialize_into_slots
+ * can bind slot headers directly to on-page tuple data without copying.
+ * We use TTSOpsHeapTuple rather than TTSOpsBufferHeapTuple because
+ * HeapPageBatch holds a single buffer pin for the entire page;
+ * per-slot pin tracking is unnecessary and would add overhead.
+ */
+void
+heap_begin_batch(TableScanDesc sscan, RowBatch *b)
+{
+	HeapPageBatch  *hb;
+	Oid				relid;
+	int				maxpageitems;
+	Size			alloc_size;
+
+	/* Batch path relies on executor-level qual eval, not AM scan keys */
+	Assert(sscan->rs_nkeys == 0);
+
+	maxpageitems = MaxHeapTuplesPerPage;
+
+	alloc_size = sizeof(HeapPageBatch) +
+				 sizeof(HeapTupleData) * maxpageitems;
+	hb = palloc(alloc_size);
+	hb->tupdata = (HeapTupleData *) ((char *) hb + sizeof(HeapPageBatch));
+	hb->npageitems = 0;
+	hb->nextitem = 0;
+	hb->slice_base = 0;
+	hb->maxpageitems = maxpageitems;
+	hb->buf = InvalidBuffer;
+
+	/* Pre-initialize static fields */
+	relid = RelationGetRelid(sscan->rs_rd);
+	for (int i = 0; i < maxpageitems; i++)
+		hb->tupdata[i].t_tableOid = relid;
+
+	b->am_payload = hb;
+	b->ops = &RowBatchHeapOps;
+
+	RowBatchCreateSlots(b, RelationGetDescr(sscan->rs_rd),
+						&TTSOpsHeapTuple);
+}
+
+/*
+ * heap_reset_batch
+ *		Release pin and reset for rescan, keeping allocations.
+ */
+void
+heap_reset_batch(TableScanDesc sscan, RowBatch *b)
+{
+	HeapPageBatch  *hb = (HeapPageBatch *) b->am_payload;
+
+	Assert(hb != NULL);
+	if (BufferIsValid(hb->buf))
+	{
+		ReleaseBuffer(hb->buf);
+		hb->buf = InvalidBuffer;
+	}
+	hb->npageitems = 0;
+	hb->nextitem = 0;
+	hb->slice_base = 0;
+}
+
+/*
+ * heap_end_batch
+ *		Release all batch resources.
+ */
+void
+heap_end_batch(TableScanDesc sscan, RowBatch *b)
+{
+	HeapPageBatch  *hb = (HeapPageBatch *) b->am_payload;
+
+	if (BufferIsValid(hb->buf))
+		ReleaseBuffer(hb->buf);
+
+	pfree(hb);
+	b->am_payload = NULL;
+}
+
+/*
+ * heap_getnextbatch
+ *		Fetch the next slice of visible tuples from a heap scan.
+ *
+ * Serves slices from the page-level HeapPageBatch.  If the current
+ * page has remaining tuples, serves the next slice without re-entering
+ * the page scan.  If the page is exhausted, advances to the next page
+ * and prepares it.
+ *
+ * Sets slice_base and advances nextitem before returning, so that
+ * materialize_into_slots can bind the correct range of tupdata[]
+ * without inferring state.
+ *
+ * Each call returns at most b->max_rows tuples.  The pin on the page
+ * is held until the page is fully consumed.
+ *
+ * Returns true if tuples were fetched, false at end of scan.
+ */
+bool
+heap_getnextbatch(TableScanDesc sscan, RowBatch *b, ScanDirection dir)
+{
+	HeapScanDesc	scan = (HeapScanDesc) sscan;
+	HeapPageBatch  *hb = (HeapPageBatch *) b->am_payload;
+	int				remaining;
+	int				nserve;
+
+	Assert(ScanDirectionIsForward(dir));
+	Assert(sscan->rs_flags & SO_ALLOW_PAGEMODE);
+
+	/*
+	 * Try to serve from the current page first.
+	 * No page advance, no buffer management, no re-entry into heap code.
+	 */
+	remaining = hb->npageitems - hb->nextitem;
+	if (remaining > 0)
+	{
+		nserve = Min(remaining, b->max_rows);
+
+		hb->slice_base = hb->nextitem;
+		hb->nextitem += nserve;
+
+		b->nrows = nserve;
+		b->materialized = false;
+		b->pos = 0;
+
+		pgstat_count_heap_getnext(sscan->rs_rd, nserve);
+		return true;
+	}
+
+	/*
+	 * Current page exhausted.  Advance to next page with tuples.
+	 */
+	for (;;)
+	{
+		/*
+		 * Release previous page's pin if held.  The page is fully
+		 * consumed at this point -- all slices have been served.
+		 */
+		if (BufferIsValid(hb->buf))
+		{
+			ReleaseBuffer(hb->buf);
+			hb->buf = InvalidBuffer;
+		}
+
+		heap_fetch_next_buffer(scan, dir);
+
+		if (!BufferIsValid(scan->rs_cbuf))
+		{
+			/* End of scan */
+			scan->rs_cblock = InvalidBlockNumber;
+			scan->rs_prefetch_block = InvalidBlockNumber;
+			scan->rs_inited = false;
+			b->nrows = 0;
+			return false;
+		}
+
+		Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
+
+		/* Prepare entire page into HeapPageBatch (locks internally) */
+		heap_prepare_pagebatch(scan, hb);
+
+		if (hb->npageitems > 0)
+		{
+			/*
+			 * Pin the page so tuple data stays valid while the executor
+			 * processes slices.  Released at the top of the next call
+			 * once the page is fully consumed.
+			 */
+			IncrBufferRefCount(scan->rs_cbuf);
+			hb->buf = scan->rs_cbuf;
+
+			/* Serve first slice */
+			nserve = Min(hb->npageitems, b->max_rows);
+
+			hb->slice_base = 0;
+			hb->nextitem = nserve;
+
+			b->nrows = nserve;
+			b->materialized = false;
+			b->pos = 0;
+
+			pgstat_count_heap_getnext(sscan->rs_rd, nserve);
+			return true;
+		}
+
+		/* Empty page (all dead/invisible tuples), try next */
+	}
+}
+
+/*
+ * heap_materialize_into_slots
+ *		Bind the current slice of tuples into RowBatch slots.
+ *
+ * Reads slice_base and b->nrows to map
+ * tupdata[slice_base .. slice_base+nrows-1] into slots[0 .. nrows-1].
+ *
+ * Does not advance any batch state -- that is heap_getnextbatch's
+ * responsibility.  This function purely binds what has already been
+ * exposed.
+ */
+static void
+heap_materialize_into_slots(RowBatch *b)
+{
+	HeapPageBatch  *hb = (HeapPageBatch *) b->am_payload;
+	TupleTableSlot **slots = b->slots;
+	int				base = hb->slice_base;
+
+	Assert(slots != NULL);
+	Assert(base >= 0);
+	Assert(base + b->nrows <= hb->npageitems);
+
+	for (int i = 0; i < b->nrows; i++)
+	{
+		HeapTupleData		*tuple = &hb->tupdata[base + i];
+		HeapTupleTableSlot	*slot = (HeapTupleTableSlot *) slots[i];
+
+		Assert(TTS_IS_HEAPTUPLE(slots[i]));
+
+		slot->tuple = tuple;
+		slot->off = 0;
+		slot->base.tts_nvalid = 0;
+		slot->base.tts_flags &= ~(TTS_FLAG_EMPTY | TTS_FLAG_SHOULDFREE);
+		slot->base.tts_tid = tuple->t_self;
+		slot->base.tts_tableOid = tuple->t_tableOid;
+	}
+}
+
+/*----- End of batching support -----*/
 
 void
 heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
@@ -1616,7 +2044,7 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 	 * if we get here it means we have a new current scan tuple, so point to
 	 * the proper return buffer and return the tuple.
 	 */
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot, scan->rs_cbuf);
 	return true;
