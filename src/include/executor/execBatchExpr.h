@@ -38,6 +38,14 @@ typedef enum BatchQualClauseKind
 	BQC_IS_NOT_NULL				/* Var IS NOT NULL */
 } BatchQualClauseKind;
 
+/*
+ * BatchCmpFn -- direct comparison function bypassing fmgr.
+ *
+ * Called only with non-NULL Datum arguments; NULL short-circuit is
+ * handled by the caller in BatchQualExec.
+ */
+typedef bool (*BatchCmpFn) (Datum lv, Datum rv);
+
 typedef struct BatchQualClause
 {
 	BatchQualClauseKind kind;
@@ -50,6 +58,7 @@ typedef struct BatchQualClause
 
 	/* Comparison function */
 	FmgrInfo   *finfo;			/* NULL for NullTest kinds */
+	BatchCmpFn	cmpfn;			/* direct fast path, NULL if using fmgr */
 	Oid			collation;		/* operator collation */
 } BatchQualClause;
 

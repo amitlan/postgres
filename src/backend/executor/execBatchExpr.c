@@ -13,6 +13,7 @@
 
 #include "postgres.h"
 
+#include "catalog/pg_operator_d.h"
 #include "catalog/pg_proc.h"
 #include "executor/executor.h"
 #include "executor/execBatchExpr.h"
@@ -20,6 +21,8 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
+#include "utils/float.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
@@ -55,6 +58,8 @@ typedef struct QualBatchWalkerContext
 	AttrNumber	max_attno;		/* highest referenced attribute */
 	bool		ok;				/* stays true while batchable */
 } QualBatchWalkerContext;
+
+static BatchCmpFn lookup_batch_cmpfn(Oid opfuncid);
 
 /*
  * qual_batchable_walker
@@ -219,12 +224,17 @@ build_clause(Node *node, BatchQualClause *cl)
 		cl->collation = exprInputCollation((Node *) op);
 
 		/*
-		 * Walker guarantees strict + leakproof.  We don't store a
-		 * separate strict flag; the null check in BatchQualExec is
-		 * unconditional for all operator clauses.
+		 * Walker guarantees strict + leakproof.  Try the fast-path
+		 * lookup first; fall back to fmgr if no direct function exists.
 		 */
-		cl->finfo = palloc(sizeof(FmgrInfo));
-		fmgr_info(op->opfuncid, cl->finfo);
+		cl->cmpfn = lookup_batch_cmpfn(op->opfuncid);
+		if (cl->cmpfn == NULL)
+		{
+			cl->finfo = palloc(sizeof(FmgrInfo));
+			fmgr_info(op->opfuncid, cl->finfo);
+		}
+		else
+			cl->finfo = NULL;
 
 		return true;
 	}
@@ -358,11 +368,14 @@ BatchQualExec(BatchQualState *bqs, RowBatch *b,
 						{
 							Datum	lv = slot->tts_values[cl->l_attno - 1];
 
-							pass = DatumGetBool(
-								FunctionCall2Coll(cl->finfo,
-												  cl->collation,
-												  lv,
-												  cl->r_const));
+							if (cl->cmpfn)
+								pass = cl->cmpfn(lv, cl->r_const);
+							else
+								pass = DatumGetBool(
+									FunctionCall2Coll(cl->finfo,
+													  cl->collation,
+													  lv,
+													  cl->r_const));
 						}
 					}
 					break;
@@ -380,10 +393,13 @@ BatchQualExec(BatchQualState *bqs, RowBatch *b,
 							Datum	lv = slot->tts_values[cl->l_attno - 1];
 							Datum	rv = slot->tts_values[cl->r_attno - 1];
 
-							pass = DatumGetBool(
-								FunctionCall2Coll(cl->finfo,
-												  cl->collation,
-												  lv, rv));
+							if (cl->cmpfn)
+								pass = cl->cmpfn(lv, rv);
+							else
+								pass = DatumGetBool(
+									FunctionCall2Coll(cl->finfo,
+													  cl->collation,
+													  lv, rv));
 						}
 					}
 					break;
@@ -406,4 +422,426 @@ BatchQualExec(BatchQualState *bqs, RowBatch *b,
 	MemoryContextSwitchTo(oldContext);
 
 	return kept;
+}
+
+/* ---- Fast-path comparison functions in execRowBatch.c ---- */
+
+/* --- int2 --- */
+
+static bool
+batch_int2eq(Datum lv, Datum rv)
+{
+	return DatumGetInt16(lv) == DatumGetInt16(rv);
+}
+
+static bool
+batch_int2ne(Datum lv, Datum rv)
+{
+	return DatumGetInt16(lv) != DatumGetInt16(rv);
+}
+
+static bool
+batch_int2lt(Datum lv, Datum rv)
+{
+	return DatumGetInt16(lv) < DatumGetInt16(rv);
+}
+
+static bool
+batch_int2le(Datum lv, Datum rv)
+{
+	return DatumGetInt16(lv) <= DatumGetInt16(rv);
+}
+
+static bool
+batch_int2gt(Datum lv, Datum rv)
+{
+	return DatumGetInt16(lv) > DatumGetInt16(rv);
+}
+
+static bool
+batch_int2ge(Datum lv, Datum rv)
+{
+	return DatumGetInt16(lv) >= DatumGetInt16(rv);
+}
+
+/* --- int4 --- */
+
+static bool
+batch_int4eq(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) == DatumGetInt32(rv);
+}
+
+static bool
+batch_int4ne(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) != DatumGetInt32(rv);
+}
+
+static bool
+batch_int4lt(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) < DatumGetInt32(rv);
+}
+
+static bool
+batch_int4le(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) <= DatumGetInt32(rv);
+}
+
+static bool
+batch_int4gt(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) > DatumGetInt32(rv);
+}
+
+static bool
+batch_int4ge(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) >= DatumGetInt32(rv);
+}
+
+/* --- int8 --- */
+
+static bool
+batch_int8eq(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) == DatumGetInt64(rv);
+}
+
+static bool
+batch_int8ne(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) != DatumGetInt64(rv);
+}
+
+static bool
+batch_int8lt(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) < DatumGetInt64(rv);
+}
+
+static bool
+batch_int8le(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) <= DatumGetInt64(rv);
+}
+
+static bool
+batch_int8gt(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) > DatumGetInt64(rv);
+}
+
+static bool
+batch_int8ge(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) >= DatumGetInt64(rv);
+}
+
+/* --- float4 --- */
+
+static bool
+batch_float4eq(Datum lv, Datum rv)
+{
+	float4 a = DatumGetFloat4(lv);
+	float4 b = DatumGetFloat4(rv);
+	return float4_cmp_internal(a, b) == 0;
+}
+
+static bool
+batch_float4ne(Datum lv, Datum rv)
+{
+	float4 a = DatumGetFloat4(lv);
+	float4 b = DatumGetFloat4(rv);
+	return float4_cmp_internal(a, b) != 0;
+}
+
+static bool
+batch_float4lt(Datum lv, Datum rv)
+{
+	float4 a = DatumGetFloat4(lv);
+	float4 b = DatumGetFloat4(rv);
+	return float4_cmp_internal(a, b) < 0;
+}
+
+static bool
+batch_float4le(Datum lv, Datum rv)
+{
+	float4 a = DatumGetFloat4(lv);
+	float4 b = DatumGetFloat4(rv);
+	return float4_cmp_internal(a, b) <= 0;
+}
+
+static bool
+batch_float4gt(Datum lv, Datum rv)
+{
+	float4 a = DatumGetFloat4(lv);
+	float4 b = DatumGetFloat4(rv);
+	return float4_cmp_internal(a, b) > 0;
+}
+
+static bool
+batch_float4ge(Datum lv, Datum rv)
+{
+	float4 a = DatumGetFloat4(lv);
+	float4 b = DatumGetFloat4(rv);
+	return float4_cmp_internal(a, b) >= 0;
+}
+
+/* --- float8 --- */
+
+static bool
+batch_float8eq(Datum lv, Datum rv)
+{
+	float8 a = DatumGetFloat8(lv);
+	float8 b = DatumGetFloat8(rv);
+	return float8_cmp_internal(a, b) == 0;
+}
+
+static bool
+batch_float8ne(Datum lv, Datum rv)
+{
+	float8 a = DatumGetFloat8(lv);
+	float8 b = DatumGetFloat8(rv);
+	return float8_cmp_internal(a, b) != 0;
+}
+
+static bool
+batch_float8lt(Datum lv, Datum rv)
+{
+	float8 a = DatumGetFloat8(lv);
+	float8 b = DatumGetFloat8(rv);
+	return float8_cmp_internal(a, b) < 0;
+}
+
+static bool
+batch_float8le(Datum lv, Datum rv)
+{
+	float8 a = DatumGetFloat8(lv);
+	float8 b = DatumGetFloat8(rv);
+	return float8_cmp_internal(a, b) <= 0;
+}
+
+static bool
+batch_float8gt(Datum lv, Datum rv)
+{
+	float8 a = DatumGetFloat8(lv);
+	float8 b = DatumGetFloat8(rv);
+	return float8_cmp_internal(a, b) > 0;
+}
+
+static bool
+batch_float8ge(Datum lv, Datum rv)
+{
+	float8 a = DatumGetFloat8(lv);
+	float8 b = DatumGetFloat8(rv);
+	return float8_cmp_internal(a, b) >= 0;
+}
+
+/* --- int24 cross-type --- */
+
+static bool
+batch_int24eq(Datum lv, Datum rv)
+{
+	return (int32) DatumGetInt16(lv) == DatumGetInt32(rv);
+}
+
+static bool
+batch_int24lt(Datum lv, Datum rv)
+{
+	return (int32) DatumGetInt16(lv) < DatumGetInt32(rv);
+}
+
+static bool
+batch_int24gt(Datum lv, Datum rv)
+{
+	return (int32) DatumGetInt16(lv) > DatumGetInt32(rv);
+}
+
+/* --- int42 cross-type --- */
+
+static bool
+batch_int42eq(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) == (int32) DatumGetInt16(rv);
+}
+
+static bool
+batch_int42lt(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) < (int32) DatumGetInt16(rv);
+}
+
+static bool
+batch_int42gt(Datum lv, Datum rv)
+{
+	return DatumGetInt32(lv) > (int32) DatumGetInt16(rv);
+}
+
+/* --- int48 cross-type --- */
+
+static bool
+batch_int48eq(Datum lv, Datum rv)
+{
+	return (int64) DatumGetInt32(lv) == DatumGetInt64(rv);
+}
+
+static bool
+batch_int48lt(Datum lv, Datum rv)
+{
+	return (int64) DatumGetInt32(lv) < DatumGetInt64(rv);
+}
+
+static bool
+batch_int48gt(Datum lv, Datum rv)
+{
+	return (int64) DatumGetInt32(lv) > DatumGetInt64(rv);
+}
+
+/* --- int84 cross-type --- */
+
+static bool
+batch_int84eq(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) == (int64) DatumGetInt32(rv);
+}
+
+static bool
+batch_int84lt(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) < (int64) DatumGetInt32(rv);
+}
+
+static bool
+batch_int84gt(Datum lv, Datum rv)
+{
+	return DatumGetInt64(lv) > (int64) DatumGetInt32(rv);
+}
+
+/* --- Oid --- */
+
+static bool
+batch_oideq(Datum lv, Datum rv)
+{
+	return DatumGetObjectId(lv) == DatumGetObjectId(rv);
+}
+
+static bool
+batch_oidne(Datum lv, Datum rv)
+{
+	return DatumGetObjectId(lv) != DatumGetObjectId(rv);
+}
+
+/* --- bool --- */
+
+static bool
+batch_booleq(Datum lv, Datum rv)
+{
+	return DatumGetBool(lv) == DatumGetBool(rv);
+}
+
+static bool
+batch_boolne(Datum lv, Datum rv)
+{
+	return DatumGetBool(lv) != DatumGetBool(rv);
+}
+
+
+/*
+ * Lookup table mapping operator function OIDs to direct batch comparison
+ * functions.  Sorted by OID for binary search if the table grows large,
+ * but linear scan is fine for ~40 entries.
+ */
+typedef struct BatchCmpEntry
+{
+	Oid			opfuncid;
+	BatchCmpFn	fn;
+} BatchCmpEntry;
+
+static const BatchCmpEntry batch_cmp_table[] =
+{
+	/* int2 */
+	{F_INT2EQ, batch_int2eq},
+	{F_INT2NE, batch_int2ne},
+	{F_INT2LT, batch_int2lt},
+	{F_INT2LE, batch_int2le},
+	{F_INT2GT, batch_int2gt},
+	{F_INT2GE, batch_int2ge},
+
+	/* int4 */
+	{F_INT4EQ, batch_int4eq},
+	{F_INT4NE, batch_int4ne},
+	{F_INT4LT, batch_int4lt},
+	{F_INT4LE, batch_int4le},
+	{F_INT4GT, batch_int4gt},
+	{F_INT4GE, batch_int4ge},
+
+	/* int8 */
+	{F_INT8EQ, batch_int8eq},
+	{F_INT8NE, batch_int8ne},
+	{F_INT8LT, batch_int8lt},
+	{F_INT8LE, batch_int8le},
+	{F_INT8GT, batch_int8gt},
+	{F_INT8GE, batch_int8ge},
+
+	/* float4 */
+	{F_FLOAT4EQ, batch_float4eq},
+	{F_FLOAT4NE, batch_float4ne},
+	{F_FLOAT4LT, batch_float4lt},
+	{F_FLOAT4LE, batch_float4le},
+	{F_FLOAT4GT, batch_float4gt},
+	{F_FLOAT4GE, batch_float4ge},
+
+	/* float8 */
+	{F_FLOAT8EQ, batch_float8eq},
+	{F_FLOAT8NE, batch_float8ne},
+	{F_FLOAT8LT, batch_float8lt},
+	{F_FLOAT8LE, batch_float8le},
+	{F_FLOAT8GT, batch_float8gt},
+	{F_FLOAT8GE, batch_float8ge},
+
+	/* int2/int4 cross-type */
+	{F_INT24EQ, batch_int24eq},
+	{F_INT24LT, batch_int24lt},
+	{F_INT24GT, batch_int24gt},
+	{F_INT42EQ, batch_int42eq},
+	{F_INT42LT, batch_int42lt},
+	{F_INT42GT, batch_int42gt},
+
+	/* int4/int8 cross-type */
+	{F_INT48EQ, batch_int48eq},
+	{F_INT48LT, batch_int48lt},
+	{F_INT48GT, batch_int48gt},
+	{F_INT84EQ, batch_int84eq},
+	{F_INT84LT, batch_int84lt},
+	{F_INT84GT, batch_int84gt},
+
+	/* oid */
+	{F_OIDEQ, batch_oideq},
+	{F_OIDNE, batch_oidne},
+
+	/* bool */
+	{F_BOOLEQ, batch_booleq},
+	{F_BOOLNE, batch_boolne},
+};
+
+#define BATCH_CMP_TABLE_SIZE (sizeof(batch_cmp_table) / sizeof(batch_cmp_table[0]))
+
+/*
+ * lookup_batch_cmpfn
+ *		Find a direct comparison function for the given operator function OID.
+ *
+ * Returns NULL if no fast-path is available; caller falls back to fmgr.
+ */
+static BatchCmpFn
+lookup_batch_cmpfn(Oid opfuncid)
+{
+	for (int i = 0; i < BATCH_CMP_TABLE_SIZE; i++)
+	{
+		if (batch_cmp_table[i].opfuncid == opfuncid)
+			return batch_cmp_table[i].fn;
+	}
+	return NULL;
 }
