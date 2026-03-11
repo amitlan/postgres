@@ -102,6 +102,32 @@ typedef struct HeapScanDescData
 } HeapScanDescData;
 typedef struct HeapScanDescData *HeapScanDesc;
 
+/*
+ * HeapPageBatch -- heapam-private page-level batch state.
+ *
+ * Thin slice descriptor over the scan's rs_tupledata[] array.  Rather
+ * than owning a copy of tuple headers, HeapPageBatch holds a pointer
+ * into scan->rs_tupledata[] for the current slice, which was populated
+ * by page_collect_tuples() during heap_prepare_pagescan().
+ *
+ * The executor consumes tuples in slices.  Each heap_getnextbatch call
+ * re-points tuples to the next slice and advances nextitem, serving up
+ * to RowBatch.max_rows tuples from the current page before advancing
+ * to the next.
+ *
+ * buf holds the pin for the current page.  tuple data referenced via
+ * tuples remains valid as long as buf is pinned.
+ *
+ * Stored in RowBatch.am_payload.
+ */
+typedef struct HeapPageBatch
+{
+	HeapTupleData  *tuples;		/* points into scan->rs_tupledata[nextitem] */
+	int				ntuples;	/* tuples in current slice */
+	int				nextitem;	/* next unserved tuple index in rs_tupledata[] */
+	Buffer			buf;		/* pinned buffer for current page */
+} HeapPageBatch;
+
 typedef struct BitmapHeapScanDescData
 {
 	HeapScanDescData rs_heap_base;
@@ -351,6 +377,12 @@ extern void heap_endscan(TableScanDesc sscan);
 extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);
 extern bool heap_getnextslot(TableScanDesc sscan,
 							 ScanDirection direction, TupleTableSlot *slot);
+
+extern void heap_begin_batch(TableScanDesc sscan, RowBatch *batch);
+extern bool heap_getnextbatch(TableScanDesc sscan, RowBatch *batch, ScanDirection dir);
+extern void heap_end_batch(TableScanDesc sscan, RowBatch *batch);
+extern void heap_reset_batch(TableScanDesc sscan, RowBatch *batch);
+
 extern void heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 							  ItemPointer maxtid);
 extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
