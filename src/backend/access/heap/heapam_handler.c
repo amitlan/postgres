@@ -2356,7 +2356,7 @@ heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
 			ExecStoreBufferHeapTuple(tuple, slot, hscan->rs_cbuf);
 
 			/* Count successfully-fetched tuples as heap fetches */
-			pgstat_count_heap_getnext(scan->rs_rd);
+			pgstat_count_heap_getnext(scan->rs_rd, 1);
 
 			return true;
 		}
@@ -2653,6 +2653,11 @@ static const TableAmRoutine heapam_methods = {
 	.scan_end = heap_endscan,
 	.scan_rescan = heap_rescan,
 	.scan_getnextslot = heap_getnextslot,
+
+	.scan_begin_batch = heap_begin_batch,
+	.scan_getnextbatch = heap_getnextbatch,
+	.scan_end_batch = heap_end_batch,
+	.scan_reset_batch = heap_reset_batch,
 
 	.scan_set_tidrange = heap_set_tidrange,
 	.scan_getnextslot_tidrange = heap_getnextslot_tidrange,

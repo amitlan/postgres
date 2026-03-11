@@ -122,6 +122,34 @@ typedef struct HeapScanDescData
 } HeapScanDescData;
 typedef struct HeapScanDescData *HeapScanDesc;
 
+/*
+ * HeapPageBatch -- heapam-private page-level batch state.
+ *
+ * Holds HeapTupleData descriptors for all visible tuples on the current
+ * page, populated by heap_getnextbatch() after heap_prepare_pagescan()
+ * using the pre-cracked offset and length stored in rs_vistuples[].
+ * t_data pointers reference tuple data directly in the pinned buffer page.
+ *
+ * The executor consumes tuples in slices of up to RowBatch.max_rows.
+ * Each heap_getnextbatch() call advances servefrom and nextitem without
+ * re-entering heap code until the page is fully consumed.
+ *
+ * buf holds the pin for the current page; tuple data referenced via
+ * t_data remains valid as long as buf is pinned.
+ *
+ * Stored in RowBatch.am_payload.
+ */
+typedef struct HeapPageBatch
+{
+	HeapTupleData	tuples[MaxHeapTuplesPerPage];	/* visible tuples on
+													 * current page */
+	HeapTuple		servefrom;	/* pointer to start of current slice from
+								 * tuples[] */
+	int				ntuples;	/* total visible tuples on current page */
+	int				nextitem;	/* start of next slice in tuples[] */
+	Buffer			buf;		/* pinned buffer for current page */
+} HeapPageBatch;
+
 typedef struct BitmapHeapScanDescData
 {
 	HeapScanDescData rs_heap_base;
@@ -377,6 +405,12 @@ extern void heap_endscan(TableScanDesc sscan);
 extern HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction);
 extern bool heap_getnextslot(TableScanDesc sscan,
 							 ScanDirection direction, TupleTableSlot *slot);
+
+extern void heap_begin_batch(TableScanDesc sscan, RowBatch *batch);
+extern bool heap_getnextbatch(TableScanDesc sscan, RowBatch *batch, ScanDirection dir);
+extern void heap_end_batch(TableScanDesc sscan, RowBatch *batch);
+extern void heap_reset_batch(TableScanDesc sscan, RowBatch *batch);
+
 extern void heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
 							  ItemPointer maxtid);
 extern bool heap_getnextslot_tidrange(TableScanDesc sscan,
