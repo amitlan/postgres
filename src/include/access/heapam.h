@@ -98,6 +98,7 @@ typedef struct HeapScanDescData
 	uint32		rs_cindex;		/* current tuple's index in vistuples */
 	uint32		rs_ntuples;		/* number of visible tuples on page */
 	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */
+	HeapTupleData *rs_tupledata;	/* tuples */
 } HeapScanDescData;
 typedef struct HeapScanDescData *HeapScanDesc;
 
@@ -470,14 +471,14 @@ extern bool HeapTupleIsSurelyDead(HeapTuple htup,
  */
 typedef struct BatchMVCCState
 {
-	HeapTupleData tuples[MaxHeapTuplesPerPage];
 	bool		visible[MaxHeapTuplesPerPage];
 } BatchMVCCState;
 
 extern int	HeapTupleSatisfiesMVCCBatch(Snapshot snapshot, Buffer buffer,
 										int ntups,
 										BatchMVCCState *batchmvcc,
-										OffsetNumber *vistuples_dense);
+										OffsetNumber *vistuples_dense,
+										HeapTupleData *tupledata);
 
 /*
  * To avoid leaking too much knowledge about reorderbuffer implementation
