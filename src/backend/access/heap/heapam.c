@@ -524,7 +524,6 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 					BlockNumber block, int lines,
 					bool all_visible, bool check_serializable)
 {
-	Oid			relid = RelationGetRelid(scan->rs_base.rs_rd);
 	int			ntup = 0;
 	int			nvis = 0;
 	BatchMVCCState batchmvcc;
@@ -536,7 +535,7 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 	for (OffsetNumber lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)
 	{
 		ItemId		lpp = PageGetItemId(page, lineoff);
-		HeapTuple	tup;
+		HeapTuple   tup = &scan->rs_vistuples[ntup];
 
 		if (unlikely(!ItemIdIsNormal(lpp)))
 			continue;
@@ -549,25 +548,33 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 		 */
 		if (!all_visible || check_serializable)
 		{
-			tup = &batchmvcc.tuples[ntup];
+			uint32  lp_val = *(uint32 *) lpp;
 
-			tup->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
-			tup->t_len = ItemIdGetLength(lpp);
-			tup->t_tableOid = relid;
+			tup->t_data = (HeapTupleHeader) ((char *) page + (lp_val & 0x7fff));
+			tup->t_len  = lp_val >> 17;
+			Assert(tup->t_tableOid == RelationGetRelid(scan->rs_base.rs_rd));
 			ItemPointerSet(&(tup->t_self), block, lineoff);
 		}
 
-		/*
-		 * If the page is all visible, these fields otherwise won't be
-		 * populated in loop below.
-		 */
 		if (all_visible)
 		{
 			if (check_serializable)
-			{
 				batchmvcc.visible[ntup] = true;
+
+			/*
+			 * In the all_visible && !check_serializable path, the block
+			 * above was skipped, so tup's fields have not been set yet.
+			 * Fill them here while lpp is still in hand.
+			 */
+			if (!check_serializable)
+			{
+				uint32  lp_val = *(uint32 *) lpp;
+
+				tup->t_data = (HeapTupleHeader) ((char *) page + (lp_val & 0x7fff));
+				tup->t_len  = lp_val >> 17;
+				Assert(tup->t_tableOid == RelationGetRelid(scan->rs_base.rs_rd));
+				ItemPointerSet(&tup->t_self, block, lineoff);
 			}
-			scan->rs_vistuples[ntup] = lineoff;
 		}
 
 		ntup++;
@@ -598,9 +605,22 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 		{
 			HeapCheckForSerializableConflictOut(batchmvcc.visible[i],
 												scan->rs_base.rs_rd,
-												&batchmvcc.tuples[i],
+												&scan->rs_vistuples[i],
 												buffer, snapshot);
 		}
+	}
+
+
+	/* Now compact rs_vistuples[] to visible survivors only */
+	if (!all_visible)
+	{
+		int dst = 0;
+		for (int i = 0; i < ntup; i++)
+		{
+			if (batchmvcc.visible[i])
+				scan->rs_vistuples[dst++] = scan->rs_vistuples[i];
+		}
+		Assert(dst == nvis);
 	}
 
 	return nvis;
@@ -1073,14 +1093,13 @@ heapgettup_pagemode(HeapScanDesc scan,
 					ScanKey key)
 {
 	HeapTuple	tuple = &(scan->rs_ctup);
-	Page		page;
 	uint32		lineindex;
 	uint32		linesleft;
 
 	if (likely(scan->rs_inited))
 	{
 		/* continue from previously returned page/tuple */
-		page = BufferGetPage(scan->rs_cbuf);
+		Assert(BufferIsValid(scan->rs_cbuf));
 
 		lineindex = scan->rs_cindex + dir;
 		if (ScanDirectionIsForward(dir))
@@ -1108,29 +1127,21 @@ heapgettup_pagemode(HeapScanDesc scan,
 
 		/* prune the page and determine visible tuple offsets */
 		heap_prepare_pagescan((TableScanDesc) scan);
-		page = BufferGetPage(scan->rs_cbuf);
 		linesleft = scan->rs_ntuples;
 		lineindex = ScanDirectionIsForward(dir) ? 0 : linesleft - 1;
-
-		/* block is the same for all tuples, set it once outside the loop */
-		ItemPointerSetBlockNumber(&tuple->t_self, scan->rs_cblock);
 
 		/* lineindex now references the next or previous visible tid */
 continue_page:
 
 		for (; linesleft > 0; linesleft--, lineindex += dir)
 		{
-			ItemId		lpp;
-			OffsetNumber lineoff;
-
-			Assert(lineindex < scan->rs_ntuples);
-			lineoff = scan->rs_vistuples[lineindex];
-			lpp = PageGetItemId(page, lineoff);
-			Assert(ItemIdIsNormal(lpp));
-
-			tuple->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
-			tuple->t_len = ItemIdGetLength(lpp);
-			ItemPointerSetOffsetNumber(&tuple->t_self, lineoff);
+			/*
+			 * Headers were pre-built by page_collect_tuples() into
+			 * rs_vistuples[].  Copy the entry; t_data still points into the
+			 * pinned page, which is safe for the lifetime of the current page
+			 * scan.
+			 */
+			*tuple = scan->rs_vistuples[lineindex];
 
 			/* skip any tuples that don't match the scan key */
 			if (key != NULL &&
@@ -1244,6 +1255,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 
 	/* we only need to set this up once */
 	scan->rs_ctup.t_tableOid = RelationGetRelid(relation);
+	for (int i = 0; i < MaxHeapTuplesPerPage; i++)
+		scan->rs_vistuples[i].t_tableOid = RelationGetRelid(relation);
 
 	/*
 	 * Allocate memory to keep track of page allocation for parallel workers
