@@ -536,7 +536,7 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 	for (OffsetNumber lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)
 	{
 		ItemId		lpp = PageGetItemId(page, lineoff);
-		HeapTuple	tup;
+		HeapTuple   tup = &scan->rs_tupledata[ntup];
 
 		if (unlikely(!ItemIdIsNormal(lpp)))
 			continue;
@@ -549,8 +549,6 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 		 */
 		if (!all_visible || check_serializable)
 		{
-			tup = &batchmvcc.tuples[ntup];
-
 			tup->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
 			tup->t_len = ItemIdGetLength(lpp);
 			tup->t_tableOid = relid;
@@ -568,6 +566,17 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 				batchmvcc.visible[ntup] = true;
 			}
 			scan->rs_vistuples[ntup] = lineoff;
+
+			/*
+			 * Persist the full tuple header while lpp is in hand.
+			 * batchmvcc.tuples[] is not populated in the all_visible path,
+			 * so we read directly from the page.  lpp, lineoff, page, block,
+			 * and relid are all already in scope from the enclosing loop.
+			 */
+			tup->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+			tup->t_len = ItemIdGetLength(lpp);
+			tup->t_tableOid	= relid;
+			ItemPointerSet(&tup->t_self, block, lineoff);
 		}
 
 		ntup++;
@@ -586,7 +595,8 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 		nvis = HeapTupleSatisfiesMVCCBatch(snapshot, buffer,
 										   ntup,
 										   &batchmvcc,
-										   scan->rs_vistuples);
+										   scan->rs_vistuples,
+										   scan->rs_tupledata);
 
 	/*
 	 * So far we don't have batch API for testing serializabilty, so do so
@@ -598,8 +608,33 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 		{
 			HeapCheckForSerializableConflictOut(batchmvcc.visible[i],
 												scan->rs_base.rs_rd,
-												&batchmvcc.tuples[i],
+												&scan->rs_tupledata[i],
 												buffer, snapshot);
+		}
+	}
+
+	if (!all_visible)
+	{
+		/*
+		 * Compact rs_tupledata[] to only the visible survivors so that
+		 * heapgettup_pagemode can index it directly by lineindex.
+		 *
+		 * The buffer is still share-locked at this point (lock is released
+		 * by heap_prepare_pagescan after page_collect_tuples returns), so
+		 * PageGetItemId is safe.
+		 */
+		for (int i = 0; i < nvis; i++)
+		{
+			OffsetNumber	lineoff = scan->rs_vistuples[i];
+			ItemId			lpp = PageGetItemId(page, lineoff);
+			HeapTuple		tup = &scan->rs_tupledata[i];
+
+			Assert(ItemIdIsNormal(lpp));
+
+			tup->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+			tup->t_len = ItemIdGetLength(lpp);
+			tup->t_tableOid	= relid;
+			ItemPointerSet(&tup->t_self, block, lineoff);
 		}
 	}
 
@@ -1073,14 +1108,13 @@ heapgettup_pagemode(HeapScanDesc scan,
 					ScanKey key)
 {
 	HeapTuple	tuple = &(scan->rs_ctup);
-	Page		page;
 	uint32		lineindex;
 	uint32		linesleft;
 
 	if (likely(scan->rs_inited))
 	{
 		/* continue from previously returned page/tuple */
-		page = BufferGetPage(scan->rs_cbuf);
+		Assert(BufferIsValid(scan->rs_cbuf));
 
 		lineindex = scan->rs_cindex + dir;
 		if (ScanDirectionIsForward(dir))
@@ -1108,29 +1142,21 @@ heapgettup_pagemode(HeapScanDesc scan,
 
 		/* prune the page and determine visible tuple offsets */
 		heap_prepare_pagescan((TableScanDesc) scan);
-		page = BufferGetPage(scan->rs_cbuf);
 		linesleft = scan->rs_ntuples;
 		lineindex = ScanDirectionIsForward(dir) ? 0 : linesleft - 1;
-
-		/* block is the same for all tuples, set it once outside the loop */
-		ItemPointerSetBlockNumber(&tuple->t_self, scan->rs_cblock);
 
 		/* lineindex now references the next or previous visible tid */
 continue_page:
 
 		for (; linesleft > 0; linesleft--, lineindex += dir)
 		{
-			ItemId		lpp;
-			OffsetNumber lineoff;
-
-			Assert(lineindex < scan->rs_ntuples);
-			lineoff = scan->rs_vistuples[lineindex];
-			lpp = PageGetItemId(page, lineoff);
-			Assert(ItemIdIsNormal(lpp));
-
-			tuple->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
-			tuple->t_len = ItemIdGetLength(lpp);
-			ItemPointerSetOffsetNumber(&tuple->t_self, lineoff);
+			/*
+			 * Headers were pre-built by page_collect_tuples() into
+			 * rs_tupledata[].  Copy the entry; t_data still points into the
+			 * pinned page, which is safe for the lifetime of the current page
+			 * scan.
+			 */
+			*tuple = scan->rs_tupledata[lineindex];
 
 			/* skip any tuples that don't match the scan key */
 			if (key != NULL &&
