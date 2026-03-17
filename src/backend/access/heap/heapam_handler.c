@@ -2153,9 +2153,8 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 {
 	BitmapHeapScanDesc bscan = (BitmapHeapScanDesc) scan;
 	HeapScanDesc hscan = (HeapScanDesc) bscan;
-	OffsetNumber targoffset;
+	HeapScanVisItem vitem;
 	Page		page;
-	ItemId		lp;
 
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
@@ -2170,15 +2169,13 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 			return false;
 	}
 
-	targoffset = hscan->rs_vistuples[hscan->rs_cindex];
+	vitem = hscan->rs_vistuples[hscan->rs_cindex];
 	page = BufferGetPage(hscan->rs_cbuf);
-	lp = PageGetItemId(page, targoffset);
-	Assert(ItemIdIsNormal(lp));
 
-	hscan->rs_ctup.t_data = (HeapTupleHeader) PageGetItem(page, lp);
-	hscan->rs_ctup.t_len = ItemIdGetLength(lp);
+	hscan->rs_ctup.t_data = (HeapTupleHeader) ((char *) page + vitem.t_off);
+	hscan->rs_ctup.t_len = vitem.t_len;
 	hscan->rs_ctup.t_tableOid = scan->rs_rd->rd_id;
-	ItemPointerSet(&hscan->rs_ctup.t_self, hscan->rs_cblock, targoffset);
+	ItemPointerSet(&hscan->rs_ctup.t_self, hscan->rs_cblock, vitem.t_offnum);
 
 	pgstat_count_heap_fetch(scan->rs_rd);
 
@@ -2456,7 +2453,7 @@ SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 		while (start < end)
 		{
 			uint32		mid = start + (end - start) / 2;
-			OffsetNumber curoffset = hscan->rs_vistuples[mid];
+			OffsetNumber curoffset = hscan->rs_vistuples[mid].t_offnum;
 
 			if (tupoffset == curoffset)
 				return true;
@@ -2562,6 +2559,7 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 		 * offset.
 		 */
 		int			curslot;
+		Page		page = BufferGetPage(buffer);
 
 		/* We must have extracted the tuple offsets by now */
 		Assert(noffsets > -1);
@@ -2575,7 +2573,12 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 			ItemPointerSet(&tid, block, offnum);
 			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot,
 									   &heapTuple, NULL, true))
-				hscan->rs_vistuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
+			{
+				hscan->rs_vistuples[ntup].t_offnum = ItemPointerGetOffsetNumber(&tid);
+				hscan->rs_vistuples[ntup].t_off = (uint16) ((char *) heapTuple.t_data - (char *) page);
+				hscan->rs_vistuples[ntup].t_len = heapTuple.t_len;
+				ntup++;
+			}
 		}
 	}
 	else
@@ -2604,7 +2607,10 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 			valid = HeapTupleSatisfiesVisibility(&loctup, snapshot, buffer);
 			if (valid)
 			{
-				hscan->rs_vistuples[ntup++] = offnum;
+				hscan->rs_vistuples[ntup].t_offnum = offnum;
+				hscan->rs_vistuples[ntup].t_off = (uint16) ((char *) loctup.t_data - (char *) page);
+				hscan->rs_vistuples[ntup].t_len = ItemIdGetLength(lp);
+				ntup++;
 				PredicateLockTID(scan->rs_rd, &loctup.t_self, snapshot,
 								 HeapTupleHeaderGetXmin(loctup.t_data));
 			}

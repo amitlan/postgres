@@ -567,7 +567,10 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 			{
 				batchmvcc.visible[ntup] = true;
 			}
-			scan->rs_vistuples[ntup] = lineoff;
+			Assert(ItemIdIsNormal(lpp));
+			scan->rs_vistuples[ntup].t_offnum = lineoff;
+			scan->rs_vistuples[ntup].t_off = ItemIdGetOffset(lpp);
+			scan->rs_vistuples[ntup].t_len = ItemIdGetLength(lpp);
 		}
 
 		ntup++;
@@ -1120,17 +1123,14 @@ continue_page:
 
 		for (; linesleft > 0; linesleft--, lineindex += dir)
 		{
-			ItemId		lpp;
-			OffsetNumber lineoff;
+			HeapScanVisItem vitem;
 
 			Assert(lineindex < scan->rs_ntuples);
-			lineoff = scan->rs_vistuples[lineindex];
-			lpp = PageGetItemId(page, lineoff);
-			Assert(ItemIdIsNormal(lpp));
+			vitem = scan->rs_vistuples[lineindex];
 
-			tuple->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
-			tuple->t_len = ItemIdGetLength(lpp);
-			ItemPointerSetOffsetNumber(&tuple->t_self, lineoff);
+			tuple->t_data = (HeapTupleHeader) ((char *) page + vitem.t_off);
+			tuple->t_len  = vitem.t_len;
+			ItemPointerSetOffsetNumber(&tuple->t_self, vitem.t_offnum);
 
 			/* skip any tuples that don't match the scan key */
 			if (key != NULL &&

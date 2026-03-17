@@ -1689,8 +1689,9 @@ int
 HeapTupleSatisfiesMVCCBatch(Snapshot snapshot, Buffer buffer,
 							int ntups,
 							BatchMVCCState *batchmvcc,
-							OffsetNumber *vistuples_dense)
+							HeapScanVisItem *vistuples_dense)
 {
+	Page		page = BufferGetPage(buffer);
 	int			nvis = 0;
 	SetHintBitsState state = SHB_INITIAL;
 
@@ -1706,7 +1707,9 @@ HeapTupleSatisfiesMVCCBatch(Snapshot snapshot, Buffer buffer,
 
 		if (likely(valid))
 		{
-			vistuples_dense[nvis] = tup->t_self.ip_posid;
+			vistuples_dense[nvis].t_offnum = tup->t_self.ip_posid;
+			vistuples_dense[nvis].t_off = (uint16) ((char *) tup->t_data - (char *) page);
+			vistuples_dense[nvis].t_len = tup->t_len;
 			nvis++;
 		}
 	}

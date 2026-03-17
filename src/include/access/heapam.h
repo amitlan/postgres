@@ -51,6 +51,20 @@ struct VacuumCutoffs;
 #define MaxLockTupleMode	LockTupleExclusive
 
 /*
+ * HeapScanVisItem - element of rs_vistuples[] in pagemode scans.
+ *
+ * Stores the OffsetNumber for TID construction plus the byte offset and
+ * length from the ItemId, so consumers can address tuple data directly
+ * without going back to pd_linp[].
+ */
+typedef struct HeapScanVisItem
+{
+	OffsetNumber t_offnum;	/* 1-based offset number, for t_self */
+	uint16		t_off;		/* byte offset of tuple within page (lp_off) */
+	uint16		t_len;		/* tuple length in bytes (lp_len) */
+} HeapScanVisItem;
+
+/*
  * Descriptor for heap table scans.
  */
 typedef struct HeapScanDescData
@@ -103,7 +117,8 @@ typedef struct HeapScanDescData
 	/* these fields only used in page-at-a-time mode and for bitmap scans */
 	uint32		rs_cindex;		/* current tuple's index in vistuples */
 	uint32		rs_ntuples;		/* number of visible tuples on page */
-	OffsetNumber rs_vistuples[MaxHeapTuplesPerPage];	/* their offsets */
+	HeapScanVisItem	rs_vistuples[MaxHeapTuplesPerPage];	/* visible tuples on
+														 * current page */
 } HeapScanDescData;
 typedef struct HeapScanDescData *HeapScanDesc;
 
@@ -490,7 +505,7 @@ typedef struct BatchMVCCState
 extern int	HeapTupleSatisfiesMVCCBatch(Snapshot snapshot, Buffer buffer,
 										int ntups,
 										BatchMVCCState *batchmvcc,
-										OffsetNumber *vistuples_dense);
+										HeapScanVisItem *vistuples_dense);
 
 /*
  * To avoid leaking too much knowledge about reorderbuffer implementation
