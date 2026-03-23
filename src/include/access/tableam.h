@@ -275,6 +275,8 @@ typedef void (*IndexBuildCallback) (Relation index,
 									bool tupleIsAlive,
 									void *state);
 
+typedef struct RowBatch RowBatch;
+
 /*
  * API struct for a table AM.  Note this must be allocated in a
  * server-lifetime manner, typically as a static const struct, which then gets
@@ -350,6 +352,56 @@ typedef struct TableAmRoutine
 	bool		(*scan_getnextslot) (TableScanDesc scan,
 									 ScanDirection direction,
 									 TupleTableSlot *slot);
+
+	/* ------------------------------------------------------------------------
+	 * Batched scan support
+	 * ------------------------------------------------------------------------
+	 */
+
+	/*
+	 * Returns true if the AM can support batching for a scan with the
+	 * given snapshot.  Called at plan init time before the scan descriptor
+	 * exists.  AMs that have no snapshot-based restrictions can omit this
+	 * callback, in which case batching is considered feasible.
+	 */
+	bool		(*scan_batch_feasible)(Relation relation, Snapshot snapshot);
+
+	/*
+	 * Initialize AM-owned batch state for a scan.  Called once before
+	 * the first scan_getnextbatch call.  The AM allocates whatever
+	 * private state it needs and stores it in b->am_payload.  b->slot
+	 * is the scan node's ss_ScanTupleSlot, whose type was already
+	 * determined by the AM via table_slot_callbacks().  The AM's
+	 * repoint_slot callback re-points it to each tuple in the batch
+	 * in turn.  Future interfaces may allow the AM to expose batch
+	 * data in other forms without going through a slot.
+	 */
+	void		(*scan_begin_batch)(TableScanDesc sscan, RowBatch *b);
+
+	/*
+	 * Fetch the next batch of tuples from the scan into b.  Sets b->nrows
+	 * to the number of tuples available and resets b->pos to 0.  Returns
+	 * true if any tuples were fetched, false at end of scan.  The caller
+	 * advances through the batch via RowBatchGetNextSlot(), which calls
+	 * ops->repoint_slot for each position up to b->nrows.
+	 */
+	bool		(*scan_getnextbatch)(TableScanDesc sscan, RowBatch *b,
+									 ScanDirection dir);
+
+	/*
+	 * Release all AM-owned batch resources, including any buffer pins
+	 * held in am_payload.  Called when the scan node is shut down.
+	 * After this call b->am_payload must not be used.
+	 */
+	void		(*scan_end_batch)(TableScanDesc sscan, RowBatch *b);
+
+	/*
+	 * Reset batch state for rescan.  Release any held resources (e.g.
+	 * buffer pins) and reset counts, but keep the allocation so the
+	 * next getnextbatch call can reuse it without re-entering
+	 * begin_batch.
+	 */
+	void		(*scan_reset_batch)(TableScanDesc sscan, RowBatch *b);
 
 	/*-----------
 	 * Optional functions to provide scanning for ranges of ItemPointers.
@@ -1045,6 +1097,90 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		   direction == BackwardScanDirection);
 
 	return sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+}
+
+/*
+ * table_supports_batching
+ *		Does the relation's AM support batching?
+ */
+static inline bool
+table_supports_batching(Relation relation, Snapshot snapshot)
+{
+	const TableAmRoutine *tam = relation->rd_tableam;
+
+	if (tam->scan_getnextbatch == NULL)
+		return false;
+
+	Assert(tam->scan_begin_batch != NULL);
+	Assert(tam->scan_reset_batch != NULL);
+	Assert(tam->scan_end_batch != NULL);
+
+	/*
+	 * Optional: AM may restrict batching based on snapshot or other conditions.
+	 */
+	if (tam->scan_batch_feasible != NULL &&
+		!tam->scan_batch_feasible(relation, snapshot))
+		return false;
+
+	return true;
+}
+
+/*
+ * table_scan_begin_batch
+ *		Allocate AM-owned batch payload in the RowBatch
+ */
+static inline void
+table_scan_begin_batch(TableScanDesc sscan, RowBatch *b)
+{
+	const TableAmRoutine *tam = sscan->rs_rd->rd_tableam;
+
+	Assert(tam->scan_begin_batch != NULL);
+
+	return tam->scan_begin_batch(sscan, b);
+}
+
+/*
+ * table_scan_getnextbatch
+ *		Fetch the next batch of tuples from the AM.  Returns true if tuples
+ *		were fetched, false at end of scan.  Only forward scans are supported.
+ */
+static inline bool
+table_scan_getnextbatch(TableScanDesc sscan, RowBatch *b, ScanDirection dir)
+{
+	const TableAmRoutine *tam = sscan->rs_rd->rd_tableam;
+
+	Assert(ScanDirectionIsForward(dir));
+	Assert(tam->scan_getnextbatch != NULL);
+
+	return tam->scan_getnextbatch(sscan, b, dir);
+}
+
+/*
+ * table_scan_end_batch
+ *		Release AM-owned resources for the batch payload.
+ */
+static inline void
+table_scan_end_batch(TableScanDesc sscan, RowBatch *b)
+{
+	const TableAmRoutine *tam = sscan->rs_rd->rd_tableam;
+
+	Assert(tam->scan_end_batch != NULL);
+
+	tam->scan_end_batch(sscan, b);
+}
+
+/*
+ * table_scan_reset_batch
+ *		Reset AM-owned batch state for rescan without freeing.
+ */
+static inline void
+table_scan_reset_batch(TableScanDesc sscan, RowBatch *b)
+{
+	const TableAmRoutine *tam = sscan->rs_rd->rd_tableam;
+
+	Assert(tam->scan_reset_batch != NULL);
+
+	tam->scan_reset_batch(sscan, b);
 }
 
 /* ----------------------------------------------------------------------------
