@@ -43,6 +43,7 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_database_d.h"
 #include "commands/vacuum.h"
+#include "executor/execRowBatch.h"
 #include "pgstat.h"
 #include "port/pg_bitutils.h"
 #include "storage/lmgr.h"
@@ -109,6 +110,7 @@ static int	bottomup_sort_and_shrink(TM_IndexDeleteOp *delstate);
 static XLogRecPtr log_heap_new_cid(Relation relation, HeapTuple tup);
 static HeapTuple ExtractReplicaIdentity(Relation relation, HeapTuple tp, bool key_required,
 										bool *copy);
+static void heap_repoint_slot(RowBatch *b, int idx);
 
 
 /*
@@ -1214,7 +1216,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_cbuf = InvalidBuffer;
 
 	/*
-	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
+	 * Disable page-at-a-time mode if the snapshot does not allow it.
 	 */
 	if (!(snapshot && IsMVCCSnapshot(snapshot)))
 		scan->rs_base.rs_flags &= ~SO_ALLOW_PAGEMODE;
@@ -1464,7 +1466,7 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 	 * the proper return buffer and return the tuple.
 	 */
 
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	return &scan->rs_ctup;
 }
@@ -1492,12 +1494,231 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	 * the proper return buffer and return the tuple.
 	 */
 
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot,
 							 scan->rs_cbuf);
 	return true;
 }
+
+/*---------- Batching support -----------*/
+
+static const RowBatchOps RowBatchHeapOps =
+{
+	.repoint_slot = heap_repoint_slot
+};
+
+/*
+ * heap_batch_feasible
+ *		Batching requires a MVCC snapshot since it relies on
+ *		page-at-a-time mode, which heap_beginscan() disables for
+ *		non-MVCC snapshots.
+ */
+bool
+heap_batch_feasible(Relation relation, Snapshot snapshot)
+{
+	return snapshot && IsMVCCSnapshot(snapshot);
+}
+
+/*
+ * heap_begin_batch
+ *		Initialize AM-side batch state for a heap scan.
+ *
+ * Allocates a HeapPageBatch, which acts as a thin slice descriptor over
+ * the scan's rs_vistuples[] array.  Unlike the previous version there is
+ * no separate tuple header storage in HeapPageBatch itself; rs_vistuples[]
+ * in HeapScanDescData (populated by page_collect_tuples() via
+ * heap_prepare_pagescan()) serves as the page-level buffer.  HeapPageBatch
+ * holds a pointer into that array for the current slice and the buffer pin
+ * for the current page.
+ *
+ * b->slot must be a TTSOpsBufferHeapTuple slot.
+ */
+void
+heap_begin_batch(TableScanDesc sscan, RowBatch *b)
+{
+	HeapPageBatch  *hb;
+
+	/* Batch path relies on executor-level qual eval, not AM scan keys */
+	Assert(sscan->rs_nkeys == 0);
+	Assert(TTS_IS_BUFFERTUPLE(b->slot));
+
+	hb = palloc(sizeof(HeapPageBatch));
+	hb->tuples = NULL;
+	hb->ntuples = 0;
+	hb->nextitem = 0;
+	hb->buf = InvalidBuffer;
+
+	b->am_payload = hb;
+	b->ops = &RowBatchHeapOps;
+}
+
+/*
+ * heap_reset_batch
+ *		Release pin and reset for rescan, keeping allocations.
+ */
+void
+heap_reset_batch(TableScanDesc sscan, RowBatch *b)
+{
+	HeapPageBatch  *hb = (HeapPageBatch *) b->am_payload;
+
+	Assert(hb != NULL);
+	if (BufferIsValid(hb->buf))
+	{
+		ReleaseBuffer(hb->buf);
+		hb->buf = InvalidBuffer;
+	}
+	hb->ntuples = 0;
+	hb->nextitem = 0;
+}
+
+/*
+ * heap_end_batch
+ *		Release all batch resources.
+ */
+void
+heap_end_batch(TableScanDesc sscan, RowBatch *b)
+{
+	HeapPageBatch  *hb = (HeapPageBatch *) b->am_payload;
+
+	if (BufferIsValid(hb->buf))
+		ReleaseBuffer(hb->buf);
+
+	pfree(hb);
+	b->am_payload = NULL;
+}
+
+/*
+ * heap_getnextbatch
+ *		Fetch the next slice of visible tuples from a heap scan.
+ *
+ * Serves slices from the current page's rs_vistuples[] array.  If the
+ * current page has remaining tuples, sets hb->tuples to point at the next
+ * slice without re-entering the page scan.  If the page is exhausted,
+ * advances to the next page via heap_fetch_next_buffer(), prepares it
+ * with heap_prepare_pagescan(), and serves the first slice from it.
+ *
+ * hb->tuples points directly into scan->rs_vistuples[]; the entries remain
+ * valid as long as hb->buf (the page's buffer pin) is held.  The pin is
+ * released at the top of the next call once the page is fully consumed.
+ *
+ * Each call returns at most b->max_rows tuples.
+ *
+ * Returns true if tuples were fetched, false at end of scan.
+ */
+bool
+heap_getnextbatch(TableScanDesc sscan, RowBatch *b, ScanDirection dir)
+{
+	HeapScanDesc	scan = (HeapScanDesc) sscan;
+	HeapPageBatch  *hb = (HeapPageBatch *) b->am_payload;
+	int				remaining;
+	int				nserve;
+
+	Assert(ScanDirectionIsForward(dir));
+	Assert(sscan->rs_flags & SO_ALLOW_PAGEMODE);
+
+	/*
+	 * Try to serve from the current page first.  No page advance, no buffer
+	 * management, no re-entry into heap code.
+	 */
+	remaining = scan->rs_ntuples - hb->nextitem;
+	if (remaining > 0)
+	{
+		nserve = Min(remaining, b->max_rows);
+
+		hb->tuples = &scan->rs_vistuples[hb->nextitem];
+		hb->ntuples = nserve;
+		hb->nextitem += nserve;
+
+		b->nrows = nserve;
+		b->pos = 0;
+
+		pgstat_count_heap_getnext(sscan->rs_rd, nserve);
+		return true;
+	}
+
+	/*
+	 * Current page exhausted.  Advance to the next page with visible tuples.
+	 */
+	for (;;)
+	{
+		/*
+		 * Release the previous page's pin.  The page is fully consumed at
+		 * this point -- all slices have been served.
+		 */
+		if (BufferIsValid(hb->buf))
+		{
+			ReleaseBuffer(hb->buf);
+			hb->buf = InvalidBuffer;
+		}
+
+		heap_fetch_next_buffer(scan, dir);
+
+		if (!BufferIsValid(scan->rs_cbuf))
+		{
+			/* End of scan */
+			scan->rs_cblock = InvalidBlockNumber;
+			scan->rs_prefetch_block = InvalidBlockNumber;
+			scan->rs_inited = false;
+			b->nrows = 0;
+			return false;
+		}
+
+		Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
+
+		/*
+		 * Prepare the page: prune, run visibility checks, and populate
+		 * scan->rs_vistuples[0..rs_ntuples-1] via page_collect_tuples().
+		 */
+		heap_prepare_pagescan(sscan);
+
+		if (scan->rs_ntuples > 0)
+		{
+			/*
+			 * Pin the page so tuple data stays valid while the executor
+			 * processes slices.  Released at the top of the next call
+			 * once the page is fully consumed.
+			 */
+			IncrBufferRefCount(scan->rs_cbuf);
+			hb->buf = scan->rs_cbuf;
+
+			nserve = Min(scan->rs_ntuples, b->max_rows);
+
+			hb->tuples = &scan->rs_vistuples[0];
+			hb->ntuples = nserve;
+			hb->nextitem = nserve;
+
+			b->nrows = nserve;
+			b->pos = 0;
+
+			pgstat_count_heap_getnext(sscan->rs_rd, nserve);
+			return true;
+		}
+
+		/* Empty page (all dead/invisible tuples), try next */
+	}
+}
+
+/*
+ * heap_repoint_slot
+ *		Re-point the batch's single slot to the tuple at index idx.
+ *
+ * Called by RowBatchGetNextSlot() for each tuple served to the parent
+ * node.  hb->tuples[idx] was populated by page_collect_tuples() via
+ * heap_prepare_pagescan() and remains valid as long as hb->buf is pinned.
+ */
+static void
+heap_repoint_slot(RowBatch *b, int idx)
+{
+	HeapPageBatch		*hb = (HeapPageBatch *) b->am_payload;
+
+	Assert(idx >= 0 && idx < hb->ntuples);
+	Assert(TTS_IS_BUFFERTUPLE(b->slot));
+
+	ExecStoreBufferHeapTuple(&hb->tuples[idx], b->slot, hb->buf);
+}
+
+/*----- End of batching support -----*/
 
 void
 heap_set_tidrange(TableScanDesc sscan, ItemPointer mintid,
@@ -1640,7 +1861,7 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 	 * if we get here it means we have a new current scan tuple, so point to
 	 * the proper return buffer and return the tuple.
 	 */
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot, scan->rs_cbuf);
 	return true;

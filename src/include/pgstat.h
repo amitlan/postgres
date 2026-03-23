@@ -719,10 +719,10 @@ extern void pgstat_report_analyze(Relation rel,
 		if (pgstat_should_count_relation(rel))						\
 			(rel)->pgstat_info->counts.numscans++;					\
 	} while (0)
-#define pgstat_count_heap_getnext(rel)								\
+#define pgstat_count_heap_getnext(rel, n)							\
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
-			(rel)->pgstat_info->counts.tuples_returned++;			\
+			(rel)->pgstat_info->counts.tuples_returned += (n);		\
 	} while (0)
 #define pgstat_count_heap_fetch(rel)								\
 	do {															\
