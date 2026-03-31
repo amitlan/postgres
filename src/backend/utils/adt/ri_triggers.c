@@ -2486,8 +2486,11 @@ InvalidateConstraintCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 			riinfo->rootHashValue == hashvalue)
 		{
 			riinfo->valid = false;
-			//if (riinfo->fpmeta)
-			//	pfree(riinfo->fpmeta);
+			if (riinfo->fpmeta)
+			{
+				pfree(riinfo->fpmeta);
+				riinfo->fpmeta = NULL;
+			}
 			/* Remove invalidated entries from the list, too */
 			dclist_delete_from(&ri_constraint_cache_valid_list, iter.cur);
 		}
