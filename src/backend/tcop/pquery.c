@@ -59,7 +59,7 @@ static uint64 DoPortalRunFetch(Portal portal,
 							   long count,
 							   DestReceiver *dest);
 static void DoPortalRewind(Portal portal);
-
+static bool PortalLockCachedPlan(Portal portal);
 
 /*
  * CreateQueryDesc
@@ -462,6 +462,8 @@ PortalStart(Portal portal, ParamListInfo params,
 		 */
 		portal->strategy = ChoosePortalStrategy(portal->stmts);
 
+restart:
+
 		/*
 		 * Fire her up according to the strategy
 		 */
@@ -487,6 +489,11 @@ PortalStart(Portal portal, ParamListInfo params,
 				/*
 				 * Create QueryDesc in portal's context; for the moment, set
 				 * the destination to DestNone.
+				 *
+				 * If the portal is backed by a cached plan, acquire execution
+				 * locks via PortalLockCachedPlan().  If the plan is
+				 * invalidated during locking, it replans and may change the
+				 * portal strategy, requiring us to restart PortalStart().
 				 */
 				queryDesc = CreateQueryDesc(linitial_node(PlannedStmt, portal->stmts),
 											portal->sourceText,
@@ -496,6 +503,14 @@ PortalStart(Portal portal, ParamListInfo params,
 											params,
 											portal->queryEnv,
 											0);
+				if (portal->cplan)
+				{
+					if (PortalLockCachedPlan(portal))
+					{
+						PopActiveSnapshot();
+						goto restart;
+					}
+				}
 
 				/*
 				 * If it's a scrollable cursor, executor needs to support
@@ -534,6 +549,11 @@ PortalStart(Portal portal, ParamListInfo params,
 
 			case PORTAL_ONE_RETURNING:
 			case PORTAL_ONE_MOD_WITH:
+				if (portal->cplan)
+				{
+					if (PortalLockCachedPlan(portal))
+						goto restart;
+				}
 
 				/*
 				 * We don't start the executor until we are told to run the
@@ -577,7 +597,20 @@ PortalStart(Portal portal, ParamListInfo params,
 				break;
 
 			case PORTAL_MULTI_QUERY:
-				/* Need do nothing now */
+
+				/*
+				 * GetCachedPlan() no longer acquires execution locks, so we
+				 * must do it here.  Multi-statement plans always use
+				 * conservative locking (all partitions locked); pruning-aware
+				 * locking is not feasible because PortalRunMulti() executes
+				 * statements sequentially with CCI between them.
+				 */
+				if (portal->cplan)
+				{
+					if (PortalLockCachedPlan(portal))
+						goto restart;
+				}
+
 				portal->tupDesc = NULL;
 				break;
 		}
@@ -1784,4 +1817,36 @@ EnsurePortalSnapshotExists(void)
 	PushActiveSnapshotWithLevel(GetTransactionSnapshot(), portal->createLevel);
 	/* PushActiveSnapshotWithLevel might have copied the snapshot */
 	portal->portalSnapshot = GetActiveSnapshot();
+}
+
+/*
+ * PortalLockCachedPlan
+ *		Acquire execution locks for a cached-plan-backed portal,
+ *		retrying with a fresh plan if the current one is invalidated.
+ *
+ * Returns true if replanning changed portal->strategy, meaning the
+ * caller must redispatch.  Returns false once locks are held.
+ */
+static bool
+PortalLockCachedPlan(Portal portal)
+{
+	PortalStrategy start_strategy = portal->strategy;
+
+	if (AcquireExecutorLocks(portal->cplan))
+		return false;
+
+	/* Replan.  Locks will be taken freshly. */
+	ReleaseCachedPlan(portal->cplan, portal->resowner);
+	portal->cplan = NULL;
+	portal->stmts = NIL;
+	portal->cplan = GetCachedPlan(portal->plansource,
+								  portal->portalParams,
+								  portal->resowner,
+								  portal->queryEnv);
+	portal->stmts = portal->cplan->stmt_list;
+	portal->strategy = ChoosePortalStrategy(portal->stmts);
+	if (portal->strategy != start_strategy)
+		return true;
+
+	return false;
 }
