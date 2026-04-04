@@ -59,7 +59,9 @@ static uint64 DoPortalRunFetch(Portal portal,
 							   long count,
 							   DestReceiver *dest);
 static void DoPortalRewind(Portal portal);
-static bool PortalLockCachedPlan(Portal portal);
+static bool PortalLockCachedPlan(Portal portal, bool do_prep,
+								 ParamListInfo params,
+								 QueryDesc **queryDesc_p);
 
 /*
  * CreateQueryDesc
@@ -491,9 +493,14 @@ restart:
 				 * the destination to DestNone.
 				 *
 				 * If the portal is backed by a cached plan, acquire execution
-				 * locks via PortalLockCachedPlan().  If the plan is
-				 * invalidated during locking, it replans and may change the
-				 * portal strategy, requiring us to restart PortalStart().
+				 * locks via PortalLockCachedPlan().  For eligible plans
+				 * (single-statement reused generic), this performs
+				 * pruning-aware locking: it runs ExecutorPrep() on the
+				 * QueryDesc to determine which partitions survive initial
+				 * pruning, then locks only those.  If the plan is invalidated
+				 * during this process, it replans and rebuilds the QueryDesc.
+				 * If replanning changes the portal strategy, we must restart
+				 * PortalStart() to redispatch.
 				 */
 				queryDesc = CreateQueryDesc(linitial_node(PlannedStmt, portal->stmts),
 											portal->sourceText,
@@ -505,7 +512,7 @@ restart:
 											0);
 				if (portal->cplan)
 				{
-					if (PortalLockCachedPlan(portal))
+					if (PortalLockCachedPlan(portal, true, params, &queryDesc))
 					{
 						PopActiveSnapshot();
 						goto restart;
@@ -551,7 +558,7 @@ restart:
 			case PORTAL_ONE_MOD_WITH:
 				if (portal->cplan)
 				{
-					if (PortalLockCachedPlan(portal))
+					if (PortalLockCachedPlan(portal, false, NULL, NULL))
 						goto restart;
 				}
 
@@ -607,7 +614,7 @@ restart:
 				 */
 				if (portal->cplan)
 				{
-					if (PortalLockCachedPlan(portal))
+					if (PortalLockCachedPlan(portal, false, NULL, NULL))
 						goto restart;
 				}
 
@@ -1824,15 +1831,32 @@ EnsurePortalSnapshotExists(void)
  *		Acquire execution locks for a cached-plan-backed portal,
  *		retrying with a fresh plan if the current one is invalidated.
  *
+ * If do_prep is true and the plan is eligible (single-statement reused
+ * generic plan), performs pruning-aware locking via ExecutorPrep() and
+ * populates portal->queryDesc with the prepped QueryDesc.  Otherwise
+ * falls back to locking all relations in the plan.
+ *
  * Returns true if replanning changed portal->strategy, meaning the
- * caller must redispatch.  Returns false once locks are held.
+ * caller must redispatch.  Returns false once locks are held and the
+ * plan is valid for execution.
  */
 static bool
-PortalLockCachedPlan(Portal portal)
+PortalLockCachedPlan(Portal portal, bool do_prep,
+					 ParamListInfo params,
+					 QueryDesc **prep_qd)
 {
 	PortalStrategy start_strategy = portal->strategy;
 
-	if (AcquireExecutorLocks(portal->cplan))
+	if (do_prep && CachedPlanCanPrep(portal->cplan, portal->plansource))
+	{
+		Assert(prep_qd);
+		if (ExecutorPrepAndLock(*prep_qd, portal->resowner, 0,
+								&portal->cplan->is_valid))
+			return false;
+		ExecutorPrepCleanup(*prep_qd);
+		FreeQueryDesc(*prep_qd);
+	}
+	else if (AcquireExecutorLocks(portal->cplan))
 		return false;
 
 	/* Replan.  Locks will be taken freshly. */
@@ -1847,6 +1871,16 @@ PortalLockCachedPlan(Portal portal)
 	portal->strategy = ChoosePortalStrategy(portal->stmts);
 	if (portal->strategy != start_strategy)
 		return true;
+
+	if (prep_qd)
+	{
+		Assert(list_length(portal->stmts) == 1);
+		*prep_qd = CreateQueryDesc(linitial_node(PlannedStmt, portal->stmts),
+								   portal->sourceText,
+								   GetActiveSnapshot(), InvalidSnapshot,
+								   None_Receiver, params,
+								   portal->queryEnv, 0);
+	}
 
 	return false;
 }

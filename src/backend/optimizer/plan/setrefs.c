@@ -384,6 +384,24 @@ set_plan_references(PlannerInfo *root, Plan *plan)
 		}
 	}
 
+	/*
+	 * Record the first result relation if it belongs to the set of initially
+	 * prunable relations.  We use bms_next_member() to get the
+	 * lowest-numbered leaf result rel, which matches
+	 * linitial_int(ModifyTable.resultRelations) because partition expansion
+	 * preserves RT index order.  ExecInitModifyTable() asserts that the
+	 * recorded index matches what it actually needs.
+	 */
+	if (root->leaf_result_relids)
+	{
+		Index		firstResultRel = bms_next_member(root->leaf_result_relids, -1);
+
+		firstResultRel += rtoffset;
+		if (bms_is_member(firstResultRel, root->glob->prunableRelids))
+			root->glob->firstResultRels =
+				lappend_int(root->glob->firstResultRels, firstResultRel);
+	}
+
 	return result;
 }
 
