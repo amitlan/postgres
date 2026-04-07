@@ -68,6 +68,7 @@
 #include "utils/builtins.h"
 #include "utils/expandeddatum.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/typcache.h"
 
 static TupleDesc ExecTypeFromTLInternal(List *targetList,
@@ -1676,6 +1677,35 @@ ExecStoreBufferHeapTuple(HeapTuple tuple,
 }
 
 /*
+ * ExecStoreBufferHeapTupleForScan
+ *
+ * Like ExecStoreBufferHeapTuple, but for use only from table AM
+ * scan_getnextslot() implementations where the slot's tts_tableOid
+ * is guaranteed to have been set once at scan init time.
+ */
+TupleTableSlot *
+ExecStoreBufferHeapTupleForScan(HeapTuple tuple,
+								TupleTableSlot *slot,
+								Buffer buffer)
+{
+	/*
+	 * sanity checks
+	 */
+	Assert(tuple != NULL);
+	Assert(slot != NULL);
+	Assert(slot->tts_tupleDescriptor != NULL);
+	Assert(slot->tts_tableOid == tuple->t_tableOid);
+	Assert(BufferIsValid(buffer));
+
+	if (unlikely(!TTS_IS_BUFFERTUPLE(slot)))
+		elog(ERROR, "trying to store an on-disk heap tuple into wrong type of slot");
+
+	tts_buffer_heap_store_tuple(slot, tuple, buffer, false);
+
+	return slot;
+}
+
+/*
  * Like ExecStoreBufferHeapTuple, but transfer an existing pin from the caller
  * to the slot, i.e. the caller doesn't need to, and may not, release the pin.
  */
@@ -2083,6 +2113,15 @@ ExecInitScanTupleSlot(EState *estate, ScanState *scanstate,
 	scanstate->ps.scanopsfixed = tupledesc != NULL;
 	scanstate->ps.scanops = tts_ops;
 	scanstate->ps.scanopsset = true;
+
+	/*
+	 * If this scan state is for a real relation, stamp the OID onto the
+	 * slot now.  The relation does not change for the lifetime of the scan,
+	 * so there is no need to repeat this in the per-tuple path.
+	 */
+	if (scanstate->ss_currentRelation)
+		scanstate->ss_ScanTupleSlot->tts_tableOid =
+			RelationGetRelid(scanstate->ss_currentRelation);
 }
 
 /* ----------------
