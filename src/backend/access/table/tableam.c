@@ -96,6 +96,7 @@ table_slot_create(Relation relation, List **reglist)
 
 	tts_cb = table_slot_callbacks(relation);
 	slot = MakeSingleTupleTableSlot(RelationGetDescr(relation), tts_cb);
+	slot->tts_tableOid = RelationGetRelid(relation);
 
 	if (reglist)
 		*reglist = lappend(*reglist, slot);

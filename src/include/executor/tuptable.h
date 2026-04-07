@@ -346,6 +346,9 @@ extern void ExecForceStoreHeapTuple(HeapTuple tuple,
 extern TupleTableSlot *ExecStoreBufferHeapTuple(HeapTuple tuple,
 												TupleTableSlot *slot,
 												Buffer buffer);
+extern TupleTableSlot *ExecStoreBufferHeapTupleForScan(HeapTuple tuple,
+													   TupleTableSlot *slot,
+													   Buffer buffer);
 extern TupleTableSlot *ExecStorePinnedBufferHeapTuple(HeapTuple tuple,
 													  TupleTableSlot *slot,
 													  Buffer buffer);
