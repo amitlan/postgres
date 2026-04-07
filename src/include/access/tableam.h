@@ -1098,7 +1098,12 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 	Assert(direction == ForwardScanDirection ||
 		   direction == BackwardScanDirection);
 
-	return sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+	if (sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot))
+	{
+		pg_assume(!TupIsNull(slot));
+		return true;
+	}
+	return false;
 }
 
 /* ----------------------------------------------------------------------------
