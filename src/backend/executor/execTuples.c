@@ -1683,7 +1683,7 @@ ExecStoreBufferHeapTuple(HeapTuple tuple,
  * scan_getnextslot() implementations where the slot's tts_tableOid
  * is guaranteed to have been set once at scan init time.
  */
-TupleTableSlot *
+bool
 ExecStoreBufferHeapTupleForScan(HeapTuple tuple,
 								TupleTableSlot *slot,
 								Buffer buffer)
@@ -1702,7 +1702,7 @@ ExecStoreBufferHeapTupleForScan(HeapTuple tuple,
 
 	tts_buffer_heap_store_tuple(slot, tuple, buffer, false);
 
-	return slot;
+	return true;
 }
 
 /*
