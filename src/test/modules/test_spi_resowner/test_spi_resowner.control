@@ -1,0 +1,4 @@
+comment = 'Test SQL-callable C function that uses SPI using dedicated ResourceOwner'
+default_version = '1.0'
+module_pathname = '$libdir/test_spi_resowner'
+relocatable = true

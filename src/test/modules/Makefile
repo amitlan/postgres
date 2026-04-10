@@ -52,6 +52,7 @@ SUBDIRS = \
 		  test_shmem \
 		  test_shm_mq \
 		  test_slru \
+		  test_spi_resowner \
 		  test_tidstore \
 		  unsafe_tests \
 		  worker_spi \
