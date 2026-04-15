@@ -240,7 +240,13 @@ extern List *CachedPlanGetTargetList(CachedPlanSource *plansource,
 extern CachedPlan *GetCachedPlan(CachedPlanSource *plansource,
 								 ParamListInfo boundParams,
 								 ResourceOwner owner,
-								 QueryEnvironment *queryEnv);
+								 QueryEnvironment *queryEnv,
+								 bool *is_reused);
+extern bool RecheckCachedPlan(CachedPlan *cplan, CachedPlanSource *plansource);
+extern CachedPlan *GetCachedPlanLocked(CachedPlanSource *plansource,
+									   ParamListInfo boundParams,
+									   ResourceOwner owner,
+									   QueryEnvironment *queryEnv);
 extern void ReleaseCachedPlan(CachedPlan *plan, ResourceOwner owner);
 
 extern bool CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,

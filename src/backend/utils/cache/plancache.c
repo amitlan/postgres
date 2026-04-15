@@ -101,6 +101,7 @@ static bool choose_custom_plan(CachedPlanSource *plansource,
 static double cached_plan_cost(CachedPlan *plan, bool include_planner);
 static Query *QueryListGetPrimaryStmt(List *stmts);
 static void AcquireExecutorLocks(List *stmt_list, bool acquire);
+static bool LockCachedPlan(CachedPlan *cplan, CachedPlanSource *plansource);
 static void AcquirePlannerLocks(List *stmt_list, bool acquire);
 static void ScanQueryForLocks(Query *parsetree, bool acquire);
 static bool ScanQueryWalker(Node *node, bool *acquire);
@@ -945,8 +946,9 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
  * Caller must have already called RevalidateCachedQuery to verify that the
  * querytree is up to date.
  *
- * On a "true" return, we have acquired the locks needed to run the plan.
- * (We must do this for the "true" result to be race-condition-free.)
+ * On a "true" return, the generic plan remains usable as a cached plan.
+ * Any execution-time setup, including lock acquisition, is the caller's
+ * responsibility.
  */
 static bool
 CheckCachedPlan(CachedPlanSource *plansource)
@@ -960,6 +962,25 @@ CheckCachedPlan(CachedPlanSource *plansource)
 	if (!plan)
 		return false;
 
+	/* Recheck whether the existing generic plan is still reusable. */
+	return RecheckCachedPlan(plan, plansource);
+}
+
+/*
+ * RecheckCachedPlan: recheck whether a reused generic plan is still reusable.
+ *
+ * This is for callers that obtained a reused generic plan from
+ * GetCachedPlan(..., &is_reused), observed *is_reused == true, and have
+ * since completed whatever additional setup and execution locking they
+ * require before execution.
+ *
+ * It does not acquire or release execution locks.  On failure, it releases
+ * the generic plan from the plansource.
+ */
+bool
+RecheckCachedPlan(CachedPlan *plan, CachedPlanSource *plansource)
+{
+	Assert(plan == plansource->gplan);
 	Assert(plan->magic == CACHEDPLAN_MAGIC);
 	/* Generic plans are never one-shot */
 	Assert(!plan->is_oneshot);
@@ -972,8 +993,8 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		plan->is_valid = false;
 
 	/*
-	 * If it appears valid, acquire locks and recheck; this is much the same
-	 * logic as in RevalidateCachedQuery, but for a plan.
+	 * If it still appears valid, perform the remaining validity checks. This
+	 * is much the same logic as in RevalidateCachedQuery(), but for a plan.
 	 */
 	if (plan->is_valid)
 	{
@@ -982,8 +1003,6 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		 * plansource; so no need to fear it disappears under us here.
 		 */
 		Assert(plan->refcount > 0);
-
-		AcquireExecutorLocks(plan->stmt_list, true);
 
 		/*
 		 * If plan was transient, check to see if TransactionXmin has
@@ -1000,12 +1019,9 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		 */
 		if (plan->is_valid)
 		{
-			/* Successfully revalidated and locked the query. */
+			/* Successfully revalidated the query. */
 			return true;
 		}
-
-		/* Oops, the race case happened.  Release useless locks. */
-		AcquireExecutorLocks(plan->stmt_list, false);
 	}
 
 	/*
@@ -1282,8 +1298,13 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
  * plan or a custom plan for the given parameters: the caller does not know
  * which it will get.
  *
- * On return, the plan is valid and we have sufficient locks to begin
- * execution.
+ * On return, the plan is the current cached plan, but execution locks are
+ * not held.  The caller is responsible for acquiring them before execution.
+ * Callers that need a plan ready for execution should use
+ * GetCachedPlanLocked(), which handles locking and retry on invalidation.
+ *
+ * If is_reused is not NULL, *is_reused is set true when the returned plan is
+ * a reused generic plan, and false otherwise.
  *
  * On return, the refcount of the plan has been incremented; a later
  * ReleaseCachedPlan() call is expected.  If "owner" is not NULL then
@@ -1295,7 +1316,8 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
  */
 CachedPlan *
 GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
-			  ResourceOwner owner, QueryEnvironment *queryEnv)
+			  ResourceOwner owner, QueryEnvironment *queryEnv,
+			  bool *is_reused)
 {
 	CachedPlan *plan = NULL;
 	List	   *qlist;
@@ -1308,6 +1330,9 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 	/* This seems worth a real test, though */
 	if (owner && !plansource->is_saved)
 		elog(ERROR, "cannot apply ResourceOwner to non-saved cached plan");
+
+	if (is_reused)
+		*is_reused = false;
 
 	/* Make sure the querytree list is valid and we have parse-time locks */
 	qlist = RevalidateCachedQuery(plansource, queryEnv);
@@ -1322,6 +1347,8 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 			/* We want a generic plan, and we already have a valid one */
 			plan = plansource->gplan;
 			Assert(plan->magic == CACHEDPLAN_MAGIC);
+			if (is_reused)
+				*is_reused = true;
 		}
 		else
 		{
@@ -1414,6 +1441,48 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 }
 
 /*
+ * GetCachedPlanLocked: fetch a cached plan ready for execution.
+ *
+ * This is a convenience wrapper around GetCachedPlan() that also acquires
+ * execution locks.
+ *
+ * If GetCachedPlan() returns a reused generic plan, this acquires execution
+ * locks and rechecks plan validity.  If the plan is invalidated while locks
+ * are being acquired, it releases that plan and calls GetCachedPlan() again,
+ * which will build a fresh plan with the needed locks already held by the
+ * planner.
+ *
+ * Freshly built plans are returned directly, avoiding redundant lock
+ * acquisition in that case.
+ *
+ * This is the normal entry point for callers that need a plan ready to
+ * execute.  Callers that need custom locking behavior should call
+ * GetCachedPlan() directly and implement their own locking.
+ */
+CachedPlan *
+GetCachedPlanLocked(CachedPlanSource *plansource, ParamListInfo boundParams,
+					ResourceOwner owner, QueryEnvironment *queryEnv)
+{
+	CachedPlan *cplan;
+	bool		is_reused;
+
+	cplan = GetCachedPlan(plansource, boundParams, owner, queryEnv, &is_reused);
+	if (is_reused && !LockCachedPlan(cplan, plansource))
+	{
+		ReleaseCachedPlan(cplan, owner);
+		cplan = GetCachedPlan(plansource, boundParams, owner, queryEnv, &is_reused);
+
+		/*
+		 * A second GetCachedPlan() call rebuilds the plan rather than reusing
+		 * it.
+		 */
+		Assert(!is_reused);
+	}
+
+	return cplan;
+}
+
+/*
  * ReleaseCachedPlan: release active use of a cached plan.
  *
  * This decrements the reference count, and frees the plan if the count
@@ -1451,10 +1520,10 @@ ReleaseCachedPlan(CachedPlan *plan, ResourceOwner owner)
  *
  * This function, together with CachedPlanIsSimplyValid, provides a fast path
  * for revalidating "simple" generic plans.  The core requirement to be simple
- * is that the plan must not require taking any locks, which translates to
- * not touching any tables; this happens to match up well with an important
- * use-case in PL/pgSQL.  This function tests whether that's true, along
- * with checking some other corner cases that we'd rather not bother with
+ * is that the plan must not require taking any execution locks, which
+ * translates to not touching any tables; this happens to match up well with an
+ * important use-case in PL/pgSQL.  This function tests whether that's true,
+ * along with checking some other corner cases that we'd rather not bother with
  * handling in the fast path.  (Note that it's still possible for such a plan
  * to be invalidated, for example due to a change in a function that was
  * inlined into the plan.)
@@ -1524,7 +1593,7 @@ CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,
 	}
 
 	/*
-	 * Reject if AcquireExecutorLocks would have anything to do.  This is
+	 * Reject if the plan would require taking any execution locks.  This is
 	 * probably unnecessary given the previous check, but let's be safe.
 	 */
 	foreach(lc, plan->stmt_list)
@@ -1549,8 +1618,8 @@ CachedPlanAllowsSimpleValidityCheck(CachedPlanSource *plansource,
 	}
 
 	/*
-	 * Okay, it's simple.  Note that what we've primarily established here is
-	 * that no locks need be taken before checking the plan's is_valid flag.
+	 * Okay, it's simple.  What we've primarily established here is that no
+	 * execution locks need be taken before checking the plan's is_valid flag.
 	 */
 
 	/* Bump refcount if requested. */
@@ -1906,6 +1975,9 @@ QueryListGetPrimaryStmt(List *stmts)
 /*
  * AcquireExecutorLocks: acquire locks needed for execution of a cached plan;
  * or release them if acquire is false.
+ *
+ * Acquire or release execution locks on all relations referenced by the
+ * PlannedStmts in stmt_list.
  */
 static void
 AcquireExecutorLocks(List *stmt_list, bool acquire)
@@ -1953,6 +2025,28 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 				UnlockRelationOid(rte->relid, rte->rellockmode);
 		}
 	}
+}
+
+/*
+ * LockCachedPlan
+ *		Acquire execution locks on all relations referenced by a reused
+ *		cached plan, and recheck validity after locking.
+ *
+ * Returns false if the plan is invalidated while locks are being acquired,
+ * in which case any locks acquired by this function have been released.
+ */
+static bool
+LockCachedPlan(CachedPlan *cplan, CachedPlanSource *plansource)
+{
+	AcquireExecutorLocks(cplan->stmt_list, true);
+
+	if (!RecheckCachedPlan(cplan, plansource))
+	{
+		AcquireExecutorLocks(cplan->stmt_list, false);
+		return false;
+	}
+
+	return true;
 }
 
 /*

@@ -696,10 +696,8 @@ init_execution_state(SQLFunctionCachePtr fcache)
 	 * CurrentResourceOwner will be the same when ShutdownSQLFunction runs.)
 	 */
 	fcache->cowner = CurrentResourceOwner;
-	fcache->cplan = GetCachedPlan(plansource,
-								  fcache->paramLI,
-								  fcache->cowner,
-								  NULL);
+	fcache->cplan = GetCachedPlanLocked(plansource, fcache->paramLI,
+										fcache->cowner, NULL);
 
 	/*
 	 * If necessary, make esarray[] bigger to hold the needed state.
