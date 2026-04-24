@@ -4437,21 +4437,26 @@ JsonTableInitOpaque(TableFuncScanState *state, int natts)
 	if (state->passingvalexprs)
 	{
 		ListCell   *exprlc;
+		ListCell   *passingval;
 		ListCell   *namelc;
 
 		Assert(list_length(state->passingvalexprs) ==
+			   list_length(je->passing_values));
+		Assert(list_length(state->passingvalexprs) ==
 			   list_length(je->passing_names));
-		forboth(exprlc, state->passingvalexprs,
-				namelc, je->passing_names)
+		forthree(exprlc, state->passingvalexprs,
+				 passingval, je->passing_values,
+				 namelc, je->passing_names)
 		{
 			ExprState  *state = lfirst_node(ExprState, exprlc);
+			Node	   *expr = (Node *) lfirst(passingval);
 			String	   *name = lfirst_node(String, namelc);
 			JsonPathVariable *var = palloc_object(JsonPathVariable);
 
 			var->name = pstrdup(name->sval);
 			var->namelen = strlen(var->name);
-			var->typid = exprType((Node *) state->expr);
-			var->typmod = exprTypmod((Node *) state->expr);
+			var->typid = exprType(expr);
+			var->typmod = exprTypmod(expr);
 
 			/*
 			 * Evaluate the expression and save the value to be returned by
