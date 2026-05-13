@@ -334,6 +334,12 @@ typedef struct TableAmRoutine
 	 */
 	const TupleTableSlotOps *(*slot_callbacks) (Relation rel);
 
+	/*
+	 * Return the TupleTableSlotOps for the batch slot type used by
+	 * this AM.  NULL if the AM does not support batching.
+	 */
+	const TupleTableSlotOps *(*batch_slot_callbacks) (Relation rel);
+
 
 	/* ------------------------------------------------------------------------
 	 * Table scan callbacks.
@@ -383,6 +389,25 @@ typedef struct TableAmRoutine
 	bool		(*scan_getnextslot) (TableScanDesc scan,
 									 ScanDirection direction,
 									 TupleTableSlot *slot);
+
+	/*
+	 * Fetch the next batch of tuples from the scan into the given slot.
+	 *
+	 * What constitutes a batch is defined by the AM.  For heap, it is
+	 * all visible tuples on one heap page.  The AM populates the slot's
+	 * batch state and resets the cursor to the start.  The slot's
+	 * batch_next callback is then used to iterate through individual
+	 * tuples.
+	 *
+	 * Returns true if a non-empty batch was produced, false when the
+	 * scan is exhausted.
+	 *
+	 * The caller must fully consume the previous batch before calling
+	 * again.
+	 */
+	bool		(*scan_getnextbatch) (TableScanDesc scan,
+									  ScanDirection direction,
+									  TupleTableSlot *slot);
 
 	/*-----------
 	 * Optional functions to provide scanning for ranges of ItemPointers.
@@ -1102,6 +1127,30 @@ table_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 		   direction == BackwardScanDirection);
 
 	return sscan->rs_rd->rd_tableam->scan_getnextslot(sscan, direction, slot);
+}
+
+/*
+ * table_scan_getnextbatch
+ */
+static inline bool
+table_scan_getnextbatch(TableScanDesc sscan,
+						ScanDirection direction,
+						TupleTableSlot *slot)
+{
+	slot->tts_tableOid = RelationGetRelid(sscan->rs_rd);
+
+	return sscan->rs_rd->rd_tableam->scan_getnextbatch(sscan,
+													   direction,
+													   slot);
+}
+
+/*
+ * table_batch_slot_callbacks
+ */
+static inline const TupleTableSlotOps *
+table_batch_slot_callbacks(Relation rel)
+{
+	return rel->rd_tableam->batch_slot_callbacks(rel);
 }
 
 /* ----------------------------------------------------------------------------

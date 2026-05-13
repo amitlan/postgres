@@ -239,6 +239,16 @@ struct TupleTableSlotOps
 	 * with the minimal tuple without the need for an additional allocation.
 	 */
 	MinimalTuple (*copy_minimal_tuple) (TupleTableSlot *slot, Size extra);
+
+	/*
+	 * Advance to the next tuple in a batch.  Returns true if a tuple
+	 * is available, false when the batch is exhausted.  After returning
+	 * true, the slot behaves as a regular single-tuple slot for
+	 * getsomeattrs, getsysattr, etc.
+	 *
+	 *	NULL for non-batch slot types.
+	 */
+	bool		(*batch_next)(TupleTableSlot *slot);
 };
 
 /*
@@ -551,6 +561,18 @@ ExecCopySlot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
 
 	return dstslot;
 }
+
+/*
+ * slot_batch_next
+ */
+static inline bool
+slot_batch_next(TupleTableSlot *slot)
+{
+	Assert(slot->tts_ops->batch_next != NULL);
+
+	return slot->tts_ops->batch_next(slot);
+}
+
 
 #endif							/* FRONTEND */
 

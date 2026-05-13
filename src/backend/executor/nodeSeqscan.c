@@ -92,6 +92,54 @@ SeqNext(SeqScanState *node)
 	return NULL;
 }
 
+static TupleTableSlot *
+SeqNextBatch(SeqScanState *node)
+{
+	TableScanDesc scandesc;
+	EState	   *estate;
+	TupleTableSlot *slot;
+
+	/*
+	 * get information from the estate and scan state
+	 */
+	scandesc = node->ss.ss_currentScanDesc;
+	estate = node->ss.ps.state;
+	slot = node->ss.ss_ScanTupleSlot;
+
+	if (scandesc == NULL)
+	{
+		uint32		flags = SO_NONE;
+
+		if (ScanRelIsReadOnly(&node->ss))
+			flags |= SO_HINT_REL_READ_ONLY;
+
+		if (estate->es_instrument & INSTRUMENT_IO)
+			flags |= SO_SCAN_INSTRUMENT;
+
+		/*
+		 * We reach here if the scan is not parallel, or if we're serially
+		 * executing a scan that was planned to be parallel.
+		 */
+		scandesc = table_beginscan(node->ss.ss_currentRelation,
+								   estate->es_snapshot,
+								   0, NULL, flags);
+		node->ss.ss_currentScanDesc = scandesc;
+	}
+
+	if (slot_batch_next(slot))
+		return slot;
+
+	ExecClearTuple(slot);
+
+	if (!table_scan_getnextbatch(node->ss.ss_currentScanDesc,
+								 ForwardScanDirection,
+								 slot))
+		return slot;
+
+	slot_batch_next(slot);
+	return slot;
+}
+
 /*
  * SeqRecheck -- access method routine to recheck a tuple in EvalPlanQual
  */
@@ -198,6 +246,86 @@ ExecSeqScanWithQualProject(PlanState *pstate)
 }
 
 /*
+ * Batch: No qual, no projection.
+ */
+static TupleTableSlot *
+ExecSeqScanBatch(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) SeqNextBatch,
+							(ExecScanRecheckMtd) SeqRecheck,
+							NULL,
+							NULL,
+							NULL);
+}
+
+/*
+ * Batch: Qual, no projection.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchWithQual(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	Assert(pstate->ps_ProjInfo == NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) SeqNextBatch,
+							(ExecScanRecheckMtd) SeqRecheck,
+							NULL,
+							pstate->qual,
+							NULL);
+}
+
+/*
+ * Batch: No qual, projection.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchWithProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	Assert(pstate->qual == NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) SeqNextBatch,
+							(ExecScanRecheckMtd) SeqRecheck,
+							NULL,
+							NULL,
+							pstate->ps_ProjInfo);
+}
+
+/*
+ * Batch Qual and projection.
+ */
+static TupleTableSlot *
+ExecSeqScanBatchWithQualProject(PlanState *pstate)
+{
+	SeqScanState *node = castNode(SeqScanState, pstate);
+
+	Assert(pstate->state->es_epq_active == NULL);
+	pg_assume(pstate->qual != NULL);
+	pg_assume(pstate->ps_ProjInfo != NULL);
+
+	return ExecScanExtended(&node->ss,
+							(ExecScanAccessMtd) SeqNextBatch,
+							(ExecScanRecheckMtd) SeqRecheck,
+							NULL,
+							pstate->qual,
+							pstate->ps_ProjInfo);
+}
+
+/*
  * Variant of ExecSeqScan for when EPQ evaluation is required.  We don't
  * bother adding variants of this for with/without qual and projection as
  * EPQ doesn't seem as exciting a case to optimize for.
@@ -220,6 +348,8 @@ SeqScanState *
 ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 {
 	SeqScanState *scanstate;
+	Relation	rel;
+	bool		use_batch;
 
 	/*
 	 * Once upon a time it was possible to have an outerPlan of a SeqScan, but
@@ -245,15 +375,24 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	/*
 	 * open the scan relation
 	 */
-	scanstate->ss.ss_currentRelation =
+	scanstate->ss.ss_currentRelation = rel =
 		ExecOpenScanRelation(estate,
 							 node->scan.scanrelid,
 							 eflags);
 
+	/*
+	 * Use a batch slot if the AM supports getnextbatch.
+	 */
+	use_batch = (rel->rd_tableam->scan_getnextbatch != NULL &&
+				 !(eflags & EXEC_FLAG_BACKWARD) &&
+				 scanstate->ss.ps.state->es_epq_active == NULL) &&
+				 !IsCatalogRelation(rel);
+
 	/* and create slot with the appropriate rowtype */
 	ExecInitScanTupleSlot(estate, &scanstate->ss,
-						  RelationGetDescr(scanstate->ss.ss_currentRelation),
-						  table_slot_callbacks(scanstate->ss.ss_currentRelation),
+						  RelationGetDescr(rel),
+						  use_batch ? table_batch_slot_callbacks(rel)
+									: table_slot_callbacks(rel),
 						  TTS_FLAG_OBEYS_NOT_NULL_CONSTRAINTS);
 
 	/*
@@ -278,16 +417,20 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	else if (scanstate->ss.ps.qual == NULL)
 	{
 		if (scanstate->ss.ps.ps_ProjInfo == NULL)
-			scanstate->ss.ps.ExecProcNode = ExecSeqScan;
+			scanstate->ss.ps.ExecProcNode = use_batch ? ExecSeqScanBatch
+													  : ExecSeqScan;
 		else
-			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithProject;
+			scanstate->ss.ps.ExecProcNode = use_batch ? ExecSeqScanBatchWithProject
+													  : ExecSeqScanWithProject;
 	}
 	else
 	{
 		if (scanstate->ss.ps.ps_ProjInfo == NULL)
-			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithQual;
+			scanstate->ss.ps.ExecProcNode = use_batch ? ExecSeqScanBatchWithQual
+													  : ExecSeqScanWithQual;
 		else
-			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithQualProject;
+			scanstate->ss.ps.ExecProcNode = use_batch ? ExecSeqScanBatchWithQualProject
+													  : ExecSeqScanWithQualProject;
 	}
 
 	return scanstate;

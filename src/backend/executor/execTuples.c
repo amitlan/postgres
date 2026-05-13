@@ -1274,7 +1274,8 @@ const TupleTableSlotOps TTSOpsVirtual = {
 	.get_heap_tuple = NULL,
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_virtual_copy_heap_tuple,
-	.copy_minimal_tuple = tts_virtual_copy_minimal_tuple
+	.copy_minimal_tuple = tts_virtual_copy_minimal_tuple,
+	.batch_next = NULL
 };
 
 const TupleTableSlotOps TTSOpsHeapTuple = {
@@ -1292,7 +1293,8 @@ const TupleTableSlotOps TTSOpsHeapTuple = {
 	/* A heap tuple table slot can not "own" a minimal tuple. */
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_heap_copy_heap_tuple,
-	.copy_minimal_tuple = tts_heap_copy_minimal_tuple
+	.copy_minimal_tuple = tts_heap_copy_minimal_tuple,
+	.batch_next = NULL
 };
 
 const TupleTableSlotOps TTSOpsMinimalTuple = {
@@ -1310,7 +1312,8 @@ const TupleTableSlotOps TTSOpsMinimalTuple = {
 	.get_heap_tuple = NULL,
 	.get_minimal_tuple = tts_minimal_get_minimal_tuple,
 	.copy_heap_tuple = tts_minimal_copy_heap_tuple,
-	.copy_minimal_tuple = tts_minimal_copy_minimal_tuple
+	.copy_minimal_tuple = tts_minimal_copy_minimal_tuple,
+	.batch_next = NULL
 };
 
 const TupleTableSlotOps TTSOpsBufferHeapTuple = {
@@ -1328,7 +1331,8 @@ const TupleTableSlotOps TTSOpsBufferHeapTuple = {
 	/* A buffer heap tuple table slot can not "own" a minimal tuple. */
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_buffer_heap_copy_heap_tuple,
-	.copy_minimal_tuple = tts_buffer_heap_copy_minimal_tuple
+	.copy_minimal_tuple = tts_buffer_heap_copy_minimal_tuple,
+	.batch_next = NULL
 };
 
 
