@@ -1464,7 +1464,7 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 	 * the proper return buffer and return the tuple.
 	 */
 
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	return scan->rs_ctup_p;
 }
@@ -1492,10 +1492,76 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	 * the proper return buffer and return the tuple.
 	 */
 
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	ExecStoreBufferHeapTuple(scan->rs_ctup_p, slot, scan->rs_cbuf);
 	return true;
+}
+
+/*
+ * heap_getnextbatch
+ *
+ * Modeled on heapgettup_pagemode() but without the per-tuple
+ * iteration loop.  Advances to the next page with visible tuples
+ * via heap_fetch_next_buffer(), calls heap_prepare_pagescan() to
+ * populate rs_vistuples[], then hands the whole array to the slot.
+ *
+ * The caller must fully consume the previous batch (via batch_next)
+ * before calling again.
+ *
+ * Returns true if a non-empty batch was produced, false when the
+ * scan is exhausted.
+ */
+bool
+heap_getnextbatch(TableScanDesc sscan,
+				  ScanDirection direction,
+				  TupleTableSlot *slot)
+{
+	HeapScanDesc scan = (HeapScanDesc) sscan;
+
+	/*
+	 * Each call returns a full page worth of tuples, so there is no
+	 * resume-mid-page path like heapgettup_pagemode's rs_inited +
+	 * goto continue_page.  We always advance to the next block.
+	 */
+	while (true)
+	{
+		heap_fetch_next_buffer(scan, direction);
+
+		/* did we run out of blocks to scan? */
+		if (!BufferIsValid(scan->rs_cbuf))
+			break;
+
+		Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
+
+		/* prune the page and determine visible tuple offsets */
+		heap_prepare_pagescan(sscan);
+
+		if (scan->rs_ntuples == 0)
+			continue;		/* empty page, try next */
+
+		/*
+		 * Hand the whole page to the slot.
+		 */
+		ExecStoreBatchBufferHeapTuples(scan->rs_vistuples,
+									   scan->rs_ntuples,
+									   scan->rs_cbuf,
+									   slot);
+
+		pgstat_count_heap_getnext(scan->rs_base.rs_rd, scan->rs_ntuples);
+		scan->rs_inited = true;
+		return true;
+	}
+
+	/* end of scan */
+	if (BufferIsValid(scan->rs_cbuf))
+		ReleaseBuffer(scan->rs_cbuf);
+	scan->rs_cbuf = InvalidBuffer;
+	scan->rs_cblock = InvalidBlockNumber;
+	scan->rs_prefetch_block = InvalidBlockNumber;
+	scan->rs_inited = false;
+
+	return false;
 }
 
 void
@@ -1639,7 +1705,7 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 	 * if we get here it means we have a new current scan tuple, so point to
 	 * the proper return buffer and return the tuple.
 	 */
-	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
+	pgstat_count_heap_getnext(scan->rs_base.rs_rd, 1);
 
 	ExecStoreBufferHeapTuple(scan->rs_ctup_p, slot, scan->rs_cbuf);
 	return true;
