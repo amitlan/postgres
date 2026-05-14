@@ -2099,9 +2099,6 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 {
 	BitmapHeapScanDesc bscan = (BitmapHeapScanDesc) scan;
 	HeapScanDesc hscan = (HeapScanDesc) bscan;
-	OffsetNumber targoffset;
-	Page		page;
-	ItemId		lp;
 
 	/*
 	 * Out of range?  If so, nothing more to look at on this page
@@ -2115,16 +2112,7 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 		if (!BitmapHeapScanNextBlock(scan, recheck, lossy_pages, exact_pages))
 			return false;
 	}
-
-	targoffset = hscan->rs_vistuples[hscan->rs_cindex];
-	page = BufferGetPage(hscan->rs_cbuf);
-	lp = PageGetItemId(page, targoffset);
-	Assert(ItemIdIsNormal(lp));
-
-	hscan->rs_ctup.t_data = (HeapTupleHeader) PageGetItem(page, lp);
-	hscan->rs_ctup.t_len = ItemIdGetLength(lp);
-	hscan->rs_ctup.t_tableOid = scan->rs_rd->rd_id;
-	ItemPointerSet(&hscan->rs_ctup.t_self, hscan->rs_cblock, targoffset);
+	hscan->rs_ctup_p = &hscan->rs_vistuples[hscan->rs_cindex];
 
 	pgstat_count_heap_fetch(scan->rs_rd);
 
@@ -2132,7 +2120,7 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 	 * Set up the result slot to point to this tuple.  Note that the slot
 	 * acquires a pin on the buffer.
 	 */
-	ExecStoreBufferHeapTuple(&hscan->rs_ctup,
+	ExecStoreBufferHeapTuple(hscan->rs_ctup_p,
 							 slot,
 							 hscan->rs_cbuf);
 
@@ -2479,7 +2467,7 @@ SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 		while (start < end)
 		{
 			uint32		mid = start + (end - start) / 2;
-			OffsetNumber curoffset = hscan->rs_vistuples[mid];
+			OffsetNumber curoffset = hscan->rs_vistuples[mid].t_self.ip_posid;
 
 			if (tupoffset == curoffset)
 				return true;
@@ -2599,7 +2587,7 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 			ItemPointerSet(&tid, block, offnum);
 			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot,
 									   &heapTuple, NULL, true))
-				hscan->rs_vistuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
+				hscan->rs_vistuples[ntup++] = heapTuple;
 		}
 	}
 	else
@@ -2628,7 +2616,7 @@ BitmapHeapScanNextBlock(TableScanDesc scan,
 			valid = HeapTupleSatisfiesVisibility(&loctup, snapshot, buffer);
 			if (valid)
 			{
-				hscan->rs_vistuples[ntup++] = offnum;
+				hscan->rs_vistuples[ntup++] = loctup;
 				PredicateLockTID(scan->rs_rd, &loctup.t_self, snapshot,
 								 HeapTupleHeaderGetXmin(loctup.t_data));
 			}

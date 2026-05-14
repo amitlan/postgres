@@ -462,6 +462,7 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	scan->rs_numblocks = InvalidBlockNumber;
 	scan->rs_inited = false;
 	scan->rs_ctup.t_data = NULL;
+	scan->rs_ctup_p = NULL;
 	ItemPointerSetInvalid(&scan->rs_ctup.t_self);
 	scan->rs_cbuf = InvalidBuffer;
 	scan->rs_cblock = InvalidBlockNumber;
@@ -526,7 +527,6 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 					BlockNumber block, int lines,
 					bool all_visible, bool check_serializable)
 {
-	Oid			relid = RelationGetRelid(scan->rs_base.rs_rd);
 	int			ntup = 0;
 	int			nvis = 0;
 	BatchMVCCState batchmvcc;
@@ -534,43 +534,27 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 	/* page at a time should have been disabled otherwise */
 	Assert(IsMVCCSnapshot(snapshot));
 
-	/* first find all tuples on the page */
+	/*
+	 * Collect all normal tuples on the page into rs_vistuples[].
+	 * Every entry gets a fully populated HeapTupleData header with
+	 * t_data pointing into the pinned page.  t_tableOid was set
+	 * once at beginscan time.
+	 */
 	for (OffsetNumber lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)
 	{
 		ItemId		lpp = PageGetItemId(page, lineoff);
-		HeapTuple	tup;
+		HeapTuple   tup = &scan->rs_vistuples[ntup];
 
 		if (unlikely(!ItemIdIsNormal(lpp)))
 			continue;
 
-		/*
-		 * If the page is not all-visible or we need to check serializability,
-		 * maintain enough state to be able to refind the tuple efficiently,
-		 * without again first needing to fetch the item and then via that the
-		 * tuple.
-		 */
-		if (!all_visible || check_serializable)
-		{
-			tup = &batchmvcc.tuples[ntup];
+		tup->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+		tup->t_len = ItemIdGetLength(lpp);
+		Assert(tup->t_tableOid == RelationGetRelid(scan->rs_base.rs_rd));
+		ItemPointerSet(&(tup->t_self), block, lineoff);
 
-			tup->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
-			tup->t_len = ItemIdGetLength(lpp);
-			tup->t_tableOid = relid;
-			ItemPointerSet(&(tup->t_self), block, lineoff);
-		}
-
-		/*
-		 * If the page is all visible, these fields otherwise won't be
-		 * populated in loop below.
-		 */
-		if (all_visible)
-		{
-			if (check_serializable)
-			{
-				batchmvcc.visible[ntup] = true;
-			}
-			scan->rs_vistuples[ntup] = lineoff;
-		}
+		if (all_visible && check_serializable)
+			batchmvcc.visible[ntup] = true;
 
 		ntup++;
 	}
@@ -600,9 +584,28 @@ page_collect_tuples(HeapScanDesc scan, Snapshot snapshot,
 		{
 			HeapCheckForSerializableConflictOut(batchmvcc.visible[i],
 												scan->rs_base.rs_rd,
-												&batchmvcc.tuples[i],
+												&scan->rs_vistuples[i],
 												buffer, snapshot);
 		}
+	}
+
+	/*
+	 * Compact rs_vistuples[] to contain only visible survivors in
+	 * [0..nvis-1].  This is done here rather than inside
+	 * HeapTupleSatisfiesMVCCBatch() because the serializable conflict
+	 * check above needs visible[i] and rs_vistuples[i] to correspond
+	 * before compaction.  Callers iterate rs_vistuples[] directly
+	 * without rechecking visibility.
+	 */
+	if (!all_visible)
+	{
+		int dst = 0;
+		for (int i = 0; i < ntup; i++)
+		{
+			if (batchmvcc.visible[i])
+				scan->rs_vistuples[dst++] = scan->rs_vistuples[i];
+		}
+		Assert(dst == nvis);
 	}
 
 	return nvis;
@@ -1035,6 +1038,7 @@ continue_page:
 
 			LockBuffer(scan->rs_cbuf, BUFFER_LOCK_UNLOCK);
 			scan->rs_coffset = lineoff;
+			scan->rs_ctup_p = &scan->rs_ctup;
 			return;
 		}
 
@@ -1052,7 +1056,7 @@ continue_page:
 	scan->rs_cbuf = InvalidBuffer;
 	scan->rs_cblock = InvalidBlockNumber;
 	scan->rs_prefetch_block = InvalidBlockNumber;
-	tuple->t_data = NULL;
+	scan->rs_ctup_p = NULL;
 	scan->rs_inited = false;
 }
 
@@ -1075,15 +1079,13 @@ heapgettup_pagemode(HeapScanDesc scan,
 					int nkeys,
 					ScanKey key)
 {
-	HeapTuple	tuple = &(scan->rs_ctup);
-	Page		page;
 	uint32		lineindex;
 	uint32		linesleft;
 
 	if (likely(scan->rs_inited))
 	{
 		/* continue from previously returned page/tuple */
-		page = BufferGetPage(scan->rs_cbuf);
+		Assert(BufferIsValid(scan->rs_cbuf));
 
 		lineindex = scan->rs_cindex + dir;
 		if (ScanDirectionIsForward(dir))
@@ -1111,37 +1113,32 @@ heapgettup_pagemode(HeapScanDesc scan,
 
 		/* prune the page and determine visible tuple offsets */
 		heap_prepare_pagescan((TableScanDesc) scan);
-		page = BufferGetPage(scan->rs_cbuf);
 		linesleft = scan->rs_ntuples;
 		lineindex = ScanDirectionIsForward(dir) ? 0 : linesleft - 1;
-
-		/* block is the same for all tuples, set it once outside the loop */
-		ItemPointerSetBlockNumber(&tuple->t_self, scan->rs_cblock);
 
 		/* lineindex now references the next or previous visible tid */
 continue_page:
 
 		for (; linesleft > 0; linesleft--, lineindex += dir)
 		{
-			ItemId		lpp;
-			OffsetNumber lineoff;
-
-			Assert(lineindex < scan->rs_ntuples);
-			lineoff = scan->rs_vistuples[lineindex];
-			lpp = PageGetItemId(page, lineoff);
-			Assert(ItemIdIsNormal(lpp));
-
-			tuple->t_data = (HeapTupleHeader) PageGetItem(page, lpp);
-			tuple->t_len = ItemIdGetLength(lpp);
-			ItemPointerSetOffsetNumber(&tuple->t_self, lineoff);
-
 			/* skip any tuples that don't match the scan key */
-			if (key != NULL &&
-				!HeapKeyTest(tuple, RelationGetDescr(scan->rs_base.rs_rd),
-							 nkeys, key))
+			if (key != NULL)
+			{
+				/*
+				 * Headers were pre-built by page_collect_tuples() into
+				 * rs_vistuples[].  Copy the entry; t_data still points into
+				 * the pinned page, which is safe for the lifetime of the
+				 * current page scan.
+				 */
+				HeapTuple	tuple = &scan->rs_vistuples[lineindex];
+
+				if (!HeapKeyTest(tuple, RelationGetDescr(scan->rs_base.rs_rd),
+								 nkeys, key))
 				continue;
+			}
 
 			scan->rs_cindex = lineindex;
+			scan->rs_ctup_p = &scan->rs_vistuples[lineindex];
 			return;
 		}
 	}
@@ -1152,7 +1149,7 @@ continue_page:
 	scan->rs_cbuf = InvalidBuffer;
 	scan->rs_cblock = InvalidBlockNumber;
 	scan->rs_prefetch_block = InvalidBlockNumber;
-	tuple->t_data = NULL;
+	scan->rs_ctup_p = NULL;
 	scan->rs_inited = false;
 }
 
@@ -1248,6 +1245,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 
 	/* we only need to set this up once */
 	scan->rs_ctup.t_tableOid = RelationGetRelid(relation);
+	for (int i = 0; i < MaxHeapTuplesPerPage; i++)
+		scan->rs_vistuples[i].t_tableOid = RelationGetRelid(relation);
 
 	/*
 	 * Allocate memory to keep track of page allocation for parallel workers
@@ -1457,7 +1456,7 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 		heapgettup(scan, direction,
 				   scan->rs_base.rs_nkeys, scan->rs_base.rs_key);
 
-	if (scan->rs_ctup.t_data == NULL)
+	if (scan->rs_ctup_p == NULL)
 		return NULL;
 
 	/*
@@ -1467,7 +1466,7 @@ heap_getnext(TableScanDesc sscan, ScanDirection direction)
 
 	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
 
-	return &scan->rs_ctup;
+	return scan->rs_ctup_p;
 }
 
 bool
@@ -1482,7 +1481,7 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 	else
 		heapgettup(scan, direction, sscan->rs_nkeys, sscan->rs_key);
 
-	if (scan->rs_ctup.t_data == NULL)
+	if (scan->rs_ctup_p == NULL)
 	{
 		ExecClearTuple(slot);
 		return false;
@@ -1495,8 +1494,7 @@ heap_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *s
 
 	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
 
-	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot,
-							 scan->rs_cbuf);
+	ExecStoreBufferHeapTuple(scan->rs_ctup_p, slot, scan->rs_cbuf);
 	return true;
 }
 
@@ -1589,7 +1587,7 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 		else
 			heapgettup(scan, direction, sscan->rs_nkeys, sscan->rs_key);
 
-		if (scan->rs_ctup.t_data == NULL)
+		if (scan->rs_ctup_p == NULL)
 		{
 			ExecClearTuple(slot);
 			return false;
@@ -1601,7 +1599,7 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 		 * we're scanning for.  Here we must filter out any tuples from these
 		 * pages that are outside of that range.
 		 */
-		if (ItemPointerCompare(&scan->rs_ctup.t_self, mintid) < 0)
+		if (ItemPointerCompare(&scan->rs_ctup_p->t_self, mintid) < 0)
 		{
 			ExecClearTuple(slot);
 
@@ -1620,7 +1618,7 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 		 * Likewise for the final page, we must filter out TIDs greater than
 		 * maxtid.
 		 */
-		if (ItemPointerCompare(&scan->rs_ctup.t_self, maxtid) > 0)
+		if (ItemPointerCompare(&scan->rs_ctup_p->t_self, maxtid) > 0)
 		{
 			ExecClearTuple(slot);
 
@@ -1643,7 +1641,7 @@ heap_getnextslot_tidrange(TableScanDesc sscan, ScanDirection direction,
 	 */
 	pgstat_count_heap_getnext(scan->rs_base.rs_rd);
 
-	ExecStoreBufferHeapTuple(&scan->rs_ctup, slot, scan->rs_cbuf);
+	ExecStoreBufferHeapTuple(scan->rs_ctup_p, slot, scan->rs_cbuf);
 	return true;
 }
 
