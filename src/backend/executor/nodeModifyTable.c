@@ -5105,6 +5105,13 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	List	   *resultRelations = NIL;
 	List	   *withCheckOptionLists = NIL;
 	List	   *returningLists = NIL;
+
+	/*
+	 * fdwPrivLists/fdwDirectModifyPlans are re-indexed to match
+	 * resultRelations
+	 */
+	List	   *fdwPrivLists = NIL;
+	Bitmapset  *fdwDirectModifyPlans = NULL;
 	List	   *updateColnosLists = NIL;
 	List	   *mergeActionLists = NIL;
 	List	   *mergeJoinConditions = NIL;
@@ -5150,6 +5157,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 
 		if (keep_rel)
 		{
+			int			new_index = list_length(resultRelations);
+
 			resultRelations = lappend_int(resultRelations, rti);
 			if (node->withCheckOptionLists)
 			{
@@ -5167,6 +5176,15 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 
 				returningLists = lappend(returningLists, returningList);
 			}
+			if (node->fdwPrivLists)
+			{
+				List	   *fdwPrivList = (List *) list_nth(node->fdwPrivLists, i);
+
+				fdwPrivLists = lappend(fdwPrivLists, fdwPrivList);
+			}
+			if (bms_is_member(i, node->fdwDirectModifyPlans))
+				fdwDirectModifyPlans = bms_add_member(fdwDirectModifyPlans,
+													  new_index);
 			if (node->updateColnosLists)
 			{
 				List	   *updateColnosList = list_nth(node->updateColnosLists, i);
@@ -5213,6 +5231,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	mtstate->mt_updateColnosLists = updateColnosLists;
 	mtstate->mt_mergeActionLists = mergeActionLists;
 	mtstate->mt_mergeJoinConditions = mergeJoinConditions;
+	mtstate->mt_fdwPrivLists = fdwPrivLists;
 
 	/*----------
 	 * Resolve the target relation. This is the same as:
@@ -5288,7 +5307,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 
 		/* Initialize the usesFdwDirectModify flag */
 		resultRelInfo->ri_usesFdwDirectModify =
-			bms_is_member(i, node->fdwDirectModifyPlans);
+			bms_is_member(i, fdwDirectModifyPlans);
 
 		/*
 		 * Verify result relation is a valid target for the current operation
@@ -5317,7 +5336,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 			resultRelInfo->ri_FdwRoutine != NULL &&
 			resultRelInfo->ri_FdwRoutine->BeginForeignModify != NULL)
 		{
-			List	   *fdw_private = (List *) list_nth(node->fdwPrivLists, i);
+			List	   *fdw_private = (List *) list_nth(fdwPrivLists, i);
 
 			resultRelInfo->ri_FdwRoutine->BeginForeignModify(mtstate,
 															 resultRelInfo,

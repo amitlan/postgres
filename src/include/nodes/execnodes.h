@@ -1447,6 +1447,12 @@ typedef struct ModifyTableState
 	ResultRelInfo *resultRelInfo;	/* info about target relation(s) */
 
 	/*
+	 * Re-indexed fdw private data lists, aligned with resultRelInfo[] after
+	 * pruning
+	 */
+	List	   *mt_fdwPrivLists;
+
+	/*
 	 * Target relation mentioned in the original statement, used to fire
 	 * statement-level triggers and as the root for tuple routing.  (This
 	 * might point to one of the resultRelInfo[] entries, but it can also be a
