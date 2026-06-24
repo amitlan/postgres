@@ -4609,7 +4609,26 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 			fdwroutine != NULL &&
 			fdwroutine->ExplainForeignModify != NULL)
 		{
-			List	   *fdw_private = (List *) list_nth(mtstate->mt_fdwPrivLists, j);
+			Index		rti = resultRelInfo->ri_RangeTableIndex;
+			List	   *fdw_private = NIL;
+			ListCell   *lc1;
+			ListCell   *lc2;
+
+			/*
+			 * node->fdwPrivLists is indexed by the original, pre-pruning
+			 * result relation order and is parallel to node->resultRelations.
+			 * Initial pruning may have dropped earlier relations, so the kept
+			 * index j need not match the original position; find this
+			 * relation's entry by its range table index instead.
+			 */
+			forboth(lc1, node->resultRelations, lc2, node->fdwPrivLists)
+			{
+				if (lfirst_int(lc1) == (int) rti)
+				{
+					fdw_private = (List *) lfirst(lc2);
+					break;
+				}
+			}
 
 			fdwroutine->ExplainForeignModify(mtstate,
 											 resultRelInfo,
