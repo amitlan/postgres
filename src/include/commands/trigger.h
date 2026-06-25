@@ -289,6 +289,8 @@ extern void RI_PartitionRemove_Check(Trigger *trigger, Relation fk_rel,
 
 extern int	RI_FKey_trigger_type(Oid tgfoid);
 
+extern void AtEOXact_RI(bool isCommit);
+
 /*
  * Callback type for end-of-trigger-batch callbacks.
  *
