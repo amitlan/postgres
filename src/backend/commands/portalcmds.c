@@ -314,6 +314,40 @@ PortalCleanup(Portal portal)
 			CurrentResourceOwner = saveResourceOwner;
 		}
 	}
+
+	/*
+	 * Similarly, dispose of a prep QueryDesc stashed by PortalStart() that was
+	 * never consumed by ProcessQuery() (e.g. a DML statement bound but closed
+	 * without execution).  As with queryDesc above, skip this during error
+	 * abort: transaction abort releases the executor relations and the
+	 * snapshot registration (taken on the portal's resowner in PortalPrepDML)
+	 * for us, and ExecutorPrepCleanup itself might fail.
+	 */
+	if (portal->prep_qd)
+	{
+		QueryDesc  *prep_qd = portal->prep_qd;
+
+		portal->prep_qd = NULL;
+
+		if (portal->status != PORTAL_FAILED)
+		{
+			ResourceOwner saveResourceOwner;
+
+			saveResourceOwner = CurrentResourceOwner;
+			if (portal->resowner)
+				CurrentResourceOwner = portal->resowner;
+
+			/* Close any prepared-but-unstarted executor state. */
+			ExecutorPrepCleanup(prep_qd);
+			/* Release the snapshot reference taken in PortalPrepDML(). */
+			if (prep_qd->snapshot != NULL && portal->resowner)
+				UnregisterSnapshotFromOwner(prep_qd->snapshot,
+											portal->resowner);
+			FreeQueryDesc(prep_qd);
+
+			CurrentResourceOwner = saveResourceOwner;
+		}
+	}
 }
 
 /*

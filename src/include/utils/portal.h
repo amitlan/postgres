@@ -159,6 +159,15 @@ typedef struct PortalData
 	/* If not NULL, Executor is active; call ExecutorEnd eventually: */
 	QueryDesc  *queryDesc;		/* info needed for executor invocation */
 
+	/*
+	 * For a DML portal (PORTAL_ONE_RETURNING/ONE_MOD_WITH/MULTI_QUERY) backed
+	 * by an eligible cached plan, PortalStart() runs initial pruning early and
+	 * stashes the prepared QueryDesc here for ProcessQuery() to consume at
+	 * PortalRun() time.  Its ->snapshot is registered on portal->resowner from
+	 * PortalStart until the prep QueryDesc is disposed (after execution, or in
+	 * PortalDrop() if never consumed).  NULL when no prep was done.
+	 */
+	QueryDesc  *prep_qd;
 	/* If portal returns tuples, this is their tupdesc: */
 	TupleDesc	tupDesc;		/* descriptor for result tuples */
 	/* and these are the format codes to use for the columns: */

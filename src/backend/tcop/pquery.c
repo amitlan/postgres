@@ -41,7 +41,8 @@ static void ProcessQuery(PlannedStmt *plan,
 						 ParamListInfo params,
 						 QueryEnvironment *queryEnv,
 						 DestReceiver *dest,
-						 QueryCompletion *qc);
+						 QueryCompletion *qc,
+						 QueryDesc *prep_qd);
 static void FillPortalStore(Portal portal, bool isTopLevel);
 static uint64 RunFromStore(Portal portal, ScanDirection direction, uint64 count,
 						   DestReceiver *dest);
@@ -59,7 +60,11 @@ static uint64 DoPortalRunFetch(Portal portal,
 							   long count,
 							   DestReceiver *dest);
 static void DoPortalRewind(Portal portal);
-static bool PortalLockCachedPlan(Portal portal);
+static bool PortalLockCachedPlan(Portal portal, bool do_prep,
+								 ParamListInfo params,
+								 QueryDesc **queryDesc_p);
+static bool PortalPrepDML(Portal portal, ParamListInfo params);
+static void PortalDisposePrepQueryDesc(Portal portal);
 
 
 /*
@@ -141,16 +146,36 @@ ProcessQuery(PlannedStmt *plan,
 			 ParamListInfo params,
 			 QueryEnvironment *queryEnv,
 			 DestReceiver *dest,
-			 QueryCompletion *qc)
+			 QueryCompletion *qc,
+			 QueryDesc *prep_qd)
 {
 	QueryDesc  *queryDesc;
 
-	/*
-	 * Create the QueryDesc object
-	 */
-	queryDesc = CreateQueryDesc(plan, sourceText,
-								GetActiveSnapshot(), InvalidSnapshot,
-								dest, params, queryEnv, 0);
+	if (prep_qd != NULL)
+	{
+		/*
+		 * Reuse the QueryDesc that PortalStart() prepared: initial pruning,
+		 * pruning-aware lock acquisition, and (unless the plan was rebuilt
+		 * fresh) the EState are already done.  The caller (PortalRunMulti) has
+		 * pushed prep_qd->snapshot as the active snapshot -- the same snapshot
+		 * prep ran under -- so pruning and execution stay consistent (initial
+		 * pruning may depend on stable expressions evaluated under that
+		 * snapshot).  standard_ExecutorStart() asserts GetActiveSnapshot() ==
+		 * queryDesc->snapshot and takes es_snapshot from it.  The caller owns
+		 * disposal of the QueryDesc and the snapshot it registered.
+		 */
+		queryDesc = prep_qd;
+		queryDesc->dest = dest;
+	}
+	else
+	{
+		/*
+		 * Create the QueryDesc object
+		 */
+		queryDesc = CreateQueryDesc(plan, sourceText,
+									GetActiveSnapshot(), InvalidSnapshot,
+									dest, params, queryEnv, 0);
+	}
 
 	/*
 	 * Call ExecutorStart to prepare the plan for execution
@@ -191,7 +216,13 @@ ProcessQuery(PlannedStmt *plan,
 	ExecutorFinish(queryDesc);
 	ExecutorEnd(queryDesc);
 
-	FreeQueryDesc(queryDesc);
+	/*
+	 * Free the QueryDesc only if we created it; a caller-supplied prep_qd is
+	 * disposed of by the caller (PortalRunMulti), which also unregisters its
+	 * snapshot.
+	 */
+	if (prep_qd == NULL)
+		FreeQueryDesc(queryDesc);
 }
 
 /*
@@ -480,22 +511,6 @@ restart:
 					PushActiveSnapshot(GetTransactionSnapshot());
 
 				/*
-				 * If the portal is backed by a cached plan, acquire execution
-				 * locks now (GetCachedPlanNoLock() left them to us).  If the
-				 * plan is invalidated during locking, PortalLockCachedPlan()
-				 * fetches a fresh one; should that change the portal strategy,
-				 * pop the snapshot we just pushed and redispatch.
-				 */
-				if (portal->cplan)
-				{
-					if (PortalLockCachedPlan(portal))
-					{
-						PopActiveSnapshot();
-						goto restart;
-					}
-				}
-
-				/*
 				 * We could remember the snapshot in portal->portalSnapshot,
 				 * but presently there seems no need to, as this code path
 				 * cannot be used for non-atomic execution.  Hence there can't
@@ -516,6 +531,26 @@ restart:
 											params,
 											portal->queryEnv,
 											0);
+
+				/*
+				 * If the portal is backed by a cached plan, acquire execution
+				 * locks via PortalLockCachedPlan().  For eligible plans
+				 * (single-statement reused generic), this performs
+				 * pruning-aware locking: it runs ExecutorPrep() on the
+				 * QueryDesc to determine which partitions survive initial
+				 * pruning, then locks only those.  If the plan is invalidated
+				 * during this process, it replans and rebuilds the QueryDesc.
+				 * If replanning changes the portal strategy, we must restart
+				 * PortalStart() to redispatch.
+				 */
+				if (portal->cplan)
+				{
+					if (PortalLockCachedPlan(portal, true, params, &queryDesc))
+					{
+						PopActiveSnapshot();
+						goto restart;
+					}
+				}
 
 				/*
 				 * If it's a scrollable cursor, executor needs to support
@@ -558,15 +593,15 @@ restart:
 				/*
 				 * Acquire execution locks for a cached-plan-backed portal.
 				 * These strategies execute via PortalRunMulti()/ProcessQuery()
-				 * at PortalRun() time, so no snapshot is active here; locking
-				 * is conservative (all relations).  A strategy change on
-				 * replan requires redispatch.
+				 * at PortalRun() time.  PortalPrepDML() performs pruning-aware
+				 * locking when the plan is eligible (single-statement reused
+				 * generic), stashing a prepared QueryDesc in portal->prep_qd
+				 * for ProcessQuery() to consume; otherwise it locks
+				 * conservatively.  A strategy change on replan requires
+				 * redispatch.
 				 */
-				if (portal->cplan)
-				{
-					if (PortalLockCachedPlan(portal))
-						goto restart;
-				}
+				if (PortalPrepDML(portal, params))
+					goto restart;
 
 				/*
 				 * We don't start the executor until we are told to run the
@@ -598,7 +633,7 @@ restart:
 				 */
 				if (portal->cplan)
 				{
-					if (PortalLockCachedPlan(portal))
+					if (PortalLockCachedPlan(portal, false, NULL, NULL))
 						goto restart;
 				}
 
@@ -625,18 +660,18 @@ restart:
 
 				/*
 				 * Acquire execution locks for a cached-plan-backed portal.
-				 * Multi-statement plans always use conservative locking:
-				 * pruning-aware locking is not applicable because
-				 * PortalRunMulti() executes the statements sequentially with a
+				 * PortalPrepDML() prunes-and-locks a single-statement eligible
+				 * plan (stashing portal->prep_qd for ProcessQuery()), and locks
+				 * conservatively otherwise -- in particular, a genuinely
+				 * multi-statement plan is never eligible (CachedPlanCanPrep
+				 * requires list_length(stmt_list) == 1), because PortalRunMulti()
+				 * executes the statements sequentially with a
 				 * CommandCounterIncrement between them.
 				 */
-				if (portal->cplan)
-				{
-					if (PortalLockCachedPlan(portal))
-						goto restart;
-				}
+				if (PortalPrepDML(portal, params))
+					goto restart;
 
-				/* Need do nothing now */
+				/* Need do nothing else now */
 				portal->tupDesc = NULL;
 				break;
 		}
@@ -1284,6 +1319,100 @@ PortalRunMulti(Portal portal,
 				ResetUsage();
 
 			/*
+			 * If PortalStart() stashed a prepared QueryDesc for this portal
+			 * (an eligible single-statement DML, pruned and locked early under
+			 * prep_qd->snapshot), consume it here.
+			 *
+			 * Initial pruning is independent of the MVCC snapshot: the set of
+			 * surviving partitions is a function of the bound parameter values
+			 * and any stable/immutable expressions in the pruning quals, not of
+			 * xmin/xmax.  So a snapshot difference alone never changes which
+			 * partitions we should have locked.  The one thing that can is a
+			 * command-counter advance: a stable expression is only guaranteed
+			 * stable within a single command, so crossing a
+			 * CommandCounterIncrement may change its value -- and hence the
+			 * survivor set -- relative to what we pruned and locked at Bind.
+			 *
+			 * Therefore, when the command counter has not moved since prep
+			 * (curcid unchanged), the Bind-time survivor locks are provably the
+			 * right set, and we execute prep_qd under its own snapshot, keeping
+			 * execution consistent with that pruning.  We do not recheck plan
+			 * validity here: as for any already-ExecutorStart'd plan, the locks
+			 * held since Bind -- not a validity recheck -- are what make
+			 * execution safe; a non-conflicting invalidation in the gap is
+			 * irrelevant to this execution, and deciding whether to replan for
+			 * the next user is the plancache's job at the next Bind.
+			 *
+			 * When the command counter has moved (e.g. an intervening Execute
+			 * in a pipelined transaction), the Bind-time survivor set may no
+			 * longer match what a fresh prune would choose.  We do not know the
+			 * new set without re-pruning, so we discard the prepared state and
+			 * lock conservatively (all partitions), then fall through to run
+			 * the same plan on a fresh snapshot via the normal path, where
+			 * execution-time pruning decides what to actually scan.  The plan
+			 * itself stays valid-by-lock just as above, so there is no refetch
+			 * and no strategy-change question here.
+			 *
+			 * An eligible plan has exactly one plannable statement, so this
+			 * block runs at most once per portal.
+			 */
+			if (portal->prep_qd != NULL)
+			{
+				QueryDesc  *prep_qd = portal->prep_qd;
+
+				Assert(pstmt->canSetTag);
+				Assert(!active_snapshot_set);
+
+				if (prep_qd->snapshot->curcid == GetCurrentCommandId(false))
+				{
+					PushActiveSnapshot(prep_qd->snapshot);
+					ProcessQuery(pstmt,
+								 portal->sourceText,
+								 portal->portalParams,
+								 portal->queryEnv,
+								 dest, qc,
+								 prep_qd);
+					PopActiveSnapshot();
+					PortalDisposePrepQueryDesc(portal);
+
+					if (log_executor_stats)
+						ShowUsage("EXECUTOR STATISTICS");
+					TRACE_POSTGRESQL_QUERY_EXECUTE_DONE();
+					continue;
+				}
+
+				/*
+				 * Stale survivor set: discard the prepared state and lock
+				 * conservatively, covering whatever a fresh prune might now
+				 * select.  Unlike the fast path above -- where the plan was
+				 * validated at Bind under the survivor locks we still hold --
+				 * here we are taking locks afresh on partitions we did not lock
+				 * at Bind, so we must honor the validity verdict.  In the common
+				 * case the plan is still valid and we run it below on a fresh
+				 * snapshot.  Only if a concurrent invalidation slipped in on a
+				 * previously-unlocked partition in the Bind/Execute gap (a rare
+				 * race, and only reachable in a pipelined transaction) does
+				 * AcquireExecutorLocks() report the plan invalid; it has then
+				 * released the locks, and we cannot safely run or (mid-PortalRun)
+				 * replan-and-redispatch, so we error out and let the client
+				 * retry, which replans at the next Bind.
+				 */
+				PortalDisposePrepQueryDesc(portal);
+
+				/*
+				 * Note that this locks all partitions instead of redoing the
+				 * initial pruning as ExecutorPrepAndLock() would have at
+				 * Bind-time.  That is ok as this is rarely taken path.
+				 */
+                if (!AcquireExecutorLocks(portal->cplan))
+					ereport(ERROR,
+							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+							 errmsg("cached plan was invalidated during execution setup"),
+							 errhint("Retry the statement.")));
+				/* fall through to the normal snapshot + ProcessQuery path */
+			}
+
+			/*
 			 * Must always have a snapshot for plannable queries.  First time
 			 * through, take a new snapshot; for subsequent queries in the
 			 * same portal, just update the snapshot's copy of the command
@@ -1328,7 +1457,8 @@ PortalRunMulti(Portal portal,
 							 portal->sourceText,
 							 portal->portalParams,
 							 portal->queryEnv,
-							 dest, qc);
+							 dest, qc,
+							 NULL);
 			}
 			else
 			{
@@ -1337,7 +1467,8 @@ PortalRunMulti(Portal portal,
 							 portal->sourceText,
 							 portal->portalParams,
 							 portal->queryEnv,
-							 altdest, NULL);
+							 altdest, NULL,
+							 NULL);
 			}
 
 			if (log_executor_stats)
@@ -1851,32 +1982,60 @@ EnsurePortalSnapshotExists(void)
  *		fresh plan if the current one was invalidated during locking.
  *
  * The portal's cplan was obtained with GetCachedPlanNoLock(), so it holds no
- * execution locks yet.  Acquire them conservatively (all relations) and
- * recheck validity.  If the plan was invalidated meanwhile, drop it and fetch
- * a fresh one from portal->plansource; because a CachedPlanSource is
- * backend-local, the refetch rebuilds a freshly planned tree that already
- * holds the planner's locks, so no further lock acquisition is required.
+ * execution locks yet.
+ *
+ * If do_prep is true and the plan is eligible (CachedPlanCanPrep: a
+ * single-statement reused generic plan), perform pruning-aware locking: run
+ * ExecutorPrep() on *prep_qd to determine which partitions survive initial
+ * pruning and lock only those (plus the always-locked relations).  The caller
+ * supplies *prep_qd (a QueryDesc created against the active snapshot); on
+ * success its ->estate holds the prepared, pruned, locked executor state, to
+ * be consumed by ExecutorStart() (PORTAL_ONE_SELECT) or ProcessQuery()
+ * (the DML strategies).
+ *
+ * Otherwise acquire execution locks conservatively (all relations).
+ *
+ * If the plan was invalidated meanwhile, drop it and fetch a fresh one from
+ * portal->plansource.  Because a CachedPlanSource is backend-local, the
+ * refetch rebuilds a freshly planned tree that already holds the planner's
+ * locks, so no further lock acquisition is required; for the prep case we
+ * recreate *prep_qd against the fresh plan so that the later ExecutorStart()
+ * (which sees estate == NULL) performs the prep itself.
+ *
+ * The portal owns the plan refcount directly (owner == NULL), matching how it
+ * was fetched and how PortalReleaseCachedPlan() releases it.
  *
  * Returns true if replanning changed portal->strategy, in which case the
  * caller must redispatch (the fresh plan already holds its locks).  Returns
  * false once the portal's plan is valid and locked.
  */
 static bool
-PortalLockCachedPlan(Portal portal)
+PortalLockCachedPlan(Portal portal, bool do_prep,
+					 ParamListInfo params,
+					 QueryDesc **prep_qd)
 {
 	PortalStrategy start_strategy = portal->strategy;
 
 	Assert(portal->cplan != NULL);
 	Assert(portal->plansource != NULL);
 
-	if (AcquireExecutorLocks(portal->cplan))
+	if (do_prep && CachedPlanCanPrep(portal->cplan, portal->plansource))
+	{
+		Assert(prep_qd && *prep_qd);
+		if (ExecutorPrepAndLock(*prep_qd, portal->resowner, 0,
+								&portal->cplan->is_valid))
+			return false;
+		/* Invalidated during prep; discard the prep state and replan. */
+		ExecutorPrepCleanup(*prep_qd);
+		FreeQueryDesc(*prep_qd);
+		*prep_qd = NULL;
+	}
+	else if (AcquireExecutorLocks(portal->cplan))
 		return false;
 
 	/*
 	 * The plan was invalidated while we were locking it.  Release it and fetch
-	 * a fresh one.  The portal owns the plan refcount directly (owner == NULL),
-	 * matching how it was fetched and how PortalReleaseCachedPlan() releases
-	 * it.
+	 * a fresh one.
 	 */
 	ReleaseCachedPlan(portal->cplan, NULL);
 	portal->cplan = NULL;
@@ -1892,5 +2051,126 @@ PortalLockCachedPlan(Portal portal)
 	if (portal->strategy != start_strategy)
 		return true;
 
+	/*
+	 * Same strategy: the fresh plan already holds the planner's locks.  For
+	 * the prep case, recreate *prep_qd against it (unprepped: estate == NULL);
+	 * ExecutorStart() will run ExecutorPrep() on the fresh plan when the
+	 * QueryDesc is started/consumed.
+	 */
+	if (do_prep && prep_qd)
+	{
+		Assert(list_length(portal->stmts) == 1);
+		*prep_qd = CreateQueryDesc(linitial_node(PlannedStmt, portal->stmts),
+								   portal->sourceText,
+								   GetActiveSnapshot(), InvalidSnapshot,
+								   None_Receiver, params,
+								   portal->queryEnv, 0);
+	}
+
 	return false;
+}
+
+/*
+ * PortalPrepDML
+ *		Acquire execution locks for a DML portal (PORTAL_ONE_RETURNING,
+ *		PORTAL_ONE_MOD_WITH, or PORTAL_MULTI_QUERY) backed by a cached plan.
+ *
+ * When the plan is eligible (CachedPlanCanPrep: a single-statement reused
+ * generic plan), run initial pruning now -- at PortalStart(), which in the
+ * extended query protocol is Bind time -- under a snapshot taken here, and
+ * lock only the surviving partitions.  The prepared QueryDesc, and its
+ * snapshot (registered on portal->resowner so it survives until execution),
+ * are stashed in portal->prep_qd for ProcessQuery() to consume at PortalRun()
+ * (= Execute) time.  PortalRunMulti() applies a command-counter guard there
+ * so that reusing this Bind-time snapshot never changes visibility semantics
+ * relative to taking the snapshot at Execute (see PortalRunMulti()).
+ *
+ * When the plan is not eligible (multi-statement, custom, or freshly built),
+ * lock conservatively via PortalLockCachedPlan().
+ *
+ * Returns true if replanning changed the portal strategy (caller must
+ * redispatch), false once locks are held.
+ */
+static bool
+PortalPrepDML(Portal portal, ParamListInfo params)
+{
+	QueryDesc  *prep_qd;
+
+	if (!portal->cplan)
+		return false;
+
+	if (!CachedPlanCanPrep(portal->cplan, portal->plansource))
+		return PortalLockCachedPlan(portal, false, NULL, NULL);
+
+	/*
+	 * Eligible for pruning-aware locking.  Initial pruning needs an active
+	 * snapshot; take one now and run prep under it.  Execution happens later
+	 * (PortalRun); to reuse this snapshot there -- keeping execution consistent
+	 * with the pruning decision -- register it on the portal's resource owner
+	 * so it outlives this PopActiveSnapshot.  PortalRunMulti() decides at
+	 * execute time whether the snapshot is still usable (see its guard).
+	 */
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	prep_qd = CreateQueryDesc(linitial_node(PlannedStmt, portal->stmts),
+							  portal->sourceText,
+							  GetActiveSnapshot(), InvalidSnapshot,
+							  None_Receiver, params, portal->queryEnv, 0);
+
+	if (PortalLockCachedPlan(portal, true, params, &prep_qd))
+	{
+		/*
+		 * Strategy changed on replan.  PortalLockCachedPlan() already disposed
+		 * of the prep QueryDesc (prep_qd is NULL); just drop the snapshot and
+		 * let the caller redispatch.
+		 */
+		Assert(prep_qd == NULL);
+		PopActiveSnapshot();
+		return true;
+	}
+
+	/*
+	 * prep_qd now holds the prepared, pruned, locked executor state (or, if the
+	 * plan was rebuilt fresh after invalidation, an unprepped QueryDesc over a
+	 * fully planner-locked plan that ExecutorStart() will prep when
+	 * ProcessQuery() consumes it).  Register its snapshot on the portal's
+	 * resource owner so it survives until execution, and stash it.  The
+	 * registration is released when the prep QueryDesc is disposed.
+	 */
+	prep_qd->snapshot = RegisterSnapshotOnOwner(prep_qd->snapshot,
+												portal->resowner);
+	portal->prep_qd = prep_qd;
+
+	PopActiveSnapshot();
+	return false;
+}
+
+/*
+ * PortalDisposePrepQD
+ *		Release a portal's stashed prep QueryDesc, if any.
+ *
+ * Closes the prepared executor state (a no-op if the prep_qd was already
+ * consumed, since ExecutorEnd() nulls estate and ExecutorPrepCleanup() guards
+ * against a NULL estate), unregisters the snapshot reference taken in
+ * PortalPrepDML(), and frees the QueryDesc.  Used after consumption, on the
+ * guard's stale fallback path, and as a backstop in PortalDrop().
+ */
+static void
+PortalDisposePrepQueryDesc(Portal portal)
+{
+	QueryDesc  *qd = portal->prep_qd;
+
+	if (qd == NULL)
+		return;
+
+	portal->prep_qd = NULL;
+
+	/* Close prepared-but-unconsumed executor state, if any. */
+	ExecutorPrepCleanup(qd);
+
+	/* Release the snapshot reference taken in PortalPrepDML(). */
+	if (qd->snapshot != NULL && portal->resowner)
+		UnregisterSnapshotFromOwner(qd->snapshot, portal->resowner);
+
+	FreeQueryDesc(qd);
 }
