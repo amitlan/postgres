@@ -100,7 +100,12 @@ static bool choose_custom_plan(CachedPlanSource *plansource,
 							   ParamListInfo boundParams);
 static double cached_plan_cost(CachedPlan *plan, bool include_planner);
 static Query *QueryListGetPrimaryStmt(List *stmts);
-static void AcquireExecutorLocks(List *stmt_list, bool acquire);
+static CachedPlan *GetCachedPlanInternal(CachedPlanSource *plansource,
+										 ParamListInfo boundParams,
+										 ResourceOwner owner,
+										 QueryEnvironment *queryEnv,
+										 bool *is_reused);
+static void AcquireExecutorLocksInt(List *stmt_list, bool acquire);
 static void AcquirePlannerLocks(List *stmt_list, bool acquire);
 static void ScanQueryForLocks(Query *parsetree, bool acquire);
 static bool ScanQueryWalker(Node *node, bool *acquire);
@@ -945,8 +950,11 @@ RevalidateCachedQuery(CachedPlanSource *plansource,
  * Caller must have already called RevalidateCachedQuery to verify that the
  * querytree is up to date.
  *
- * On a "true" return, we have acquired the locks needed to run the plan.
- * (We must do this for the "true" result to be race-condition-free.)
+ * On a "true" return, the generic plan is valid for reuse, but no execution
+ * locks have been taken.  Acquiring those locks (and rechecking validity
+ * afterward, to close the race) is the caller's responsibility, via
+ * AcquireExecutorLocks().  This is what makes pruning-aware locking possible:
+ * a caller can run initial pruning between this check and lock acquisition.
  */
 static bool
 CheckCachedPlan(CachedPlanSource *plansource)
@@ -972,8 +980,10 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		plan->is_valid = false;
 
 	/*
-	 * If it appears valid, acquire locks and recheck; this is much the same
-	 * logic as in RevalidateCachedQuery, but for a plan.
+	 * If it appears valid, recheck the transient-plan condition; the caller
+	 * will acquire execution locks and recheck plan->is_valid afterward (in
+	 * AcquireExecutorLocks) to close the invalidation race that lock
+	 * acquisition can expose.
 	 */
 	if (plan->is_valid)
 	{
@@ -982,8 +992,6 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		 * plansource; so no need to fear it disappears under us here.
 		 */
 		Assert(plan->refcount > 0);
-
-		AcquireExecutorLocks(plan->stmt_list, true);
 
 		/*
 		 * If plan was transient, check to see if TransactionXmin has
@@ -1000,12 +1008,9 @@ CheckCachedPlan(CachedPlanSource *plansource)
 		 */
 		if (plan->is_valid)
 		{
-			/* Successfully revalidated and locked the query. */
+			/* Plan is reusable; caller must still lock and recheck. */
 			return true;
 		}
-
-		/* Oops, the race case happened.  Release useless locks. */
-		AcquireExecutorLocks(plan->stmt_list, false);
 	}
 
 	/*
@@ -1276,14 +1281,17 @@ cached_plan_cost(CachedPlan *plan, bool include_planner)
 }
 
 /*
- * GetCachedPlan: get a cached plan from a CachedPlanSource.
+ * GetCachedPlan: get a cached plan from a CachedPlanSource, ready to execute.
  *
  * This function hides the logic that decides whether to use a generic
  * plan or a custom plan for the given parameters: the caller does not know
  * which it will get.
  *
- * On return, the plan is valid and we have sufficient locks to begin
- * execution.
+ * On return, the plan is valid and we have acquired the execution locks
+ * needed to begin execution; the caller need do nothing further about
+ * locking.  This is the conservative entry point and preserves the historical
+ * GetCachedPlan() contract -- every caller that does not implement its own
+ * (e.g. pruning-aware) locking should continue to use it unchanged.
  *
  * On return, the refcount of the plan has been incremented; a later
  * ReleaseCachedPlan() call is expected.  If "owner" is not NULL then
@@ -1297,9 +1305,78 @@ CachedPlan *
 GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 			  ResourceOwner owner, QueryEnvironment *queryEnv)
 {
+	CachedPlan *plan;
+	bool		is_reused;
+
+	plan = GetCachedPlanInternal(plansource, boundParams, owner, queryEnv,
+								 &is_reused);
+
+	/*
+	 * A reused generic plan is returned without execution locks (see
+	 * CheckCachedPlan()); acquire them now and recheck validity to close the
+	 * invalidation race.  Freshly built plans (a new generic plan or a custom
+	 * plan) already hold the planner's locks, so they need nothing here.
+	 *
+	 * If the plan was invalidated while we were locking it, drop it and fetch
+	 * again.  Because a CachedPlanSource is backend-local, the refetch sees
+	 * the now-invalid generic plan and rebuilds a fresh one that already holds
+	 * its locks, so a single retry suffices.
+	 */
+	if (is_reused && !AcquireExecutorLocks(plan))
+	{
+		ReleaseCachedPlan(plan, owner);
+		plan = GetCachedPlanInternal(plansource, boundParams, owner, queryEnv,
+									 &is_reused);
+		Assert(!is_reused);
+	}
+
+	return plan;
+}
+
+/*
+ * GetCachedPlanNoLock: get a cached plan without acquiring execution locks.
+ *
+ * Identical to GetCachedPlan() except that no execution locks are taken: on
+ * return the plan is valid as far as parse-time locks and cache validity are
+ * concerned, but the caller MUST acquire execution locks (and recheck
+ * validity) before executing it -- either conservatively with
+ * AcquireExecutorLocks(), or with a pruning-aware scheme of its own.
+ *
+ * This is the opt-in entry point for callers that do their own work
+ * (such as initial partition pruning) between plan retrieval and lock
+ * acquisition.  Such callers own the lock/recheck/retry loop; see
+ * PortalLockCachedPlan() and ExplainExecuteQuery() for examples.
+ *
+ * Refcount and memory-context behavior match GetCachedPlan().
+ */
+CachedPlan *
+GetCachedPlanNoLock(CachedPlanSource *plansource, ParamListInfo boundParams,
+					ResourceOwner owner, QueryEnvironment *queryEnv)
+{
+	return GetCachedPlanInternal(plansource, boundParams, owner, queryEnv,
+								 NULL);
+}
+
+/*
+ * GetCachedPlanInternal: shared implementation behind GetCachedPlan() and
+ * GetCachedPlanNoLock().
+ *
+ * Decides between a generic and a custom plan, building one if necessary, and
+ * returns it with its refcount incremented (and reported to "owner" if given).
+ * No execution locks are taken here.  If "is_reused" is not NULL, it is set to
+ * true iff the returned plan is a pre-existing generic plan that was reused
+ * (and therefore still needs execution locks), and false if the plan was
+ * freshly built (and therefore already holds the planner's locks).
+ */
+static CachedPlan *
+GetCachedPlanInternal(CachedPlanSource *plansource, ParamListInfo boundParams,
+					  ResourceOwner owner, QueryEnvironment *queryEnv,
+					  bool *is_reused)
+{
 	CachedPlan *plan = NULL;
 	List	   *qlist;
 	bool		customplan;
+	bool		reused = false;
 	ListCell   *lc;
 
 	/* Assert caller is doing things in a sane order */
@@ -1322,6 +1399,8 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 			/* We want a generic plan, and we already have a valid one */
 			plan = plansource->gplan;
 			Assert(plan->magic == CACHEDPLAN_MAGIC);
+			/* Reused generic plans still need execution locks from caller */
+			reused = true;
 		}
 		else
 		{
@@ -1409,6 +1488,9 @@ GetCachedPlan(CachedPlanSource *plansource, ParamListInfo boundParams,
 
 		pstmt->planOrigin = customplan ? PLAN_STMT_CACHE_CUSTOM : PLAN_STMT_CACHE_GENERIC;
 	}
+
+	if (is_reused)
+		*is_reused = reused;
 
 	return plan;
 }
@@ -1904,11 +1986,14 @@ QueryListGetPrimaryStmt(List *stmts)
 }
 
 /*
- * AcquireExecutorLocks: acquire locks needed for execution of a cached plan;
- * or release them if acquire is false.
+ * AcquireExecutorLocksInt: acquire locks needed for execution of a cached
+ * plan; or release them if acquire is false.
+ *
+ * This locks (or unlocks) all relations in the given statement list's range
+ * tables -- the conservative, lock-everything behavior.
  */
 static void
-AcquireExecutorLocks(List *stmt_list, bool acquire)
+AcquireExecutorLocksInt(List *stmt_list, bool acquire)
 {
 	ListCell   *lc1;
 
@@ -1953,6 +2038,32 @@ AcquireExecutorLocks(List *stmt_list, bool acquire)
 				UnlockRelationOid(rte->relid, rte->rellockmode);
 		}
 	}
+}
+
+/*
+ * AcquireExecutorLocks
+ *		Acquire execution locks on all relations in a cached plan, then
+ *		recheck that the plan is still valid.
+ *
+ * Returns true if the plan is still valid after locking.  Returns false if the
+ * plan was invalidated while locks were being acquired (lock acquisition runs
+ * AcceptInvalidationMessages, which can fire the plancache invalidation
+ * callbacks); in that case the locks just taken have been released and the
+ * caller must discard this plan and obtain a fresh one.
+ *
+ * This is the conservative, lock-everything counterpart used by callers of
+ * GetCachedPlanNoLock() that do not implement pruning-aware locking.
+ */
+bool
+AcquireExecutorLocks(CachedPlan *cplan)
+{
+	AcquireExecutorLocksInt(cplan->stmt_list, true);
+	if (!cplan->is_valid)
+	{
+		AcquireExecutorLocksInt(cplan->stmt_list, false);
+		return false;
+	}
+	return true;
 }
 
 /*

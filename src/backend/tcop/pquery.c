@@ -59,6 +59,7 @@ static uint64 DoPortalRunFetch(Portal portal,
 							   long count,
 							   DestReceiver *dest);
 static void DoPortalRewind(Portal portal);
+static bool PortalLockCachedPlan(Portal portal);
 
 
 /*
@@ -463,6 +464,8 @@ PortalStart(Portal portal, ParamListInfo params,
 		 */
 		portal->strategy = ChoosePortalStrategy(portal->stmts);
 
+restart:
+
 		/*
 		 * Fire her up according to the strategy
 		 */
@@ -475,6 +478,22 @@ PortalStart(Portal portal, ParamListInfo params,
 					PushActiveSnapshot(snapshot);
 				else
 					PushActiveSnapshot(GetTransactionSnapshot());
+
+				/*
+				 * If the portal is backed by a cached plan, acquire execution
+				 * locks now (GetCachedPlanNoLock() left them to us).  If the
+				 * plan is invalidated during locking, PortalLockCachedPlan()
+				 * fetches a fresh one; should that change the portal strategy,
+				 * pop the snapshot we just pushed and redispatch.
+				 */
+				if (portal->cplan)
+				{
+					if (PortalLockCachedPlan(portal))
+					{
+						PopActiveSnapshot();
+						goto restart;
+					}
+				}
 
 				/*
 				 * We could remember the snapshot in portal->portalSnapshot,
@@ -537,6 +556,19 @@ PortalStart(Portal portal, ParamListInfo params,
 			case PORTAL_ONE_MOD_WITH:
 
 				/*
+				 * Acquire execution locks for a cached-plan-backed portal.
+				 * These strategies execute via PortalRunMulti()/ProcessQuery()
+				 * at PortalRun() time, so no snapshot is active here; locking
+				 * is conservative (all relations).  A strategy change on
+				 * replan requires redispatch.
+				 */
+				if (portal->cplan)
+				{
+					if (PortalLockCachedPlan(portal))
+						goto restart;
+				}
+
+				/*
 				 * We don't start the executor until we are told to run the
 				 * portal.  We do need to set up the result tupdesc.
 				 */
@@ -559,6 +591,18 @@ PortalStart(Portal portal, ParamListInfo params,
 			case PORTAL_UTIL_SELECT:
 
 				/*
+				 * A prepared utility statement may be backed by a cached plan;
+				 * acquire its execution locks conservatively, matching the
+				 * historical GetCachedPlan() behavior.  (PortalRunUtility will
+				 * still take whatever additional locks the utility needs.)
+				 */
+				if (portal->cplan)
+				{
+					if (PortalLockCachedPlan(portal))
+						goto restart;
+				}
+
+				/*
 				 * We don't set snapshot here, because PortalRunUtility will
 				 * take care of it if needed.
 				 */
@@ -578,6 +622,20 @@ PortalStart(Portal portal, ParamListInfo params,
 				break;
 
 			case PORTAL_MULTI_QUERY:
+
+				/*
+				 * Acquire execution locks for a cached-plan-backed portal.
+				 * Multi-statement plans always use conservative locking:
+				 * pruning-aware locking is not applicable because
+				 * PortalRunMulti() executes the statements sequentially with a
+				 * CommandCounterIncrement between them.
+				 */
+				if (portal->cplan)
+				{
+					if (PortalLockCachedPlan(portal))
+						goto restart;
+				}
+
 				/* Need do nothing now */
 				portal->tupDesc = NULL;
 				break;
@@ -1785,4 +1843,54 @@ EnsurePortalSnapshotExists(void)
 	PushActiveSnapshotWithLevel(GetTransactionSnapshot(), portal->createLevel);
 	/* PushActiveSnapshotWithLevel might have copied the snapshot */
 	portal->portalSnapshot = GetActiveSnapshot();
+}
+
+/*
+ * PortalLockCachedPlan
+ *		Acquire execution locks for a cached-plan-backed portal, refetching a
+ *		fresh plan if the current one was invalidated during locking.
+ *
+ * The portal's cplan was obtained with GetCachedPlanNoLock(), so it holds no
+ * execution locks yet.  Acquire them conservatively (all relations) and
+ * recheck validity.  If the plan was invalidated meanwhile, drop it and fetch
+ * a fresh one from portal->plansource; because a CachedPlanSource is
+ * backend-local, the refetch rebuilds a freshly planned tree that already
+ * holds the planner's locks, so no further lock acquisition is required.
+ *
+ * Returns true if replanning changed portal->strategy, in which case the
+ * caller must redispatch (the fresh plan already holds its locks).  Returns
+ * false once the portal's plan is valid and locked.
+ */
+static bool
+PortalLockCachedPlan(Portal portal)
+{
+	PortalStrategy start_strategy = portal->strategy;
+
+	Assert(portal->cplan != NULL);
+	Assert(portal->plansource != NULL);
+
+	if (AcquireExecutorLocks(portal->cplan))
+		return false;
+
+	/*
+	 * The plan was invalidated while we were locking it.  Release it and fetch
+	 * a fresh one.  The portal owns the plan refcount directly (owner == NULL),
+	 * matching how it was fetched and how PortalReleaseCachedPlan() releases
+	 * it.
+	 */
+	ReleaseCachedPlan(portal->cplan, NULL);
+	portal->cplan = NULL;
+	portal->stmts = NIL;
+
+	portal->cplan = GetCachedPlanNoLock(portal->plansource,
+										portal->portalParams,
+										NULL,
+										portal->queryEnv);
+	portal->stmts = portal->cplan->stmt_list;
+	portal->strategy = ChoosePortalStrategy(portal->stmts);
+
+	if (portal->strategy != start_strategy)
+		return true;
+
+	return false;
 }

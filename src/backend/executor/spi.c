@@ -1659,8 +1659,12 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 	 * plancache refcount.
 	 */
 
-	/* Replan if needed, and increment plan refcount for portal */
-	cplan = GetCachedPlan(plansource, paramLI, NULL, _SPI_current->queryEnv);
+	/*
+	 * Replan if needed, and increment plan refcount for portal.  Like the
+	 * other portal-backed callers, execution locks are left to PortalStart(),
+	 * so fetch without them.
+	 */
+	cplan = GetCachedPlanNoLock(plansource, paramLI, NULL, _SPI_current->queryEnv);
 	stmt_list = cplan->stmt_list;
 
 	if (!plan->saved)
@@ -1686,6 +1690,7 @@ SPI_cursor_open_internal(const char *name, SPIPlanPtr plan,
 					  query_string,
 					  plansource->commandTag,
 					  stmt_list,
+					  cplan ? plansource : NULL,
 					  cplan);
 
 	/*

@@ -265,8 +265,17 @@ CreateNewPortal(void)
  * be a pointer to a constant string, since it is not copied.
  *
  * If cplan is provided, then it is a cached plan containing the stmts, and
- * the caller must have done GetCachedPlan(), causing a refcount increment.
- * The refcount will be released when the portal is destroyed.
+ * the caller must have done GetCachedPlan() (or GetCachedPlanNoLock()),
+ * causing a refcount increment.  The refcount will be released when the
+ * portal is destroyed.
+ *
+ * If plansource is provided, it is the CachedPlanSource that produced cplan.
+ * It is retained so that, if cplan was obtained via GetCachedPlanNoLock() and
+ * is later found to have been invalidated while acquiring execution locks,
+ * PortalStart()/PortalLockCachedPlan() can fetch a fresh plan from it without
+ * the caller having to thread it through.  Pass NULL when cplan is NULL or
+ * when the plan was obtained with the locking GetCachedPlan() entry point and
+ * no refetch is needed.
  *
  * If cplan is NULL, then it is the caller's responsibility to ensure that
  * the passed plan trees have adequate lifetime.  Typically this is done by
@@ -286,6 +295,7 @@ PortalDefineQuery(Portal portal,
 				  const char *sourceText,
 				  CommandTag commandTag,
 				  List *stmts,
+				  CachedPlanSource *plansource,
 				  CachedPlan *cplan)
 {
 	Assert(PortalIsValid(portal));
@@ -299,6 +309,7 @@ PortalDefineQuery(Portal portal,
 	portal->commandTag = commandTag;
 	SetQueryCompletion(&portal->qc, commandTag, 0);
 	portal->stmts = stmts;
+	portal->plansource = plansource;
 	portal->cplan = cplan;
 	portal->status = PORTAL_DEFINED;
 }
@@ -321,6 +332,13 @@ PortalReleaseCachedPlan(Portal portal)
 		 * try to examine the Portal later.
 		 */
 		portal->stmts = NIL;
+
+		/*
+		 * portal->plansource only borrows the CachedPlanSource pointer (it is
+		 * owned by the prepared statement or SPI plan); drop the borrowed
+		 * reference now that there is no cplan left to refetch.
+		 */
+		portal->plansource = NULL;
 	}
 }
 

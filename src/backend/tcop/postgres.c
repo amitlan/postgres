@@ -1243,6 +1243,7 @@ exec_simple_query(const char *query_string)
 						  query_string,
 						  commandTag,
 						  plantree_list,
+						  NULL,
 						  NULL);
 
 		/*
@@ -2028,20 +2029,26 @@ exec_bind_message(StringInfo input_message)
 	 * Obtain a plan from the CachedPlanSource.  Any cruft from (re)planning
 	 * will be generated in MessageContext.  The plan refcount will be
 	 * assigned to the Portal, so it will be released at portal destruction.
+	 *
+	 * Execution locks are deliberately NOT acquired here: PortalStart() takes
+	 * them (pruning-aware where eligible, conservative otherwise), which is
+	 * why we use GetCachedPlanNoLock() and hand the CachedPlanSource to the
+	 * portal so it can refetch on invalidation.
 	 */
-	cplan = GetCachedPlan(psrc, params, NULL, NULL);
+	cplan = GetCachedPlanNoLock(psrc, params, NULL, NULL);
 
 	/*
 	 * Now we can define the portal.
 	 *
 	 * DO NOT put any code that could possibly throw an error between the
-	 * above GetCachedPlan call and here.
+	 * above GetCachedPlanNoLock call and here.
 	 */
 	PortalDefineQuery(portal,
 					  saved_stmt_name,
 					  query_string,
 					  psrc->commandTag,
 					  cplan->stmt_list,
+					  psrc,
 					  cplan);
 
 	/* Portal is defined, set the plan ID based on its contents. */

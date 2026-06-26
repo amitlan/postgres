@@ -194,19 +194,25 @@ ExecuteQuery(ParseState *pstate,
 	query_string = MemoryContextStrdup(portal->portalContext,
 									   entry->plansource->query_string);
 
-	/* Replan if needed, and increment plan refcount for portal */
-	cplan = GetCachedPlan(entry->plansource, paramLI, NULL, NULL);
+	/*
+	 * Replan if needed, and increment plan refcount for portal.  Execution
+	 * locks are deferred to PortalStart(), so fetch without them and hand the
+	 * CachedPlanSource to the portal for refetch-on-invalidation.
+	 */
+	cplan = GetCachedPlanNoLock(entry->plansource, paramLI, NULL, NULL);
 	plan_list = cplan->stmt_list;
 
 	/*
 	 * DO NOT add any logic that could possibly throw an error between
-	 * GetCachedPlan and PortalDefineQuery, or you'll leak the plan refcount.
+	 * GetCachedPlanNoLock and PortalDefineQuery, or you'll leak the plan
+	 * refcount.
 	 */
 	PortalDefineQuery(portal,
 					  NULL,
 					  query_string,
 					  entry->plansource->commandTag,
 					  plan_list,
+					  entry->plansource,
 					  cplan);
 
 	/*
@@ -632,8 +638,14 @@ ExplainExecuteQuery(ExecuteStmt *execstmt, IntoClause *into, ExplainState *es,
 	}
 
 	/* Replan if needed, and acquire a transient refcount */
-	cplan = GetCachedPlan(entry->plansource, paramLI,
-						  CurrentResourceOwner, pstate->p_queryEnv);
+	for (;;)
+	{
+		cplan = GetCachedPlanNoLock(entry->plansource, paramLI,
+								   CurrentResourceOwner, pstate->p_queryEnv);
+		if (AcquireExecutorLocks(cplan))
+			break;
+		ReleaseCachedPlan(cplan, CurrentResourceOwner);
+	}
 
 	INSTR_TIME_SET_CURRENT(planduration);
 	INSTR_TIME_SUBTRACT(planduration, planstart);
