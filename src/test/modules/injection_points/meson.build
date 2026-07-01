@@ -51,6 +51,7 @@ tests += {
       'repack_toast',
       'syscache-update-pruned',
       'heap_lock_update',
+      'cached_plan_relock',
     ],
     'runningcheck': false, # see syscache-update-pruned
     # Some tests wait for all snapshots, so avoid parallel execution

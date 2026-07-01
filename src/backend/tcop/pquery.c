@@ -25,6 +25,7 @@
 #include "pg_trace.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
@@ -1363,7 +1364,8 @@ PortalRunMulti(Portal portal,
 				Assert(pstmt->canSetTag);
 				Assert(!active_snapshot_set);
 
-				if (prep_qd->snapshot->curcid == GetCurrentCommandId(false))
+				if (prep_qd->snapshot->curcid == GetCurrentCommandId(false) &&
+					!IS_INJECTION_POINT_ATTACHED("cached-plan-relock"))
 				{
 					PushActiveSnapshot(prep_qd->snapshot);
 					ProcessQuery(pstmt,
@@ -1398,6 +1400,16 @@ PortalRunMulti(Portal portal,
 				 * retry, which replans at the next Bind.
 				 */
 				PortalDisposePrepQueryDesc(portal);
+
+				/*
+				 * Test hook: a concurrent invalidation must be able to land
+				 * here, between discarding the Bind-time prep and the
+				 * conservative re-lock, to exercise the serialization_failure
+				 * path below.  Attaching this point also forces the fast path
+				 * above to be skipped, so an ordinary (non-pipelined) EXECUTE
+				 * reaches this branch.  Compiles out without injection points.
+				 */
+				INJECTION_POINT("cached-plan-relock", NULL);
 
 				/*
 				 * Note that this locks all partitions instead of redoing the

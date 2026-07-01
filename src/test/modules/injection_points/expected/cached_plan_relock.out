@@ -1,0 +1,55 @@
+Parsed test spec with 2 sessions
+
+starting permutation: arm_notice exec
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+step arm_notice: SELECT injection_points_attach('cached-plan-relock', 'notice');
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+s1: NOTICE:  notice triggered for injection point cached-plan-relock
+step exec: EXECUTE p (1);
+a
+-
+1
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
+
+starting permutation: arm_wait exec invalidate wakeup noop
+injection_points_set_local
+--------------------------
+                          
+(1 row)
+
+step arm_wait: SELECT injection_points_attach('cached-plan-relock', 'wait');
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step exec: EXECUTE p (1); <waiting ...>
+step invalidate: CREATE INDEX cpr3_a_idx ON cpr3 (a);
+step wakeup: SELECT injection_points_wakeup('cached-plan-relock');
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step exec: <... completed>
+ERROR:  cached plan was invalidated during execution setup
+step noop: 
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
