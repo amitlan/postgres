@@ -4931,8 +4931,18 @@ transformJsonBehavior(ParseState *pstate, JsonExpr *jsexpr,
 	 *
 	 * For other non-NULL expressions, try to find a cast and error out if one
 	 * is not found.
+	 *
+	 * We must coerce even when the expression's type already matches the
+	 * RETURNING type's base type, as long as the RETURNING type carries a
+	 * type modifier (e.g. numeric(4,1) or varchar(3)).  The cast below is
+	 * what enforces the typmod, so skipping it for the matching-type case
+	 * would let a DEFAULT expression yield a value that violates the declared
+	 * RETURNING type.  (A NULL constant needs no typmod enforcement.)
 	 */
-	if (expr && exprType(expr) != returning->typid)
+	if (expr &&
+		(exprType(expr) != returning->typid ||
+		 (returning->typmod >= 0 &&
+		  !(IsA(expr, Const) && ((Const *) expr)->constisnull))))
 	{
 		bool		isnull = (IsA(expr, Const) && ((Const *) expr)->constisnull);
 
