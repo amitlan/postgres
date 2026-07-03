@@ -993,6 +993,133 @@ tts_buffer_heap_store_tuple(TupleTableSlot *slot, HeapTuple tuple,
 }
 
 /*
+ * clear -- release buffer pin and reset batch state.
+ */
+static void
+tts_batch_buffer_heap_clear(TupleTableSlot *slot)
+{
+	BatchBufferHeapTupleTableSlot *bslot =
+		(BatchBufferHeapTupleTableSlot *) slot;
+	BufferHeapTupleTableSlot *bhslot = &bslot->base;
+
+
+	if (TTS_SHOULDFREE(slot))
+	{
+		/* batch slots may still have a valid buffer here */
+		heap_freetuple(bhslot->base.tuple);
+		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
+	}
+
+	if (BufferIsValid(bhslot->buffer))
+	{
+		ReleaseBuffer(bhslot->buffer);
+		bhslot->buffer = InvalidBuffer;
+	}
+	bhslot->base.tuple = NULL;
+	bhslot->base.off = 0;
+
+	bslot->tuples = NULL;
+	bslot->ntuples = 0;
+	bslot->cindex = -1;
+
+	slot->tts_nvalid = 0;
+	slot->tts_flags |= TTS_FLAG_EMPTY;
+	ItemPointerSetInvalid(&slot->tts_tid);
+}
+
+static void
+tts_batch_buffer_heap_materialize(TupleTableSlot *slot)
+{
+	BatchBufferHeapTupleTableSlot *bslot =
+		(BatchBufferHeapTupleTableSlot *) slot;
+	BufferHeapTupleTableSlot *bhslot = &bslot->base;
+	HeapTupleTableSlot *hslot = &bhslot->base;
+	MemoryContext oldContext;
+
+	Assert(!TTS_EMPTY(slot));
+
+	/* already materialized */
+	if (TTS_SHOULDFREE(slot))
+		return;
+
+	oldContext = MemoryContextSwitchTo(slot->tts_mcxt);
+
+	hslot->off = 0;
+	slot->tts_nvalid = 0;
+
+	if (!hslot->tuple)
+	{
+		hslot->tuple = heap_form_tuple(slot->tts_tupleDescriptor,
+									   slot->tts_values,
+									   slot->tts_isnull);
+	}
+	else
+	{
+		hslot->tuple = heap_copytuple(hslot->tuple);
+
+		/*
+		 * Unlike the non-batch case, do NOT release the buffer pin.
+		 * The remaining tuples in the batch still have t_data pointing
+		 * into the pinned page.  The pin is released when the slot
+		 * is cleared after the batch is fully consumed.
+		 */
+	}
+
+	slot->tts_flags |= TTS_FLAG_SHOULDFREE;
+	MemoryContextSwitchTo(oldContext);
+}
+
+/*
+ * tts_batch_buffer_heap_next -- advance to the next tuple in the batch.
+ *
+ * Points the underlying BufferHeapTupleTableSlot at tuples[cursor]
+ * and bumps the cursor.  Returns false when the batch is exhausted.
+ */
+static bool
+tts_batch_buffer_heap_next(TupleTableSlot *slot, ScanDirection direction)
+{
+	BatchBufferHeapTupleTableSlot *bslot =
+		(BatchBufferHeapTupleTableSlot *) slot;
+	HeapTupleTableSlot *hslot = &bslot->base.base;
+	int			dir = (int) direction;		/* +1 forward, -1 backward */
+	int			next;
+
+	Assert(direction != NoMovementScanDirection);
+
+	/*
+	 * Resume relative to the last-returned tuple, mirroring
+	 * heapgettup_pagemode()'s rs_cindex + dir logic.  This keeps the
+	 * iteration correct across a scan-direction change within a batch:
+	 * after returning index i, a forward step yields i+1 and a backward
+	 * step yields i-1, regardless of how the batch was first entered.
+	 */
+	next = bslot->cindex + dir;
+
+	if (next < 0 || next >= bslot->ntuples)
+		return false;
+
+	/*
+	 * If the slot was materialized (e.g. by a parent node), free the
+	 * palloc'd copy before overwriting the pointer.
+	 */
+	if (TTS_SHOULDFREE(slot))
+	{
+		heap_freetuple(hslot->tuple);
+		slot->tts_flags &= ~TTS_FLAG_SHOULDFREE;
+	}
+
+	hslot->tuple = &bslot->tuples[next];
+	hslot->off = 0;
+	bslot->cindex = next;
+
+	slot->tts_nvalid = 0;
+	slot->tts_flags &= ~TTS_FLAG_EMPTY;
+	slot->tts_tid = hslot->tuple->t_self;
+
+	return true;
+}
+
+/*
  * slot_deform_heap_tuple
  *		Given a TupleTableSlot, extract data from the slot's physical tuple
  *		into its Datum/isnull arrays.  Data is extracted up through the
@@ -1281,7 +1408,8 @@ const TupleTableSlotOps TTSOpsVirtual = {
 	.get_heap_tuple = NULL,
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_virtual_copy_heap_tuple,
-	.copy_minimal_tuple = tts_virtual_copy_minimal_tuple
+	.copy_minimal_tuple = tts_virtual_copy_minimal_tuple,
+	.batch_next = NULL
 };
 
 const TupleTableSlotOps TTSOpsHeapTuple = {
@@ -1299,7 +1427,8 @@ const TupleTableSlotOps TTSOpsHeapTuple = {
 	/* A heap tuple table slot can not "own" a minimal tuple. */
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_heap_copy_heap_tuple,
-	.copy_minimal_tuple = tts_heap_copy_minimal_tuple
+	.copy_minimal_tuple = tts_heap_copy_minimal_tuple,
+	.batch_next = NULL
 };
 
 const TupleTableSlotOps TTSOpsMinimalTuple = {
@@ -1317,7 +1446,8 @@ const TupleTableSlotOps TTSOpsMinimalTuple = {
 	.get_heap_tuple = NULL,
 	.get_minimal_tuple = tts_minimal_get_minimal_tuple,
 	.copy_heap_tuple = tts_minimal_copy_heap_tuple,
-	.copy_minimal_tuple = tts_minimal_copy_minimal_tuple
+	.copy_minimal_tuple = tts_minimal_copy_minimal_tuple,
+	.batch_next = NULL
 };
 
 const TupleTableSlotOps TTSOpsBufferHeapTuple = {
@@ -1335,9 +1465,29 @@ const TupleTableSlotOps TTSOpsBufferHeapTuple = {
 	/* A buffer heap tuple table slot can not "own" a minimal tuple. */
 	.get_minimal_tuple = NULL,
 	.copy_heap_tuple = tts_buffer_heap_copy_heap_tuple,
-	.copy_minimal_tuple = tts_buffer_heap_copy_minimal_tuple
+	.copy_minimal_tuple = tts_buffer_heap_copy_minimal_tuple,
+	.batch_next = NULL
 };
 
+/*
+ * Everything except clear(), materialize(), batch_next() shared with
+ * BufferHeapTuple.
+ */
+const TupleTableSlotOps TTSOpsBatchBufferHeapTuple = {
+	.base_slot_size = sizeof(BatchBufferHeapTupleTableSlot),
+	.init = tts_buffer_heap_init,
+	.release = tts_buffer_heap_release,
+	.clear = tts_batch_buffer_heap_clear,
+	.getsomeattrs = tts_buffer_heap_getsomeattrs,
+	.getsysattr = tts_buffer_heap_getsysattr,
+	.materialize = tts_batch_buffer_heap_materialize,
+	.copyslot = tts_buffer_heap_copyslot,
+	.get_heap_tuple = tts_buffer_heap_get_heap_tuple,
+	.get_minimal_tuple = NULL,
+	.copy_heap_tuple = tts_buffer_heap_copy_heap_tuple,
+	.copy_minimal_tuple = tts_buffer_heap_copy_minimal_tuple,
+	.batch_next = tts_batch_buffer_heap_next
+};
 
 /* ----------------------------------------------------------------
  *				  tuple table create/delete functions
@@ -1706,6 +1856,46 @@ ExecStorePinnedBufferHeapTuple(HeapTuple tuple,
 	slot->tts_tableOid = tuple->t_tableOid;
 
 	return slot;
+}
+
+/*
+ * ExecStoreBatchBufferHeapTuples -- load a batch into a
+ * BatchBufferHeapTupleTableSlot.
+ *
+ * tuples[] must remain valid (buffer pinned) for the slot's lifetime.
+ * No copy -- the slot takes a pointer and a count.
+ */
+void
+ExecStoreBatchBufferHeapTuples(HeapTupleData *tuples,
+							   int ntuples,
+							   Buffer buffer,
+							   ScanDirection direction,
+							   TupleTableSlot *slot)
+{
+	BatchBufferHeapTupleTableSlot *bslot =
+		(BatchBufferHeapTupleTableSlot *) slot;
+	BufferHeapTupleTableSlot *bhslot = &bslot->base;
+
+	Assert(ntuples > 0);
+
+	bslot->tuples = tuples;
+	bslot->ntuples = ntuples;
+
+	/*
+	 * Position the cursor just before the first tuple to return, so that
+	 * the first batch_next (which advances by the scan direction) lands on
+	 * the correct edge: index 0 for a forward scan, ntuples-1 for backward.
+	 */
+	if (ScanDirectionIsBackward(direction))
+		bslot->cindex = ntuples;	/* ntuples + (-1) = ntuples - 1 */
+	else
+		bslot->cindex = -1;			/* -1 + 1 = 0 */
+
+	if (BufferIsValid(bhslot->buffer))
+		ReleaseBuffer(bhslot->buffer);
+
+	bhslot->buffer = buffer;
+	IncrBufferRefCount(buffer);
 }
 
 /*

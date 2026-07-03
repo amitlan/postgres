@@ -79,6 +79,11 @@ heapam_slot_callbacks(Relation relation)
 	return &TTSOpsBufferHeapTuple;
 }
 
+static const TupleTableSlotOps *
+heap_batch_slot_callbacks(Relation rel)
+{
+	return &TTSOpsBatchBufferHeapTuple;
+}
 
 /* ------------------------------------------------------------------------
  * Callbacks for non-modifying operations on individual tuples for heap AM
@@ -2293,7 +2298,7 @@ heapam_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
 			ExecStoreBufferHeapTuple(tuple, slot, hscan->rs_cbuf);
 
 			/* Count successfully-fetched tuples as heap fetches */
-			pgstat_count_heap_getnext(scan->rs_rd);
+			pgstat_count_heap_getnext(scan->rs_rd, 1);
 
 			return true;
 		}
@@ -2654,11 +2659,13 @@ static const TableAmRoutine heapam_methods = {
 	.type = T_TableAmRoutine,
 
 	.slot_callbacks = heapam_slot_callbacks,
+	.batch_slot_callbacks = heap_batch_slot_callbacks,
 
 	.scan_begin = heap_beginscan,
 	.scan_end = heap_endscan,
 	.scan_rescan = heap_rescan,
 	.scan_getnextslot = heap_getnextslot,
+	.scan_getnextbatch = heap_getnextbatch,
 
 	.scan_set_tidrange = heap_set_tidrange,
 	.scan_getnextslot_tidrange = heap_getnextslot_tidrange,

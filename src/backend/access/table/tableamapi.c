@@ -45,6 +45,8 @@ GetTableAmRoutine(Oid amhandler)
 	Assert(routine->scan_end != NULL);
 	Assert(routine->scan_rescan != NULL);
 	Assert(routine->scan_getnextslot != NULL);
+	Assert(routine->scan_getnextbatch != NULL);
+	Assert(routine->batch_slot_callbacks != NULL);
 
 	Assert(routine->parallelscan_estimate != NULL);
 	Assert(routine->parallelscan_initialize != NULL);

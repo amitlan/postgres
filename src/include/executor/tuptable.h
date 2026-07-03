@@ -260,11 +260,13 @@ extern PGDLLIMPORT const TupleTableSlotOps TTSOpsVirtual;
 extern PGDLLIMPORT const TupleTableSlotOps TTSOpsHeapTuple;
 extern PGDLLIMPORT const TupleTableSlotOps TTSOpsMinimalTuple;
 extern PGDLLIMPORT const TupleTableSlotOps TTSOpsBufferHeapTuple;
+extern PGDLLIMPORT const TupleTableSlotOps TTSOpsBatchBufferHeapTuple;
 
 #define TTS_IS_VIRTUAL(slot) ((slot)->tts_ops == &TTSOpsVirtual)
 #define TTS_IS_HEAPTUPLE(slot) ((slot)->tts_ops == &TTSOpsHeapTuple)
 #define TTS_IS_MINIMALTUPLE(slot) ((slot)->tts_ops == &TTSOpsMinimalTuple)
-#define TTS_IS_BUFFERTUPLE(slot) ((slot)->tts_ops == &TTSOpsBufferHeapTuple)
+#define TTS_IS_BUFFERTUPLE(slot) ((slot)->tts_ops == &TTSOpsBufferHeapTuple || \
+								  (slot)->tts_ops == &TTSOpsBatchBufferHeapTuple)
 
 
 /*
@@ -308,6 +310,34 @@ typedef struct BufferHeapTupleTableSlot
 	 */
 	Buffer		buffer;			/* tuple's buffer, or InvalidBuffer */
 } BufferHeapTupleTableSlot;
+
+/*
+ * BatchBufferHeapTupleTableSlot -- a batch of heap tuples residing in a
+ * pinned buffer page.
+ *
+ * Extends BufferHeapTupleTableSlot to hold a pointer to an array of
+ * pre-built HeapTupleData entries living in HeapScanDesc.rs_vistuples[].
+ * The tuple headers' t_data pointers reference the pinned buffer page
+ * and remain valid for the lifetime of the pin.  No data is copied.
+ *
+ * When consumed tuple-at-a-time by the existing executor machinery,
+ * the batch_next slot ops callback points the underlying
+ * BufferHeapTupleTableSlot at successive tuples in the array.
+ * Standard slot_getsomeattrs() then deforms the current tuple
+ * through the normal heap deform path.
+ *
+ * Other table AMs that support batching would define their own batch
+ * slot type with AM-specific internals and TupleTableSlotOps.
+ */
+typedef struct BatchBufferHeapTupleTableSlot
+{
+	BufferHeapTupleTableSlot base;
+
+	HeapTupleData  *tuples;		/* points into HeapScanDesc->rs_vistuples[] */
+	int				ntuples;	/* number of tuples in this batch */
+	int				cindex;		/* index of last-returned tuple, or -1 if
+								 * none returned from this batch yet */
+} BatchBufferHeapTupleTableSlot;
 
 typedef struct MinimalTupleTableSlot
 {
@@ -360,6 +390,11 @@ extern TupleTableSlot *ExecStoreBufferHeapTuple(HeapTuple tuple,
 extern TupleTableSlot *ExecStorePinnedBufferHeapTuple(HeapTuple tuple,
 													  TupleTableSlot *slot,
 													  Buffer buffer);
+extern void ExecStoreBatchBufferHeapTuples(HeapTupleData *tuples,
+										   int ntuples,
+										   Buffer buffer,
+										   ScanDirection direction,
+										   TupleTableSlot *slot);
 extern TupleTableSlot *ExecStoreMinimalTuple(MinimalTuple mtup,
 											 TupleTableSlot *slot,
 											 bool shouldFree);

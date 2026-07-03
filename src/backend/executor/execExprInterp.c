@@ -2459,6 +2459,24 @@ CheckOpSlotCompatibility(ExprEvalStep *op, TupleTableSlot *slot)
 		return;
 
 	/*
+	 * The batch buffer-heap slot deforms exactly like a buffer-heap slot:
+	 * it shares getsomeattrs/getsysattr with TTSOpsBufferHeapTuple and only
+	 * differs in batch iteration, clear and materialize.  Treat the two as
+	 * interchangeable for deform compatibility in either direction -- an
+	 * expression compiled for one may run against the other (e.g. a scan
+	 * expression compiled for the batch slot re-run under EPQ against a
+	 * plain buffer-heap slot, or vice versa).
+	 */
+	if (slot->tts_ops == &TTSOpsBatchBufferHeapTuple &&
+		(op->d.fetch.kind == &TTSOpsBufferHeapTuple ||
+		 op->d.fetch.kind == &TTSOpsHeapTuple))
+		return;
+	if (op->d.fetch.kind == &TTSOpsBatchBufferHeapTuple &&
+		(slot->tts_ops == &TTSOpsBufferHeapTuple ||
+		 slot->tts_ops == &TTSOpsHeapTuple))
+		return;
+
+	/*
 	 * At the moment we consider it OK if a virtual slot is used instead of a
 	 * specific type of slot, as a virtual slot never needs to be deformed.
 	 */

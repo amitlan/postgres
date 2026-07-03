@@ -85,11 +85,22 @@ SeqNext(SeqScanState *node)
 	}
 
 	/*
-	 * get the next tuple from the table
+	 * Serve the next tuple from the current batch held in the scan slot.
+	 * When the batch is exhausted, ask the AM for the next one.  The AM
+	 * builds the batch honoring scan direction and sets the slot's batch
+	 * cursor accordingly, so this single path serves forward and backward
+	 * scans alike.
 	 */
-	if (table_scan_getnextslot(scandesc, direction, slot))
+	if (slot_batch_next(slot, direction))
 		return slot;
-	return NULL;
+
+	ExecClearTuple(slot);
+
+	if (!table_scan_getnextbatch(scandesc, direction, slot))
+		return slot;
+
+	slot_batch_next(slot, direction);
+	return slot;
 }
 
 /*
@@ -220,6 +231,7 @@ SeqScanState *
 ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 {
 	SeqScanState *scanstate;
+	Relation	rel;
 
 	/*
 	 * Once upon a time it was possible to have an outerPlan of a SeqScan, but
@@ -245,15 +257,15 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	/*
 	 * open the scan relation
 	 */
-	scanstate->ss.ss_currentRelation =
+	scanstate->ss.ss_currentRelation = rel =
 		ExecOpenScanRelation(estate,
 							 node->scan.scanrelid,
 							 eflags);
 
 	/* and create slot with the appropriate rowtype */
 	ExecInitScanTupleSlot(estate, &scanstate->ss,
-						  RelationGetDescr(scanstate->ss.ss_currentRelation),
-						  table_slot_callbacks(scanstate->ss.ss_currentRelation),
+						  RelationGetDescr(rel),
+						  table_slot_batch_callbacks(rel),
 						  TTS_FLAG_OBEYS_NOT_NULL_CONSTRAINTS);
 
 	/*
