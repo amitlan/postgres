@@ -2908,6 +2908,14 @@ ri_FastPathBatchAdd(RI_ConstraintInfo *riinfo,
 	}
 
 	/*
+	 * A batch is filled and flushed within a single trigger-firing cycle, so
+	 * every row added to an entry comes from the subtransaction that created
+	 * it.  AtEOSubXact_RI() relies on this to identify an aborting
+	 * subtransaction's entries by the subid stamped at entry creation.
+	 */
+	Assert(fpentry->subid == GetCurrentSubTransactionId());
+
+	/*
 	 * Buffer the row.  A full batch is flushed below and re-entry is handled
 	 * above, so there is always room here; the bounds check just guards the
 	 * array write.
