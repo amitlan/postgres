@@ -2763,3 +2763,47 @@ INSERT INTO fp_subxact_fk VALUES (999, 'bad'), (0, 'boom'), (1, 'ok');
 DROP TRIGGER fp_subxact_trg ON fp_subxact_fk;
 DROP FUNCTION fp_abort_subxact();
 DROP TABLE fp_subxact_fk, fp_subxact_pk;
+
+-- Re-entrant fast-path check inside a committing subtransaction.  An AFTER
+-- trigger on one FK table runs FK DML on a second FK table inside a PL/pgSQL
+-- BEGIN ... EXCEPTION block, so the inner check batches in its own
+-- trigger-firing cycle nested in the outer check's.  The inner cycle must
+-- register its own end-of-batch callback and flush -- otherwise its FK check
+-- is skipped (an orphan commits) and its relations leak.
+CREATE TABLE fp_inner_pk (id int PRIMARY KEY);
+INSERT INTO fp_inner_pk VALUES (1);
+CREATE TABLE fp_inner_fk (a int REFERENCES fp_inner_pk (id));
+CREATE TABLE fp_outer_pk (id int PRIMARY KEY);
+INSERT INTO fp_outer_pk SELECT g FROM generate_series(1, 64) g;
+CREATE FUNCTION fp_reentry_subxact() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.a = 32 THEN
+        BEGIN
+            INSERT INTO fp_inner_fk VALUES (999);  -- violates; must be caught
+        EXCEPTION WHEN foreign_key_violation THEN
+            NULL;
+        END;
+    END IF;
+    RETURN NEW;
+END$$;
+CREATE TABLE fp_outer_fk (a int REFERENCES fp_outer_pk (id));
+CREATE TRIGGER fp_reentry_subxact_trg AFTER INSERT ON fp_outer_fk
+    FOR EACH ROW EXECUTE FUNCTION fp_reentry_subxact();
+INSERT INTO fp_outer_fk SELECT g FROM generate_series(1, 64) g;
+SELECT count(*) AS outer_rows FROM fp_outer_fk;   -- 64, outer batch intact
+SELECT count(*) AS inner_rows FROM fp_inner_fk;   -- 0, inner check caught
+DROP TRIGGER fp_reentry_subxact_trg ON fp_outer_fk;
+DROP FUNCTION fp_reentry_subxact();
+DROP TABLE fp_outer_fk, fp_outer_pk, fp_inner_fk, fp_inner_pk;
+
+-- Deferred FK check fires at commit (query depth -1); its batch must still get
+-- a callback registered and flushed.
+CREATE TABLE fp_deferred_pk (id int PRIMARY KEY);
+CREATE TABLE fp_deferred_fk (a int REFERENCES fp_deferred_pk (id)
+    DEFERRABLE INITIALLY DEFERRED);
+BEGIN;
+INSERT INTO fp_deferred_fk VALUES (1);
+INSERT INTO fp_deferred_pk VALUES (1);
+COMMIT;
+SELECT count(*) AS deferred_rows FROM fp_deferred_fk;  -- 1, check passed at commit
+DROP TABLE fp_deferred_fk, fp_deferred_pk;
