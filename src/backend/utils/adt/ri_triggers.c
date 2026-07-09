@@ -255,6 +255,24 @@ typedef struct RI_FastPathEntry
 	 * re-entrant ri_FastPathBatchAdd from user code run during the flush.
 	 */
 	bool		flushing;
+
+	/*
+	 * Subtransaction whose resource owner opened this entry's relations.
+	 * AtEOSubXact_RI() drops only entries matching an aborting subxact, so a
+	 * subxact abort during outer-level trigger firing leaves the outer batch
+	 * intact.
+	 */
+	SubTransactionId subid;
+
+	/*
+	 * After-trigger query depth (firing cycle) that created this entry.  Its
+	 * ri_FastPathEndBatch() callback is registered in that cycle's callback
+	 * list and fires at that cycle's AfterTriggerEndQuery(), so the callback
+	 * acts only on entries matching its own depth -- a nested cycle must not
+	 * flush an outer cycle's still-accumulating batch (wrong snapshot; cf.
+	 * commit 0e47bb5).
+	 */
+	int			query_depth;
 } RI_FastPathEntry;
 
 /*
@@ -266,7 +284,6 @@ static HTAB *ri_compare_cache = NULL;
 static dclist_head ri_constraint_cache_valid_list;
 
 static HTAB *ri_fastpath_cache = NULL;
-static bool ri_fastpath_callback_registered = false;
 static bool ri_fastpath_flushing = false;
 
 /*
@@ -353,7 +370,7 @@ pg_noreturn static void ri_ReportViolation(const RI_ConstraintInfo *riinfo,
 static RI_FastPathEntry *ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo,
 											 Relation fk_rel);
 static void ri_FastPathEndBatch(void *arg);
-static void ri_FastPathTeardown(void);
+static void ri_FastPathTeardown(int depth);
 
 
 /*
@@ -470,9 +487,7 @@ RI_FKey_check(TriggerData *trigdata)
 	 */
 	if (ri_fastpath_is_applicable(riinfo))
 	{
-		if (AfterTriggerIsActive() &&
-			GetCurrentTransactionNestLevel() == 1 &&
-			!ri_fastpath_flushing)
+		if (AfterTriggerIsActive() && !ri_fastpath_flushing)
 		{
 			/* Batched path: buffer and probe in groups */
 			ri_FastPathBatchAdd(riinfo, fk_rel, newslot);
@@ -480,14 +495,10 @@ RI_FKey_check(TriggerData *trigdata)
 		else
 		{
 			/*
-			 * Per-row path, used when batching is not safe or not applicable:
+			 * Per-row path, used when batching is not applicable:
 			 *
 			 * - ALTER TABLE validation, where no after-trigger firing is
 			 * active;
-			 *
-			 * - any FK check inside a subtransaction, since the batch cache
-			 * is confined to the top transaction level (it cannot be cleanly
-			 * unwound on subxact abort);
 			 *
 			 * - a re-entrant check from user cast/operator code running
 			 * during a batch flush, since adding a cache entry while
@@ -4195,6 +4206,7 @@ ri_FastPathEndBatch(void *arg)
 {
 	HASH_SEQ_STATUS status;
 	RI_FastPathEntry *entry;
+	int			my_depth = (int) (intptr_t) arg;
 
 	if (ri_fastpath_cache == NULL)
 		return;
@@ -4219,7 +4231,8 @@ ri_FastPathEndBatch(void *arg)
 		hash_seq_init(&status, ri_fastpath_cache);
 		while ((entry = hash_seq_search(&status)) != NULL)
 		{
-			if (entry->batch_count > 0)
+			/* Flush only entries created in the cycle now ending. */
+			if (entry->query_depth == my_depth && entry->batch_count > 0)
 			{
 				Relation	fk_rel = table_open(entry->fk_relid, AccessShareLock);
 				RI_ConstraintInfo *riinfo = ri_LoadConstraintInfo(entry->conoid);
@@ -4235,17 +4248,27 @@ ri_FastPathEndBatch(void *arg)
 	}
 	PG_END_TRY();
 
-	ri_FastPathTeardown();
+	/*
+	 * Release this cycle's entries and remove them from the cache; leave
+	 * outer cycles' entries for their own callbacks.  Destroy the cache once
+	 * empty.
+	 */
+	/* Release and remove this cycle's entries; drop the cache once empty. */
+	ri_FastPathTeardown(my_depth);
 }
 
 /*
  * ri_FastPathTeardown
- *		Tear down all cached fast-path state.
+ *		Release and remove the cached entries of one firing cycle, and drop
+ *		the cache once it holds no more entries.
  *
- * Called from ri_FastPathEndBatch() after flushing any remaining rows.
+ * Called from ri_FastPathEndBatch() with the depth of the cycle that is
+ * ending: it releases only that cycle's entries, leaving an outer cycle's
+ * still-live entries for their own callbacks.  The cache (and its static
+ * pointer) go away once the last entry is removed.
  */
 static void
-ri_FastPathTeardown(void)
+ri_FastPathTeardown(int depth)
 {
 	HASH_SEQ_STATUS status;
 	RI_FastPathEntry *entry;
@@ -4256,6 +4279,8 @@ ri_FastPathTeardown(void)
 	hash_seq_init(&status, ri_fastpath_cache);
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
+		if (entry->query_depth != depth)
+			continue;
 		if (entry->idx_rel)
 			index_close(entry->idx_rel, NoLock);
 		if (entry->pk_rel)
@@ -4266,11 +4291,15 @@ ri_FastPathTeardown(void)
 			ExecDropSingleTupleTableSlot(entry->fk_slot);
 		if (entry->flush_cxt)
 			MemoryContextDelete(entry->flush_cxt);
+		hash_search(ri_fastpath_cache, &entry->conoid, HASH_REMOVE, NULL);
 	}
 
-	hash_destroy(ri_fastpath_cache);
-	ri_fastpath_cache = NULL;
-	ri_fastpath_callback_registered = false;
+	if (hash_get_num_entries(ri_fastpath_cache) == 0)
+	{
+		hash_destroy(ri_fastpath_cache);
+		ri_fastpath_cache = NULL;
+		ri_fastpath_flushing = false;
+	}
 }
 
 /*
@@ -4316,7 +4345,6 @@ AtEOXact_RI(bool isCommit)
 	 * memory-context reset; here we only drop the references to it.
 	 */
 	ri_fastpath_cache = NULL;
-	ri_fastpath_callback_registered = false;
 
 	/*
 	 * Also clear the in-flush flag.  ri_FastPathEndBatch() already clears it
@@ -4325,6 +4353,90 @@ AtEOXact_RI(bool isCommit)
 	 * set.
 	 */
 	ri_fastpath_flushing = false;
+}
+
+/*
+ * AtEOSubXact_RI
+ *		Reset fast-path batching state at subtransaction end.
+ *
+ * Called from CommitSubTransaction() with isCommit true and from
+ * AbortSubTransaction() with isCommit false, in both cases after the
+ * subtransaction's ResourceOwnerRelease().
+ *
+ * The fast-path cache is created and torn down within a single trigger-firing
+ * batch (ri_FastPathEndBatch(), an AfterTriggerBatchCallback), so at a normal
+ * subtransaction boundary it is already empty and this is a no-op.
+ *
+ * The exception is a batch flush that errors out partway and is caught by this
+ * subtransaction (e.g. a PL/pgSQL EXCEPTION block): ri_FastPathEndBatch()'s
+ * teardown was skipped, so the cache still points at entries whose relations
+ * were opened under this subtransaction's resource owner.  That owner has just
+ * released those relations (this runs after ResourceOwnerRelease()), so the
+ * entries are now stale.  Drop the cache so a later statement in the parent
+ * doesn't reuse it.  Like AtEOXact_RI(), this touches only backend-local state
+ * and the hash table's own memory -- no relations, locks or buffers, which the
+ * ResourceOwner already handled.  The entries' slots and flush contexts live in
+ * TopTransactionContext and are freed by its end-of-transaction reset.
+ */
+void
+AtEOSubXact_RI(bool isCommit, SubTransactionId mySubid,
+			   SubTransactionId parentSubid)
+{
+	HASH_SEQ_STATUS status;
+	RI_FastPathEntry *entry;
+	long		remaining;
+
+	if (ri_fastpath_cache == NULL)
+		return;
+
+	/*
+	 * Drop only entries whose relations were opened under the ending
+	 * subtransaction's resource owner.  On abort that owner has just released
+	 * those relations (this runs after ResourceOwnerRelease()), so the entry
+	 * is stale and must go, but entries opened by an outer level -- e.g. an
+	 * outer statement's batch, mid-build when an inner subxact fired and
+	 * aborted -- must be left untouched.
+	 *
+	 * On commit the entry, if any, would have been flushed and torn down at
+	 * the end of its statement (ri_FastPathEndBatch()); reaching here with a
+	 * matching entry is not expected, but reassign it to the parent so it is
+	 * still cleaned up, rather than leaving it under a vanished subxact id.
+	 *
+	 * We touch no relations, locks or buffers -- the ResourceOwner handled
+	 * those.  The entry's slots and flush context are memory in
+	 * TopTransactionContext, freed at end-of-transaction reset; we only
+	 * remove the hash entry so it is not reused or torn down again.
+	 */
+	hash_seq_init(&status, ri_fastpath_cache);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{
+		if (entry->subid != mySubid)
+			continue;
+
+		if (isCommit)
+		{
+			/*
+			 * A committing subxact's entry should already have been flushed
+			 * and torn down at its statement's end (ri_FastPathEndBatch()),
+			 * so we don't expect to find one here.  If we do, reassign it to
+			 * the parent so it's still cleaned up rather than left under a
+			 * subxact id that no longer exists.
+			 */
+			Assert(false);
+			entry->subid = parentSubid;
+		}
+		else
+			hash_search(ri_fastpath_cache, &entry->conoid, HASH_REMOVE, NULL);
+	}
+
+	/* If that emptied the cache, drop it so the next batch starts clean. */
+	remaining = hash_get_num_entries(ri_fastpath_cache);
+	if (remaining == 0)
+	{
+		hash_destroy(ri_fastpath_cache);
+		ri_fastpath_cache = NULL;
+		ri_fastpath_flushing = false;
+	}
 }
 
 /*
@@ -4401,15 +4513,50 @@ ri_FastPathGetEntry(const RI_ConstraintInfo *riinfo, Relation fk_rel)
 												 ALLOCSET_SMALL_SIZES);
 		MemoryContextSwitchTo(oldcxt);
 
-		/* Ensure cleanup at end of this trigger-firing batch */
-		if (!ri_fastpath_callback_registered)
+		/*
+		 * Ensure ri_FastPathEndBatch() is registered for THIS firing cycle.
+		 * RegisterAfterTriggerBatchCallback() appends to the current
+		 * after-trigger query depth's callback list and fires at that depth's
+		 * AfterTriggerEndQuery(), so a nested cycle needs its own
+		 * registration; a single global latch would leave the nested cycle's
+		 * list empty and its batch unflushed.  Pass the depth as the callback
+		 * arg so the callback flushes only its own cycle's entries.
+		 */
 		{
-			RegisterAfterTriggerBatchCallback(ri_FastPathEndBatch, NULL);
-			ri_fastpath_callback_registered = true;
+			int			cur_depth = AfterTriggerCurrentQueryDepth();
+			bool		depth_registered = false;
+			HASH_SEQ_STATUS reg_status;
+			RI_FastPathEntry *other;
+
+			/*
+			 * Register the callback once per firing cycle (query depth),
+			 * including the deferred cycle at depth -1.  Rather than track
+			 * registered depths separately, check whether any other cache
+			 * entry was already created at this depth: if so, its creation
+			 * already registered the callback for this cycle.  (The
+			 * just-created entry is already in the hash, so skip it by
+			 * conoid.)
+			 */
+			hash_seq_init(&reg_status, ri_fastpath_cache);
+			while ((other = hash_seq_search(&reg_status)) != NULL)
+			{
+				if (other != entry && other->query_depth == cur_depth)
+				{
+					depth_registered = true;
+					hash_seq_term(&reg_status);
+					break;
+				}
+			}
+
+			if (!depth_registered)
+				RegisterAfterTriggerBatchCallback(ri_FastPathEndBatch,
+												  (void *) (intptr_t) cur_depth);
+			entry->query_depth = cur_depth;
 		}
 
 		entry->flushing = false;
 		entry->batch_count = 0;
+		entry->subid = GetCurrentSubTransactionId();
 	}
 
 	return entry;
