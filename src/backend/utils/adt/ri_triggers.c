@@ -159,6 +159,15 @@ typedef struct FastPathMeta
 	Oid			subtypes[RI_MAX_NUMKEYS];
 	int			strats[RI_MAX_NUMKEYS];
 	AttrNumber	index_attnos[RI_MAX_NUMKEYS];	/* index column positions */
+
+	/*
+	 * fn_mcxt for the cached FmgrInfos above.  Cast and equality functions
+	 * (e.g. record_eq()) use fn_mcxt as per-call scratch space; pointing it at
+	 * a dedicated context that ri_populate_fastpath_metadata()'s caller resets
+	 * keeps that scratch from accumulating for the session, as it would if
+	 * fn_mcxt were TopMemoryContext.
+	 */
+	MemoryContext scratch_cxt;
 } FastPathMeta;
 
 /*
@@ -2595,6 +2604,7 @@ InvalidateConstraintCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 			riinfo->valid = false;
 			if (riinfo->fpmeta)
 			{
+				MemoryContextDelete(riinfo->fpmeta->scratch_cxt);
 				pfree(riinfo->fpmeta);
 				riinfo->fpmeta = NULL;
 			}
@@ -3032,6 +3042,13 @@ ri_FastPathBatchFlush(RI_FastPathEntry *fpentry, Relation fk_rel,
 	}
 
 	MemoryContextReset(fpentry->flush_cxt);
+
+	/*
+	 * Reset the fn_mcxt scratch used by the cached cast/equality FmgrInfos, so
+	 * anything they left behind this flush does not accumulate.
+	 */
+	MemoryContextReset(riinfo->fpmeta->scratch_cxt);
+
 	MemoryContextSwitchTo(oldcxt);
 }
 
@@ -3543,6 +3560,17 @@ ri_populate_fastpath_metadata(RI_ConstraintInfo *riinfo,
 	Assert(riinfo != NULL && riinfo->valid);
 
 	fpmeta = palloc_object(FastPathMeta);
+
+	/*
+	 * Dedicated scratch context for the cached FmgrInfos' fn_mcxt.  It lives
+	 * as long as fpmeta (a child of TopMemoryContext) but is reset once per
+	 * flush by the caller, so scratch left behind by cast/equality functions
+	 * does not accumulate for the session.
+	 */
+	fpmeta->scratch_cxt = AllocSetContextCreate(TopMemoryContext,
+												"RI fast-path finfo scratch",
+												ALLOCSET_SMALL_SIZES);
+
 	for (int i = 0; i < riinfo->nkeys; i++)
 	{
 		Oid			eq_opr = riinfo->pf_eq_oprs[i];
@@ -3568,9 +3596,9 @@ ri_populate_fastpath_metadata(RI_ConstraintInfo *riinfo,
 		fpmeta->index_attnos[i] = idx_col + 1;
 
 		fmgr_info_copy(&fpmeta->cast_func_finfo[i], &entry->cast_func_finfo,
-					   CurrentMemoryContext);
+					   fpmeta->scratch_cxt);
 		fmgr_info_copy(&fpmeta->eq_opr_finfo[i], &entry->eq_opr_finfo,
-					   CurrentMemoryContext);
+					   fpmeta->scratch_cxt);
 		fpmeta->regops[i] = get_opcode(eq_opr);
 
 		get_op_opfamily_properties(eq_opr,
