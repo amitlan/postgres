@@ -2882,7 +2882,6 @@ ri_FastPathCheck(RI_ConstraintInfo *riinfo,
 	 * ri_PerformCheck().
 	 */
 	CommandCounterIncrement();
-	snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
 	INJECTION_POINT("ri-before-pk-lock", NULL);
 
@@ -2892,6 +2891,19 @@ ri_FastPathCheck(RI_ConstraintInfo *riinfo,
 	riinfo = ri_LoadConstraintInfo(riinfo->constraint_id);
 
 	idx_rel = index_open(riinfo->conindid, AccessShareLock);
+
+	/*
+	 * Only now take the snapshot the scan will use.  Acquiring it before
+	 * table_open() would let an unbounded amount of time pass while we wait
+	 * for the lock, during which another transaction can commit the very row
+	 * we are about to look for.  The scan would not see it and the check
+	 * would report a violation for a key that exists.
+	 *
+	 * The SPI path does not have this problem: for this check it passes
+	 * InvalidSnapshot, so SPI takes the snapshot when the plan is executed,
+	 * after the executor has taken its locks.
+	 */
+	snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
 	slot = table_slot_create(pk_rel, NULL);
 
