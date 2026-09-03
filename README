@@ -1,0 +1,158 @@
+Reproducers for the batched RI fast-path FK check
+=================================================
+
+This directory holds reproducers for bugs found while reviewing the batched
+fast-path foreign-key check added by
+
+    b7b27eb41a5  Optimize fast-path FK checks with batched index probes
+
+and its follow-ups (5c54c3ed1b9, 0e47bb5fbee, 4113873a5ab, plus the
+"cross-type", "per firing cycle" and "per subtransaction" fixes).
+
+The scripts live in `repro/` rather than `t/`, and this directory is not
+listed in `src/test/modules/Makefile` or `meson.build`, because every
+reproducer either crashes the backend or asserts on behaviour that is
+currently wrong.  Run one explicitly with:
+
+    make -C src/test/modules/ri_fastpath_repro check \
+        PROVE_TESTS=repro/001_setconstraints_subxact.pl
+
+(`configure --enable-tap-tests` is required; `--enable-cassert` changes the
+symptom of issues 1 and 3 from a data-structure corruption into an assertion
+failure, and both variants are accepted by the scripts.)
+
+Each test is written so that it *passes* once the corresponding bug is fixed.
+
+
+Background
+----------
+
+`RI_FKey_check()` no longer probes the PK index per row.  When after-trigger
+firing is active it buffers the FK row in an `RI_FastPathEntry`, keyed by
+`{constraint oid, after-trigger query depth}`, and registers
+`ri_FastPathEndBatch()` through `RegisterAfterTriggerBatchCallback()`.  The
+batch is probed when it reaches `RI_FASTPATH_BATCH_SIZE` (64) rows, or when
+the callback fires at the end of the firing cycle.
+
+`RegisterAfterTriggerBatchCallback()` puts the callback on
+`afterTriggers.query_stack[query_depth].batch_callbacks` when
+`query_depth >= 0`, and on the transaction-wide
+`afterTriggers.batch_callbacks` otherwise.  Those two lists are fired by
+different callers:
+
+    AfterTriggerEndQuery()      fires query_stack[query_depth].batch_callbacks
+    AfterTriggerFireDeferred()  fires afterTriggers.batch_callbacks
+    AfterTriggerSetState()      fires afterTriggers.batch_callbacks
+
+The mismatch in the last line is the root of issue 1 and issue 3.
+
+
+001_setconstraints_subxact.pl -- SET CONSTRAINTS does not flush the batch
+-------------------------------------------------------------------------
+
+`SET CONSTRAINTS ALL IMMEDIATE` fires the pending deferred triggers and then
+fires only the *transaction-wide* batch-callback list.  But
+`AfterTriggerSetState()` can perfectly well run while an after-trigger query
+level is open -- `AfterTriggerBeginQuery()` is called for every
+INSERT/UPDATE/DELETE/MERGE (execMain.c) and for COPY FROM -- and then
+`RegisterAfterTriggerBatchCallback()` has put the RI callback on the
+*query-level* list instead.  The batch is therefore still buffered when
+`SET CONSTRAINTS` returns.
+
+Part 1 shows the visible consequence: the FK violation is not reported by
+`SET CONSTRAINTS ALL IMMEDIATE`, but later, by whatever statement happens to
+end that query level.
+
+Part 2 shows the memory-safety consequence.  When the `SET CONSTRAINTS` runs
+inside a subtransaction that *commits* (a PL/pgSQL `BEGIN ... EXCEPTION`
+block), the entry outlives the subtransaction it was created in, which the
+code explicitly assumes cannot happen:
+
+    /* ri_triggers.c, ri_FastPathBatchAdd() */
+    Assert(fpentry->subid == GetCurrentSubTransactionId());
+
+    /* ri_triggers.c, AtEOSubXact_RI(), isCommit branch */
+    Assert(false);
+
+The subtransaction's ResourceOwner has already released `pk_rel`, `idx_rel`
+and the two slots' TupleDescs by then, so the entry is left holding relcache
+pointers that nothing owns any more:
+
+    WARNING:  resource was not closed: relation "pk_pkey"
+    WARNING:  resource was not closed: relation "pk"
+    WARNING:  resource was not closed: TupleDesc 0x... (16427,-1)
+    WARNING:  resource was not closed: TupleDesc 0x... (16421,-1)
+    ERROR:  relcache reference 0x... is not owned by resource owner Portal
+
+and with `--enable-cassert`:
+
+    TRAP: failed Assert("false"), File: "ri_triggers.c", Line: 4543
+
+
+002_trigger_order.pl -- FK check deferred past later AFTER triggers
+-------------------------------------------------------------------
+
+An immediate FK check used to run inside the RI trigger, i.e. interleaved
+with the table's other AFTER ROW triggers in trigger-name order.  Batching
+moves the actual probe to the end of the whole firing cycle, so an AFTER ROW
+trigger that sorts *after* the `RI_ConstraintTrigger_c_NNN` trigger can now
+satisfy the constraint retroactively.
+
+The test inserts a row referencing a nonexistent key while an AFTER ROW
+trigger inserts that key into the PK table.  With the batched fast path the
+INSERT succeeds; the same schema with a partitioned PK table -- which
+`ri_fastpath_is_applicable()` sends down the SPI path -- rejects it, as does
+unpatched PostgreSQL.
+
+This is a silent change to when a foreign key is enforced, not just a
+different error message.
+
+
+003_reentrant_flush.pl -- re-entrant batch flush (use-after-free)
+-----------------------------------------------------------------
+
+`ri_FastPathEndBatch()` guards against re-entry with the file-static
+`ri_fastpath_flushing`, which makes a nested `RI_FKey_check()` take the
+per-row path instead of touching the cache that is being iterated.  That
+guard only covers re-entry through `RI_FKey_check()`.  It does not cover
+re-entry through the callback list itself: `SET CONSTRAINTS` fires
+`afterTriggers.batch_callbacks` unconditionally, so user code invoked *by the
+flush* can call `ri_FastPathEndBatch()` again, on the very entry that is
+mid-flush.
+
+The reproducer uses a user-defined implicit cast function (the flush calls it
+from `build_index_scankeys()`/`ri_FastPathFlushArray()`, which is exactly the
+re-entrancy the code comments anticipate) that runs
+`SET CONSTRAINTS ALL IMMEDIATE`:
+
+    AfterTriggerFireDeferred
+      FireAfterTriggerBatchCallbacks
+        ri_FastPathEndBatch            <- ri_fastpath_flushing = true
+          ri_FastPathBatchFlush        <- fpentry->flushing = true
+            ri_FastPathFlushArray
+              FunctionCall3Coll        <- user cast function
+                ... SET CONSTRAINTS ALL IMMEDIATE
+                  AfterTriggerSetState
+                    FireAfterTriggerBatchCallbacks
+                      ri_FastPathEndBatch   <- re-entered
+
+The inner call re-flushes the same entry and then runs
+`ri_FastPathTeardown()`, which deletes `flush_cxt` (the buffered heap tuples
+and the search values point into it), drops both slots, closes `pk_rel` and
+`idx_rel` and removes the entry from the hash table -- all while the outer
+`ri_FastPathFlushArray()` is still using them.  Observed symptoms:
+
+  * cassert build: `TRAP: failed Assert("!ri_fastpath_flushing"), File:
+    "ri_triggers.c", Line: 4346`
+  * regular build: `client backend was terminated by signal 11: Segmentation
+    fault`
+  * if the cast function does not stop after the first re-entry, the
+    re-entrant flush re-runs the cast function, which recurses until
+    `ERROR: too many active hash_seq_search scans, cannot start one on "RI
+    fast-path cache"` and then `PANIC: ERRORDATA_STACK_SIZE exceeded`, which
+    takes down the whole cluster.
+
+The inner `FireAfterTriggerBatchCallbacks()` also clears
+`afterTriggers.firing_batch_callbacks` on the way out, defeating the
+`Assert(!afterTriggers.firing_batch_callbacks)` in
+`RegisterAfterTriggerBatchCallback()` for the rest of the outer flush.
