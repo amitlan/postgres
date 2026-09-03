@@ -2526,10 +2526,11 @@ InvalidateConstraintCacheCallBack(Datum arg, SysCacheIdentifier cacheid,
 			/*
 			 * Detach any fast-path metadata so that the next check
 			 * repopulates it, but do not free it here.  ri_FastPathCheck()
-			 * and the flush routines copy riinfo->fpmeta into a local (and
-			 * take FmgrInfo pointers into it) and then run index scans, tuple
-			 * locking, and user-supplied cast and equality functions, all of
-			 * which can accept invalidation messages and reach this callback.
+			 * copies riinfo->fpmeta into a local (and takes FmgrInfo pointers
+			 * into it) and then run index scans, tuple locking, and
+			 * user-supplied cast and equality functions, all of which can
+			 * accept invalidation messages and reach this callback.
+			 *
 			 * Freeing now would leave those callers reading freed memory.
 			 * Queue it instead; AtEOXact_RI() releases it once no RI check
 			 * can be running.
@@ -2971,12 +2972,11 @@ ri_fastpath_is_applicable(const RI_ConstraintInfo *riinfo)
 		return false;
 
 	/*
-	 * The fast path probes the referenced index directly and, for
-	 * single-column keys, uses SK_SEARCHARRAY.  A foreign key's referenced
-	 * index need not be a primary key; transformFkeyCheckAttrs() accepts any
-	 * unique index, so an out-of-tree amcanunique access method could reach
-	 * here.  Restrict the fast path to btree, which is what the direct probe
-	 * and SK_SEARCHARRAY assume; other access methods fall back to SPI.
+	 * The fast path probes the referenced index directly.  A foreign key's
+	 * referenced index need not be a primary key; transformFkeyCheckAttrs()
+	 * accepts any unique index, so an out-of-tree amcanunique access method
+	 * could reach here.  Restrict the fast path to btree; other access
+	 * methods fall back to SPI.
 	 */
 	if (!riinfo->pk_index_is_btree)
 		return false;
