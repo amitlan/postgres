@@ -232,6 +232,15 @@ static dclist_head ri_constraint_cache_valid_list;
 static FastPathMeta *ri_fpmeta_dead_list = NULL;
 
 /*
+ * SPI plans found invalid by ri_FetchPreparedPlan() and removed from
+ * ri_query_cache, but possibly still being executed by an RI check further
+ * up the stack.  Allocated in TopMemoryContext and released by
+ * AtEOXact_RI(), where no such execution can be in progress.  See
+ * ri_FetchPreparedPlan().
+ */
+static List *ri_plan_dead_list = NIL;
+
+/*
  * Local function prototypes
  */
 static bool ri_Check_Pk_Match(Relation pk_rel, Relation fk_rel,
@@ -3689,12 +3698,27 @@ ri_FetchPreparedPlan(RI_QueryKey *key)
 		return plan;
 
 	/*
-	 * Otherwise we might as well flush the cached plan now, to free a little
-	 * memory space before we make a new one.
+	 * Otherwise, detach the stale plan from the entry so that the caller's
+	 * replacement can be hashed under the same key.
+	 *
+	 * We must not SPI_freeplan() it here, though.  An RI check further up the
+	 * stack may still be executing this very plan: the check's query can run
+	 * user-defined code (a cast function applied to the FK values, say) whose
+	 * DML fires another RI check for the same constraint, and hence the same
+	 * query key, before the outer SPI_execute_snapshot() returns.  If the
+	 * plan has been invalidated in between, freeing it here would pull the
+	 * SPIPlan out from under the outer _SPI_execute_plan().  So queue it for
+	 * release at end of transaction instead, where no RI check can be in
+	 * progress.
 	 */
 	entry->plan = NULL;
 	if (plan)
-		SPI_freeplan(plan);
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+		ri_plan_dead_list = lappend(ri_plan_dead_list, plan);
+		MemoryContextSwitchTo(oldcxt);
+	}
 
 	return NULL;
 }
@@ -3996,20 +4020,25 @@ RI_FKey_trigger_type(Oid tgfoid)
  * AtEOXact_RI
  *		End-of-transaction cleanup for referential integrity.
  *
- * Currently this only releases fast-path metadata detached during the
- * transaction.  InvalidateConstraintCacheCallBack() cannot free a
- * FastPathMeta when it detaches one, because an RI check further up the
- * stack may still hold a pointer into it.  It queues them on
- * ri_fpmeta_dead_list instead, and we release them here, where no such
- * reference can exist.  isCommit is accepted for consistency with the
- * other AtEOXact_* routines but is not used: the release is the same on
- * the commit and the abort path.
+ * This releases objects that were detached from the RI caches during the
+ * transaction but could not be freed on the spot, because an RI check
+ * further up the stack might still have been using them:
+ *
+ * - fast-path metadata detached by InvalidateConstraintCacheCallBack(),
+ *   queued on ri_fpmeta_dead_list;
+ *
+ * - SPI plans found invalid by ri_FetchPreparedPlan(), queued on
+ *   ri_plan_dead_list.
+ *
+ * Here no RI check can be in progress, so both can be released.  isCommit
+ * is accepted for consistency with the other AtEOXact_* routines but is
+ * not used: the release is the same on the commit and the abort path.
  *
  * There is no AtEOSubXact_RI() counterpart.  Nothing here is scoped to a
- * subtransaction: a detached FastPathMeta stays reachable from the dead
- * list whichever subtransaction detached it, and a check holding a pointer
- * into one may be running at an outer level, so releasing at subtransaction
- * end would be unsafe as well as unnecessary.
+ * subtransaction: a detached object stays reachable from its dead list
+ * whichever subtransaction detached it, and a check using one may be
+ * running at an outer level, so releasing at subtransaction end would be
+ * unsafe as well as unnecessary.
  */
 void
 AtEOXact_RI(bool isCommit)
@@ -4020,5 +4049,23 @@ AtEOXact_RI(bool isCommit)
 
 		ri_fpmeta_dead_list = dead->next_dead;
 		pfree(dead);
+	}
+
+	if (ri_plan_dead_list != NIL)
+	{
+		List	   *plans = ri_plan_dead_list;
+		ListCell   *lc;
+
+		/*
+		 * Clear the static before freeing, so that an error while freeing a
+		 * plan (unexpected, but we may be on the abort path already) does not
+		 * leave a dangling pointer to a half-freed plan in the list.
+		 */
+		ri_plan_dead_list = NIL;
+
+		foreach(lc, plans)
+			SPI_freeplan((SPIPlanPtr) lfirst(lc));
+
+		list_free(plans);
 	}
 }
